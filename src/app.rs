@@ -1,6 +1,7 @@
 use crate::tmux::Status;
 
-/// Stable hash of pane content, used to detect changes between ticks.
+/// Hash of pane content for in-process change detection between ticks.
+/// Uses `DefaultHasher`; values are not stable across process restarts.
 pub fn content_hash(s: &str) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -12,7 +13,7 @@ pub fn content_hash(s: &str) -> u64 {
 pub fn compute_status(prev: Option<u64>, current: u64) -> Status {
     match prev {
         Some(p) if p != current => Status::Running,
-        _ => Status::Waiting,
+        _ => Status::Waiting, // first observation OR content unchanged
     }
 }
 
@@ -68,8 +69,10 @@ mod tests {
 
     #[test]
     fn expand_tilde_replaces_leading_home() {
-        std::env::set_var("HOME", "/home/u");
-        assert_eq!(expand_tilde("~/proj"), "/home/u/proj");
+        let Ok(home) = std::env::var("HOME") else {
+            return; // no HOME in this environment; nothing to assert
+        };
+        assert_eq!(expand_tilde("~/proj"), format!("{home}/proj"));
         assert_eq!(expand_tilde("/abs/path"), "/abs/path");
     }
 
