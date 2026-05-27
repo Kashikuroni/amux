@@ -64,7 +64,7 @@ pub enum Mode {
     List,
     Create(CreateForm),
     Rename(RenameForm),
-    ConfirmDelete,
+    ConfirmDelete(String),
     Help,
 }
 
@@ -146,7 +146,7 @@ impl App {
             Mode::List => ModeKind::List,
             Mode::Create(_) => ModeKind::Create,
             Mode::Rename(_) => ModeKind::Rename,
-            Mode::ConfirmDelete => ModeKind::ConfirmDelete,
+            Mode::ConfirmDelete(_) => ModeKind::ConfirmDelete,
             Mode::Help => ModeKind::Help,
         }
     }
@@ -174,8 +174,8 @@ impl App {
                 self.mode = Mode::Create(CreateForm::new(&self.config.default_agent));
             }
             KeyCode::Char('d') => {
-                if !self.sessions.is_empty() {
-                    self.mode = Mode::ConfirmDelete;
+                if let Some(name) = self.selected_name() {
+                    self.mode = Mode::ConfirmDelete(name);
                 }
             }
             KeyCode::Char('r') => {
@@ -195,13 +195,13 @@ impl App {
     }
 
     fn handle_confirm_key(&mut self, key: KeyEvent) -> Option<Action> {
+        let Mode::ConfirmDelete(name) = std::mem::replace(&mut self.mode, Mode::List) else {
+            return None;
+        };
         match key.code {
-            KeyCode::Char('y') => {
-                self.mode = Mode::List;
-                return self.selected_name().map(Action::Kill);
-            }
-            KeyCode::Char('n') | KeyCode::Esc => self.mode = Mode::List,
-            _ => {}
+            KeyCode::Char('y') => return Some(Action::Kill(name)),
+            KeyCode::Char('n') | KeyCode::Esc => {} // mode already reset to List
+            _ => self.mode = Mode::ConfirmDelete(name), // unknown key: stay in confirm
         }
         None
     }
@@ -415,7 +415,7 @@ mod tests {
     fn d_then_y_returns_kill() {
         let mut app = app_with_two_sessions();
         app.handle_key(key('d'));
-        assert!(matches!(app.mode, Mode::ConfirmDelete));
+        assert!(matches!(app.mode, Mode::ConfirmDelete(_)));
         let action = app.handle_key(key('y'));
         assert_eq!(action, Some(Action::Kill("a".into())));
         assert!(matches!(app.mode, Mode::List));
