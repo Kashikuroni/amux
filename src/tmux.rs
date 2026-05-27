@@ -78,7 +78,7 @@ pub fn in_tmux() -> bool {
     std::env::var_os("TMUX").is_some()
 }
 
-/// Lists managed sessions. "No server running" is treated as an empty list.
+/// Lists managed sessions. Any tmux failure (e.g. no server running) is treated as an empty list.
 pub fn list_sessions() -> io::Result<Vec<Session>> {
     let out = Command::new("tmux")
         .args(["list-sessions", "-F", LIST_FORMAT])
@@ -92,8 +92,14 @@ pub fn list_sessions() -> io::Result<Vec<Session>> {
 /// Creates a detached session running `agent` in `dir` and tags it as managed.
 pub fn new_session(name: &str, dir: &str, agent: &str) -> io::Result<()> {
     run(&["new-session", "-d", "-s", name, "-c", dir, agent])?;
-    run(&["set-option", "-t", name, "@cm_managed", "1"])?;
-    run(&["set-option", "-t", name, "@cm_agent", agent])?;
+    // If tagging fails, the session would exist untagged (invisible to list_sessions);
+    // kill it so creation is all-or-nothing.
+    if let Err(e) = run(&["set-option", "-t", name, "@cm_managed", "1"])
+        .and_then(|_| run(&["set-option", "-t", name, "@cm_agent", agent]))
+    {
+        let _ = run(&["kill-session", "-t", name]);
+        return Err(e);
+    }
     Ok(())
 }
 

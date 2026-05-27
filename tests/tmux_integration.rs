@@ -14,6 +14,16 @@ fn new_list_rename_capture_kill_roundtrip() {
     let _ = tmux::kill_session(&name);
     let _ = tmux::kill_session(&renamed);
 
+    struct SessionGuard(Vec<String>);
+    impl Drop for SessionGuard {
+        fn drop(&mut self) {
+            for n in &self.0 {
+                let _ = tmux::kill_session(n);
+            }
+        }
+    }
+    let _guard = SessionGuard(vec![name.clone(), renamed.clone()]);
+
     let dir = std::env::temp_dir();
     let dir = dir.to_str().unwrap();
 
