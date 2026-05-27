@@ -14,6 +14,16 @@ use std::time::Duration;
 
 type Term = Terminal<CrosstermBackend<Stdout>>;
 
+/// Restores the terminal on panic so a crash doesn't leave the shell unusable.
+fn install_panic_hook() {
+    let original = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = disable_raw_mode();
+        let _ = execute!(stdout(), LeaveAlternateScreen);
+        original(info);
+    }));
+}
+
 fn main() -> io::Result<()> {
     if !tmux::is_available() {
         eprintln!("error: `tmux` not found in PATH. Install tmux and try again.");
@@ -25,10 +35,12 @@ fn main() -> io::Result<()> {
     let mut app = App::new(config);
     app.refresh();
 
+    install_panic_hook();
     let mut terminal = init_terminal()?;
     let result = run(&mut terminal, &mut app, interval);
-    restore_terminal(&mut terminal)?;
-    result
+    let restore = restore_terminal(&mut terminal);
+    // Preserve the loop's error if it failed; otherwise surface any restore error.
+    result.and(restore)
 }
 
 fn init_terminal() -> io::Result<Term> {
@@ -83,11 +95,12 @@ fn handle_action(terminal: &mut Term, app: &mut App, action: Action) -> io::Resu
             }
             // Hand the terminal over to tmux, then take it back.
             restore_terminal(terminal)?;
-            let _ = tmux::attach_session(&name);
+            if let Err(e) = tmux::attach_session(&name) {
+                app.error = Some(e.to_string());
+            }
             enable_raw_mode()?;
             execute!(terminal.backend_mut(), EnterAlternateScreen)?;
             terminal.clear()?;
-            app.error = None;
             app.refresh();
         }
         Action::Create { name, dir, agent } => {
