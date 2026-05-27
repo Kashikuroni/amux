@@ -108,9 +108,26 @@ fn draw_create_modal(f: &mut Frame, app: &App) {
     ];
 
     if form.field == CreateField::Dir {
-        for (i, name) in form.dir_entries.iter().enumerate() {
-            let text = format!("{}{}/", if i == form.dir_selected { "> " } else { "  " }, name);
-            if i == form.dir_selected {
+        // Window the list so the highlighted row stays visible when entries overflow
+        // the modal. inner height = area minus borders; reserve 4 header rows
+        // (3 fields + blank) and 2 footer rows (blank + hint).
+        let inner_h = area.height.saturating_sub(2) as usize;
+        let cap = inner_h.saturating_sub(6).max(1);
+        let total = form.dir_entries.len();
+        let start = if form.dir_selected >= cap {
+            form.dir_selected + 1 - cap
+        } else {
+            0
+        };
+        let end = (start + cap).min(total);
+        for i in start..end {
+            let selected = i == form.dir_selected;
+            let text = format!(
+                "{}{}/",
+                if selected { "> " } else { "  " },
+                form.dir_entries[i]
+            );
+            if selected {
                 lines.push(Line::from(Span::styled(
                     text,
                     Style::default().add_modifier(Modifier::REVERSED),
@@ -250,5 +267,25 @@ mod tests {
         assert!(text.contains("alpha/"));
         assert!(text.contains("beta/"));
         assert!(text.contains("new session"));
+    }
+
+    #[test]
+    fn dir_list_keeps_selection_visible_when_scrolled() {
+        use crate::app::{CreateField, CreateForm, Mode};
+
+        let mut app = App::new(Config::default());
+        let mut form = CreateForm::new("claude");
+        form.field = CreateField::Dir;
+        form.dir_entries = (0..40).map(|i| format!("entry{i:02}")).collect();
+        form.dir_selected = 39; // last entry
+        app.mode = Mode::Create(form);
+
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+
+        let text = buf_to_string(terminal.backend().buffer());
+        assert!(text.contains("entry39/"), "selected row must be visible");
+        assert!(!text.contains("entry00/"), "top of list must scroll off");
     }
 }
