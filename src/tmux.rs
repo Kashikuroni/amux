@@ -1,3 +1,6 @@
+use std::io;
+use std::process::Command;
+
 /// Tab-separated fields requested from `tmux list-sessions -F`.
 /// Order: name, path, created, @cm_managed, @cm_agent, attached-client-count.
 pub const LIST_FORMAT: &str =
@@ -47,6 +50,80 @@ fn parse_line(line: &str) -> Option<Session> {
             .map(|n| n > 0)
             .unwrap_or(false),
     })
+}
+
+/// Runs a tmux subcommand, returning an error containing stderr on failure.
+fn run(args: &[&str]) -> io::Result<()> {
+    let out = Command::new("tmux").args(args).output()?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other(
+            String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        ))
+    }
+}
+
+/// True if a `tmux` binary is callable.
+pub fn is_available() -> bool {
+    Command::new("tmux")
+        .arg("-V")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// True if `cm` itself is running inside a tmux client (nested attach is unsafe).
+pub fn in_tmux() -> bool {
+    std::env::var_os("TMUX").is_some()
+}
+
+/// Lists managed sessions. "No server running" is treated as an empty list.
+pub fn list_sessions() -> io::Result<Vec<Session>> {
+    let out = Command::new("tmux")
+        .args(["list-sessions", "-F", LIST_FORMAT])
+        .output()?;
+    if !out.status.success() {
+        return Ok(Vec::new());
+    }
+    Ok(parse_sessions(&String::from_utf8_lossy(&out.stdout)))
+}
+
+/// Creates a detached session running `agent` in `dir` and tags it as managed.
+pub fn new_session(name: &str, dir: &str, agent: &str) -> io::Result<()> {
+    run(&["new-session", "-d", "-s", name, "-c", dir, agent])?;
+    run(&["set-option", "-t", name, "@cm_managed", "1"])?;
+    run(&["set-option", "-t", name, "@cm_agent", agent])?;
+    Ok(())
+}
+
+pub fn kill_session(name: &str) -> io::Result<()> {
+    run(&["kill-session", "-t", name])
+}
+
+pub fn rename_session(old: &str, new: &str) -> io::Result<()> {
+    run(&["rename-session", "-t", old, new])
+}
+
+/// Captures the visible pane content of a session as plain text.
+pub fn capture_pane(name: &str) -> io::Result<String> {
+    let out = Command::new("tmux")
+        .args(["capture-pane", "-p", "-t", name])
+        .output()?;
+    if !out.status.success() {
+        return Err(io::Error::other(
+            String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Attaches in the foreground (inherits stdio) and returns when the user detaches.
+pub fn attach_session(name: &str) -> io::Result<()> {
+    Command::new("tmux")
+        .args(["attach-session", "-t", name])
+        .status()?;
+    Ok(())
 }
 
 #[cfg(test)]
