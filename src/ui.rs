@@ -2,7 +2,7 @@ use crate::app::{App, CreateField, Mode};
 use crate::tmux::Status;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
 
@@ -97,15 +97,55 @@ fn field_line(label: &str, value: &str, focused: bool) -> Line<'static> {
 
 fn draw_create_modal(f: &mut Frame, app: &App) {
     let Mode::Create(form) = &app.mode else { return };
-    let area = centered(60, 40, f.area());
+    let area = centered(60, 60, f.area());
     f.render_widget(Clear, area);
-    let lines = vec![
+
+    let mut lines = vec![
         field_line("name ", &form.name, form.field == CreateField::Name),
         field_line("dir  ", &form.dir, form.field == CreateField::Dir),
         field_line("agent", &form.agent, form.field == CreateField::Agent),
         Line::from(""),
-        Line::from("Tab/Enter: next  ·  Enter on agent: create  ·  Esc: cancel"),
     ];
+
+    if form.field == CreateField::Dir {
+        // Window the list so the highlighted row stays visible when entries overflow
+        // the modal. inner height = area minus borders; reserve 4 header rows
+        // (3 fields + blank) and 2 footer rows (blank + hint).
+        let inner_h = area.height.saturating_sub(2) as usize;
+        let cap = inner_h.saturating_sub(6).max(1);
+        let total = form.dir_entries.len();
+        let start = if form.dir_selected >= cap {
+            form.dir_selected + 1 - cap
+        } else {
+            0
+        };
+        let end = (start + cap).min(total);
+        for i in start..end {
+            let selected = i == form.dir_selected;
+            let text = format!(
+                "{}{}/",
+                if selected { "> " } else { "  " },
+                form.dir_entries[i]
+            );
+            if selected {
+                lines.push(Line::from(Span::styled(
+                    text,
+                    Style::default().add_modifier(Modifier::REVERSED),
+                )));
+            } else {
+                lines.push(Line::from(text));
+            }
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(
+            "↑↓ select · Tab/→ enter · Enter confirm · Esc cancel",
+        ));
+    } else {
+        lines.push(Line::from(
+            "Tab/Enter: next · Enter on agent: create · Esc: cancel",
+        ));
+    }
+
     let para = Paragraph::new(lines)
         .block(Block::default().borders(Borders::ALL).title("new session"));
     f.render_widget(para, area);
@@ -206,5 +246,46 @@ mod tests {
         let text = buf_to_string(terminal.backend().buffer());
         assert!(text.contains("error: boom"));
         assert!(text.contains("new session"));
+    }
+
+    #[test]
+    fn create_modal_renders_dir_entries_when_dir_focused() {
+        use crate::app::{CreateField, CreateForm, Mode};
+
+        let mut app = App::new(Config::default());
+        let mut form = CreateForm::new("claude");
+        form.field = CreateField::Dir;
+        form.dir_entries = vec!["alpha".into(), "beta".into()];
+        form.dir_selected = 0;
+        app.mode = Mode::Create(form);
+
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+
+        let text = buf_to_string(terminal.backend().buffer());
+        assert!(text.contains("alpha/"));
+        assert!(text.contains("beta/"));
+        assert!(text.contains("new session"));
+    }
+
+    #[test]
+    fn dir_list_keeps_selection_visible_when_scrolled() {
+        use crate::app::{CreateField, CreateForm, Mode};
+
+        let mut app = App::new(Config::default());
+        let mut form = CreateForm::new("claude");
+        form.field = CreateField::Dir;
+        form.dir_entries = (0..40).map(|i| format!("entry{i:02}")).collect();
+        form.dir_selected = 39; // last entry
+        app.mode = Mode::Create(form);
+
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+
+        let text = buf_to_string(terminal.backend().buffer());
+        assert!(text.contains("entry39/"), "selected row must be visible");
+        assert!(!text.contains("entry00/"), "top of list must scroll off");
     }
 }
