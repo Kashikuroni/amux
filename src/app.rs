@@ -17,17 +17,22 @@ pub struct CreateForm {
     pub dir: String,
     pub agent: String,
     pub field: CreateField,
+    pub dir_entries: Vec<String>,
+    pub dir_selected: usize,
 }
 
 impl CreateForm {
     pub fn new(default_agent: &str) -> Self {
         Self {
             name: String::new(),
-            dir: String::new(),
+            dir: "~/".to_string(),
             agent: default_agent.to_string(),
             field: CreateField::Name,
+            dir_entries: Vec::new(),
+            dir_selected: 0,
         }
     }
+
     fn current_mut(&mut self) -> &mut String {
         match self.field {
             CreateField::Name => &mut self.name,
@@ -35,12 +40,48 @@ impl CreateForm {
             CreateField::Agent => &mut self.agent,
         }
     }
+
     fn next_field(&self) -> CreateField {
         match self.field {
             CreateField::Name => CreateField::Dir,
             CreateField::Dir => CreateField::Agent,
             CreateField::Agent => CreateField::Name,
         }
+    }
+
+    /// Recompute the subdir listing for the current `dir` text and reset highlight.
+    pub fn refresh_dir_entries(&mut self) {
+        let (base, filter) = crate::browse::split_path(&self.dir);
+        self.dir_entries = crate::browse::list(&expand_tilde(&base), &filter);
+        self.dir_selected = 0;
+    }
+
+    fn dir_select_next(&mut self) {
+        if self.dir_entries.is_empty() {
+            return;
+        }
+        self.dir_selected = (self.dir_selected + 1) % self.dir_entries.len();
+    }
+
+    fn dir_select_prev(&mut self) {
+        if self.dir_entries.is_empty() {
+            return;
+        }
+        self.dir_selected = if self.dir_selected == 0 {
+            self.dir_entries.len() - 1
+        } else {
+            self.dir_selected - 1
+        };
+    }
+
+    /// Append the highlighted subdir to the path (preserving `~`) and reload entries.
+    fn enter_selected_dir(&mut self) {
+        let Some(name) = self.dir_entries.get(self.dir_selected).cloned() else {
+            return;
+        };
+        let (base, _filter) = crate::browse::split_path(&self.dir);
+        self.dir = format!("{base}{name}/");
+        self.refresh_dir_entries();
     }
 }
 
@@ -211,13 +252,52 @@ impl App {
         let Mode::Create(mut form) = std::mem::replace(&mut self.mode, Mode::List) else {
             return None;
         };
+
+        // Dir step: interactive picker (live subdir list).
+        if form.field == CreateField::Dir {
+            match key.code {
+                KeyCode::Esc => return None, // mode already reset to List
+                KeyCode::Backspace => {
+                    form.dir.pop();
+                    form.refresh_dir_entries();
+                }
+                KeyCode::Char(c) => {
+                    form.dir.push(c);
+                    form.refresh_dir_entries();
+                }
+                KeyCode::Up => form.dir_select_prev(),
+                KeyCode::Down => form.dir_select_next(),
+                KeyCode::Tab | KeyCode::Right => form.enter_selected_dir(),
+                KeyCode::Enter => {
+                    let existing: Vec<String> =
+                        self.sessions.iter().map(|s| s.name.clone()).collect();
+                    match validate_create(&form.name, &form.dir, &existing) {
+                        Ok(()) => {
+                            self.error = None;
+                            form.field = CreateField::Agent;
+                        }
+                        Err(e) => self.error = Some(e),
+                    }
+                }
+                _ => {}
+            }
+            self.mode = Mode::Create(form);
+            return None;
+        }
+
+        // Name / agent steps: plain text fields.
         match key.code {
-            KeyCode::Esc => return None, // mode already reset to List
+            KeyCode::Esc => return None,
             KeyCode::Backspace => {
                 form.current_mut().pop();
             }
             KeyCode::Char(c) => form.current_mut().push(c),
-            KeyCode::Tab => form.field = form.next_field(),
+            KeyCode::Tab => {
+                form.field = form.next_field();
+                if form.field == CreateField::Dir {
+                    form.refresh_dir_entries();
+                }
+            }
             KeyCode::Enter => {
                 if form.field == CreateField::Agent {
                     let existing: Vec<String> =
@@ -238,7 +318,9 @@ impl App {
                         }
                     }
                 } else {
+                    // Name step → advance to dir and load its listing.
                     form.field = form.next_field();
+                    form.refresh_dir_entries();
                 }
             }
             _ => {}
@@ -468,5 +550,48 @@ mod tests {
         let existing: Vec<String> = vec![];
         assert!(validate_create("ok", "/no/such/dir/xyz", &existing).is_err());
         assert!(validate_create("ok", "/tmp", &existing).is_ok());
+    }
+
+    #[test]
+    fn dir_list_navigation_wraps() {
+        let mut form = CreateForm::new("claude");
+        form.dir_entries = vec!["a".into(), "b".into(), "c".into()];
+        form.dir_selected = 0;
+        form.dir_select_next();
+        assert_eq!(form.dir_selected, 1);
+        form.dir_select_next();
+        form.dir_select_next();
+        assert_eq!(form.dir_selected, 0); // wraps forward
+        form.dir_select_prev();
+        assert_eq!(form.dir_selected, 2); // wraps backward
+    }
+
+    #[test]
+    fn entering_selected_dir_descends_and_reloads() {
+        let base = std::env::temp_dir().join(format!("cm_pick_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("sub_a")).unwrap();
+        std::fs::create_dir_all(base.join("sub_b")).unwrap();
+
+        let mut form = CreateForm::new("claude");
+        form.dir = format!("{}/", base.display());
+        form.refresh_dir_entries();
+        assert_eq!(
+            form.dir_entries,
+            vec!["sub_a".to_string(), "sub_b".to_string()]
+        );
+
+        form.dir_selected = 1; // highlight sub_b
+        form.enter_selected_dir();
+        assert_eq!(form.dir, format!("{}/sub_b/", base.display()));
+        assert!(form.dir_entries.is_empty()); // sub_b has no children
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn create_form_starts_in_home_dir() {
+        let form = CreateForm::new("claude");
+        assert_eq!(form.dir, "~/");
     }
 }
