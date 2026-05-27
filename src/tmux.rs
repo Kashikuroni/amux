@@ -32,7 +32,6 @@ fn parse_line(line: &str) -> Option<Session> {
     let created = f.next()?.trim().parse::<i64>().ok()?;
     let managed = f.next()?;
     let agent = f.next()?.to_string();
-    let attached = f.next().unwrap_or("0").trim();
     if managed != "1" {
         return None;
     }
@@ -42,7 +41,11 @@ fn parse_line(line: &str) -> Option<Session> {
         created,
         agent,
         status: Status::Waiting,
-        attached: attached != "0" && !attached.is_empty(),
+        attached: f
+            .next()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+            .map(|n| n > 0)
+            .unwrap_or(false),
     })
 }
 
@@ -76,5 +79,25 @@ mod tests {
         let out = "live\t/d\t1\t1\tclaude\t1";
         let sessions = parse_sessions(out);
         assert!(sessions[0].attached);
+    }
+
+    #[test]
+    fn attached_count_greater_than_one_is_attached() {
+        let out = "multi\t/d\t1\t1\tclaude\t2";
+        let sessions = parse_sessions(out);
+        assert!(sessions[0].attached);
+    }
+
+    #[test]
+    fn empty_input_yields_no_sessions() {
+        assert!(parse_sessions("").is_empty());
+    }
+
+    #[test]
+    fn trailing_newline_does_not_add_empty_session() {
+        let out = "solo\t/d\t1\t1\tclaude\t0\n";
+        let sessions = parse_sessions(out);
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].name, "solo");
     }
 }
