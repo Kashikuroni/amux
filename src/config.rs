@@ -1,0 +1,69 @@
+use serde::Deserialize;
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct Config {
+    pub default_agent: String,
+    pub refresh_interval_ms: u64,
+    pub agent_presets: Vec<String>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            default_agent: "claude".to_string(),
+            refresh_interval_ms: 1500,
+            agent_presets: vec!["claude".into(), "aider".into(), "codex".into()],
+        }
+    }
+}
+
+impl Config {
+    pub fn parse(toml_str: &str) -> Result<Config, toml::de::Error> {
+        toml::from_str(toml_str)
+    }
+
+    /// Loads `~/.claude-manager/config.toml`. Missing file or parse error → defaults.
+    pub fn load() -> Config {
+        let Ok(home) = std::env::var("HOME") else {
+            return Config::default();
+        };
+        let path = std::path::Path::new(&home)
+            .join(".claude-manager")
+            .join("config.toml");
+        match std::fs::read_to_string(&path) {
+            Ok(contents) => Config::parse(&contents).unwrap_or_default(),
+            Err(_) => Config::default(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_full_config() {
+        let cfg = Config::parse(
+            "default_agent = \"aider\"\nrefresh_interval_ms = 500\nagent_presets = [\"aider\"]",
+        )
+        .unwrap();
+        assert_eq!(cfg.default_agent, "aider");
+        assert_eq!(cfg.refresh_interval_ms, 500);
+        assert_eq!(cfg.agent_presets, vec!["aider".to_string()]);
+    }
+
+    #[test]
+    fn empty_config_uses_defaults() {
+        let cfg = Config::parse("").unwrap();
+        assert_eq!(cfg.default_agent, "claude");
+        assert_eq!(cfg.refresh_interval_ms, 1500);
+    }
+
+    #[test]
+    fn partial_config_fills_missing_with_defaults() {
+        let cfg = Config::parse("default_agent = \"codex\"").unwrap();
+        assert_eq!(cfg.default_agent, "codex");
+        assert_eq!(cfg.refresh_interval_ms, 1500);
+    }
+}
