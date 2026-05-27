@@ -73,6 +73,8 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
 }
 
 /// A centered rectangle `pct_x`/`pct_y` percent of the screen.
+/// Pass even percentages: `(100 - pct)` is halved with integer division, so
+/// odd values leave the dialog 1 cell off-center.
 fn centered(pct_x: u16, pct_y: u16, area: Rect) -> Rect {
     let v = Layout::vertical([
         Constraint::Percentage((100 - pct_y) / 2),
@@ -134,7 +136,6 @@ fn draw_help_modal(f: &mut Frame) {
     f.render_widget(Clear, area);
     let lines = vec![
         Line::from("k / j        navigate up / down"),
-        Line::from("h / l        scroll preview"),
         Line::from("Enter / o    attach to session"),
         Line::from("n            new session"),
         Line::from("d            kill session"),
@@ -190,5 +191,20 @@ mod tests {
         assert!(text.contains("project-a"));
         assert!(text.contains("sessions (1)"));
         assert!(text.contains("[n] new"));
+    }
+
+    #[test]
+    fn renders_error_footer_and_create_modal() {
+        let mut app = App::new(Config::default());
+        app.error = Some("boom".into());
+        app.mode = crate::app::Mode::Create(crate::app::CreateForm::new("claude"));
+
+        let backend = TestBackend::new(100, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+
+        let text = buf_to_string(terminal.backend().buffer());
+        assert!(text.contains("error: boom"));
+        assert!(text.contains("new session"));
     }
 }
