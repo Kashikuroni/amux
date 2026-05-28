@@ -107,6 +107,7 @@ pub enum Mode {
     Rename(RenameForm),
     ConfirmDelete(String),
     Help,
+    Filter,
 }
 
 /// Side effects the event loop must perform (kept out of `App` so it stays IO-free).
@@ -125,6 +126,7 @@ enum ModeKind {
     Rename,
     ConfirmDelete,
     Help,
+    Filter,
 }
 
 pub struct App {
@@ -158,34 +160,64 @@ impl App {
         }
     }
 
+    /// Indices into `self.sessions` that match the active filter (all if none).
+    pub fn visible_indices(&self) -> Vec<usize> {
+        match &self.filter {
+            None => (0..self.sessions.len()).collect(),
+            Some(q) => {
+                let q = q.to_lowercase();
+                self.sessions
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, s)| s.name.to_lowercase().contains(&q))
+                    .map(|(i, _)| i)
+                    .collect()
+            }
+        }
+    }
+
+    /// The session currently highlighted (mapping `selected` through the filter).
+    pub fn selected_session(&self) -> Option<&Session> {
+        let vis = self.visible_indices();
+        vis.get(self.selected).and_then(|&i| self.sessions.get(i))
+    }
+
     pub fn selected_name(&self) -> Option<String> {
-        self.sessions.get(self.selected).map(|s| s.name.clone())
+        self.selected_session().map(|s| s.name.clone())
     }
 
     pub fn select_next(&mut self) {
-        if self.sessions.is_empty() {
+        let n = self.visible_indices().len();
+        if n == 0 {
             return;
         }
-        self.selected = (self.selected + 1) % self.sessions.len();
+        self.selected = (self.selected + 1) % n;
     }
 
     pub fn select_prev(&mut self) {
-        if self.sessions.is_empty() {
+        let n = self.visible_indices().len();
+        if n == 0 {
             return;
         }
-        self.selected = if self.selected == 0 {
-            self.sessions.len() - 1
-        } else {
-            self.selected - 1
-        };
+        self.selected = if self.selected == 0 { n - 1 } else { self.selected - 1 };
     }
 
     fn clamp_selection(&mut self) {
-        if self.sessions.is_empty() {
+        let n = self.visible_indices().len();
+        if n == 0 {
             self.selected = 0;
-        } else if self.selected >= self.sessions.len() {
-            self.selected = self.sessions.len() - 1;
+        } else if self.selected >= n {
+            self.selected = n - 1;
         }
+    }
+
+    fn select_first(&mut self) {
+        self.selected = 0;
+    }
+
+    fn select_last(&mut self) {
+        let n = self.visible_indices().len();
+        self.selected = n.saturating_sub(1);
     }
 
     fn mode_kind(&self) -> ModeKind {
@@ -195,6 +227,7 @@ impl App {
             Mode::Rename(_) => ModeKind::Rename,
             Mode::ConfirmDelete(_) => ModeKind::ConfirmDelete,
             Mode::Help => ModeKind::Help,
+            Mode::Filter => ModeKind::Filter,
         }
     }
 
@@ -208,6 +241,7 @@ impl App {
             ModeKind::ConfirmDelete => self.handle_confirm_key(key),
             ModeKind::Create => self.handle_create_key(key),
             ModeKind::Rename => self.handle_rename_key(key),
+            ModeKind::Filter => self.handle_filter_key(key),
         }
     }
 
@@ -236,6 +270,13 @@ impl App {
                     return Some(Action::Attach(name));
                 }
             }
+            KeyCode::Char('/') => {
+                self.filter = Some(String::new());
+                self.selected = 0;
+                self.mode = Mode::Filter;
+            }
+            KeyCode::Char('g') => self.select_first(),
+            KeyCode::Char('G') => self.select_last(),
             _ => {}
         }
         None
@@ -358,6 +399,39 @@ impl App {
             _ => {}
         }
         self.mode = Mode::Rename(form);
+        None
+    }
+
+    fn handle_filter_key(&mut self, key: KeyEvent) -> Option<Action> {
+        match key.code {
+            KeyCode::Esc => {
+                self.filter = None;
+                self.selected = 0;
+                self.mode = Mode::List;
+            }
+            KeyCode::Enter | KeyCode::Down | KeyCode::Up => {
+                // Accept the filter and return to list navigation (keep filter active).
+                self.mode = Mode::List;
+                if key.code == KeyCode::Down {
+                    self.select_next();
+                } else if key.code == KeyCode::Up {
+                    self.select_prev();
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(f) = self.filter.as_mut() {
+                    f.pop();
+                }
+                self.selected = 0;
+            }
+            KeyCode::Char(c) => {
+                if let Some(f) = self.filter.as_mut() {
+                    f.push(c);
+                }
+                self.selected = 0;
+            }
+            _ => {}
+        }
         None
     }
 
@@ -607,5 +681,43 @@ mod tests {
     fn create_form_starts_in_home_dir() {
         let form = CreateForm::new("claude");
         assert_eq!(form.dir, "~/");
+    }
+
+    #[test]
+    fn filter_limits_visible_sessions() {
+        let mut app = app_with_two_sessions();
+        app.filter = Some("b".into());
+        let vis = app.visible_indices();
+        assert_eq!(vis, vec![1]);
+        assert_eq!(app.selected_name().as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn slash_enters_filter_mode_and_typing_filters() {
+        let mut app = app_with_two_sessions();
+        app.handle_key(key('/'));
+        assert!(matches!(app.mode, Mode::Filter));
+        app.handle_key(key('b'));
+        assert_eq!(app.filter.as_deref(), Some("b"));
+        assert_eq!(app.visible_indices(), vec![1]);
+    }
+
+    #[test]
+    fn esc_clears_filter() {
+        let mut app = app_with_two_sessions();
+        app.handle_key(key('/'));
+        app.handle_key(key('b'));
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.filter.is_none());
+        assert_eq!(app.visible_indices().len(), 2);
+    }
+
+    #[test]
+    fn g_and_shift_g_jump_first_last() {
+        let mut app = app_with_two_sessions();
+        app.handle_key(key('G'));
+        assert_eq!(app.selected, 1);
+        app.handle_key(key('g'));
+        assert_eq!(app.selected, 0);
     }
 }

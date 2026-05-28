@@ -23,7 +23,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Mode::Rename(_) => draw_rename_modal(f, app),
         Mode::ConfirmDelete(name) => draw_confirm_modal(f, name),
         Mode::Help => draw_help_modal(f),
-        Mode::List => {}
+        Mode::List | Mode::Filter => {}
     }
 }
 
