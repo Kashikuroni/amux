@@ -27,6 +27,7 @@ pub const SEL_BAR: &str = "▍";
 pub const IDLE_DOT: &str = "·";
 pub const BRANCH: &str = "⎇";
 pub const SEP: &str = "│";
+pub const RULE_CHAR: &str = "━";
 
 #[cfg(test)]
 mod tests {

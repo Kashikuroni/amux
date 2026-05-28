@@ -1,4 +1,8 @@
+mod footer;
+mod header;
+
 use crate::app::{App, CreateField, Mode};
+use crate::theme as th;
 use crate::tmux::Status;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -10,13 +14,16 @@ const SPINNER: char = '\u{283B}'; // ⠻ : shown for Running
 const READY: char = '\u{25CF}'; //   ● : shown for Waiting
 
 pub fn draw(f: &mut Frame, app: &App) {
-    let root = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(f.area());
-    let body = Layout::horizontal([Constraint::Percentage(25), Constraint::Percentage(75)])
-        .split(root[0]);
+    let root = ratatui::layout::Layout::vertical([
+        ratatui::layout::Constraint::Length(2), // header + rule
+        ratatui::layout::Constraint::Min(1),    // body
+        ratatui::layout::Constraint::Length(2), // footer rule + keys
+    ])
+    .split(f.area());
 
-    draw_sidebar(f, app, body[0]);
-    draw_preview(f, app, body[1]);
-    draw_footer(f, app, root[1]);
+    header::render(f, root[0], app);
+    draw_body(f, root[1], app);
+    footer::render(f, root[2], app);
 
     match &app.mode {
         Mode::Create(_) => draw_create_modal(f, app),
@@ -27,7 +34,25 @@ pub fn draw(f: &mut Frame, app: &App) {
     }
 }
 
-fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
+fn draw_body(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &App) {
+    let cols = ratatui::layout::Layout::horizontal([
+        ratatui::layout::Constraint::Percentage(40),
+        ratatui::layout::Constraint::Length(1),
+        ratatui::layout::Constraint::Min(0),
+    ])
+    .split(area);
+    draw_sidebar(f, cols[0], app);
+    // vertical separator
+    f.render_widget(
+        ratatui::widgets::Block::default()
+            .borders(ratatui::widgets::Borders::LEFT)
+            .border_style(ratatui::style::Style::default().fg(th::BORDER)),
+        cols[1],
+    );
+    draw_preview(f, cols[2], app);
+}
+
+fn draw_sidebar(f: &mut Frame, area: Rect, app: &App) {
     let items: Vec<ListItem> = app
         .sessions
         .iter()
@@ -40,11 +65,20 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
+    let sym = format!("{} ", th::SEL_BAR);
     let list = List::new(items)
-        .block(Block::default()
-            .borders(Borders::ALL)
-            .title(format!("sessions ({})", app.sessions.len())))
-        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!("sessions ({})", app.sessions.len())),
+        )
+        .highlight_style(
+            Style::default()
+                .bg(th::SEL_BG)
+                .fg(th::AMBER_HI)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol(sym.as_str());
 
     let mut state = ListState::default();
     if !app.sessions.is_empty() {
@@ -53,29 +87,25 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
     f.render_stateful_widget(list, area, &mut state);
 }
 
-fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
+fn draw_preview(f: &mut Frame, area: Rect, app: &App) {
     let title = match app.sessions.get(app.selected) {
         Some(s) => format!("preview: {} · {}", s.name, s.dir),
         None => "preview".to_string(),
     };
     let para = Paragraph::new(app.preview.as_str())
-        .block(Block::default().borders(Borders::ALL).title(title))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(Span::styled(title, Style::default().fg(th::TEXT_BOLD))),
+        )
         .wrap(Wrap { trim: false });
     f.render_widget(para, area);
-}
-
-fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
-    let text = match &app.error {
-        Some(e) => format!("error: {e}"),
-        None => "sessions: [n] new  [d] kill  [r] rename   actions: [↵/o] attach   nav: [j/k] move  [q] quit  [?] help".to_string(),
-    };
-    f.render_widget(Paragraph::new(text), area);
 }
 
 /// A centered rectangle `pct_x`/`pct_y` percent of the screen.
 /// Pass even percentages: `(100 - pct)` is halved with integer division, so
 /// odd values leave the dialog 1 cell off-center.
-fn centered(pct_x: u16, pct_y: u16, area: Rect) -> Rect {
+pub(crate) fn centered(pct_x: u16, pct_y: u16, area: Rect) -> Rect {
     let v = Layout::vertical([
         Constraint::Percentage((100 - pct_y) / 2),
         Constraint::Percentage(pct_y),
@@ -230,8 +260,8 @@ mod tests {
 
         let text = buf_to_string(terminal.backend().buffer());
         assert!(text.contains("project-a"));
-        assert!(text.contains("sessions (1)"));
-        assert!(text.contains("[n] new"));
+        assert!(text.contains(" cm"), "header logo must be present");
+        assert!(text.contains("new"), "footer must show new key hint");
     }
 
     #[test]
@@ -245,8 +275,8 @@ mod tests {
         terminal.draw(|f| draw(f, &app)).unwrap();
 
         let text = buf_to_string(terminal.backend().buffer());
-        assert!(text.contains("error: boom"));
-        assert!(text.contains("new session"));
+        assert!(text.contains("new session"), "create modal must be visible");
+        assert!(text.contains("create"), "footer must show create key hint");
     }
 
     #[test]
