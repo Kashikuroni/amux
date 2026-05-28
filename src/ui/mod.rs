@@ -1,5 +1,6 @@
 mod footer;
 mod header;
+mod preview;
 mod sessions;
 
 use crate::app::{App, CreateField, Mode};
@@ -7,7 +8,7 @@ use crate::theme as th;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
 pub fn draw(f: &mut Frame, app: &App) {
@@ -46,23 +47,7 @@ fn draw_body(f: &mut Frame, area: Rect, app: &App) {
             .border_style(Style::default().fg(th::BORDER)),
         cols[1],
     );
-    draw_preview(f, cols[2], app);
-}
-
-
-fn draw_preview(f: &mut Frame, area: Rect, app: &App) {
-    let title = match app.sessions.get(app.selected) {
-        Some(s) => format!("preview: {} · {}", s.name, s.dir),
-        None => "preview".to_string(),
-    };
-    let para = Paragraph::new(app.preview.as_str())
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(Span::styled(title, Style::default().fg(th::TEXT_BOLD))),
-        )
-        .wrap(Wrap { trim: false });
-    f.render_widget(para, area);
+    preview::render(f, cols[2], app);
 }
 
 /// Centered Rect helper shared with modal submodules (Task 10).
