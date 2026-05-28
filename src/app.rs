@@ -19,10 +19,20 @@ pub struct CreateForm {
     pub field: CreateField,
     pub dir_entries: Vec<String>,
     pub dir_selected: usize,
+    pub agent_choices: Vec<String>,
+    pub agent_index: usize,
 }
 
 impl CreateForm {
-    pub fn new(default_agent: &str) -> Self {
+    pub fn new(default_agent: &str, presets: &[String]) -> Self {
+        // choices = default first, then any presets not equal to default, then a custom slot
+        let mut choices: Vec<String> = vec![default_agent.to_string()];
+        for p in presets {
+            if !choices.contains(p) {
+                choices.push(p.clone());
+            }
+        }
+        choices.push("custom…".to_string());
         Self {
             name: String::new(),
             dir: "~/".to_string(),
@@ -30,6 +40,8 @@ impl CreateForm {
             field: CreateField::Name,
             dir_entries: Vec::new(),
             dir_selected: 0,
+            agent_choices: choices,
+            agent_index: 0,
         }
     }
 
@@ -72,6 +84,29 @@ impl CreateForm {
         } else {
             self.dir_selected - 1
         };
+    }
+
+    /// True when the current choice is the free-text "custom…" slot.
+    pub fn agent_is_custom(&self) -> bool {
+        self.agent_choices
+            .get(self.agent_index)
+            .map(|c| c == "custom…")
+            .unwrap_or(false)
+    }
+
+    /// Move agent selection by `delta` (wraps); sets `agent` to the chosen command,
+    /// or clears it for the custom slot so the user can type a command.
+    pub fn cycle_agent(&mut self, delta: isize) {
+        let n = self.agent_choices.len() as isize;
+        if n == 0 {
+            return;
+        }
+        self.agent_index = (((self.agent_index as isize + delta) % n + n) % n) as usize;
+        if self.agent_is_custom() {
+            self.agent.clear();
+        } else {
+            self.agent = self.agent_choices[self.agent_index].clone();
+        }
     }
 
     /// Append the highlighted subdir to the path (preserving `~`) and reload entries.
@@ -252,7 +287,10 @@ impl App {
             KeyCode::Char('k') | KeyCode::Up => self.select_prev(),
             KeyCode::Char('n') => {
                 self.error = None;
-                self.mode = Mode::Create(CreateForm::new(&self.config.default_agent));
+                self.mode = Mode::Create(CreateForm::new(
+                    &self.config.default_agent,
+                    &self.config.agent_presets,
+                ));
             }
             KeyCode::Char('d') => {
                 if let Some(name) = self.selected_name() {
@@ -335,10 +373,22 @@ impl App {
         // Name / agent steps: plain text fields.
         match key.code {
             KeyCode::Esc => return None,
+            KeyCode::Left if form.field == CreateField::Agent => form.cycle_agent(-1),
+            KeyCode::Right if form.field == CreateField::Agent => form.cycle_agent(1),
             KeyCode::Backspace => {
+                if form.field == CreateField::Agent && !form.agent_is_custom() {
+                    // editing a preset turns it into a custom command
+                    form.agent_index = form.agent_choices.len().saturating_sub(1);
+                }
                 form.current_mut().pop();
             }
-            KeyCode::Char(c) => form.current_mut().push(c),
+            KeyCode::Char(c) => {
+                if form.field == CreateField::Agent && !form.agent_is_custom() {
+                    form.agent_index = form.agent_choices.len().saturating_sub(1);
+                    form.agent.clear();
+                }
+                form.current_mut().push(c);
+            }
             KeyCode::Tab => {
                 form.field = form.next_field();
                 if form.field == CreateField::Dir {
@@ -502,6 +552,28 @@ pub fn expand_tilde(path: &str) -> String {
     path.to_string()
 }
 
+/// Resolves the first word of `cmd` on PATH via `command -v`. Returns the path,
+/// or None if not found / empty. Display-only; never executes the command.
+pub fn resolve_agent_path(cmd: &str) -> Option<String> {
+    let bin = cmd.split_whitespace().next()?;
+    if bin.is_empty() {
+        return None;
+    }
+    let out = std::process::Command::new("sh")
+        .args(["-c", &format!("command -v {bin}")])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if p.is_empty() {
+        None
+    } else {
+        Some(p)
+    }
+}
+
 /// Validates create-form input. `dir` is checked after tilde expansion.
 pub fn validate_create(name: &str, dir: &str, existing: &[String]) -> Result<(), String> {
     let name = name.trim();
@@ -642,7 +714,7 @@ mod tests {
 
     #[test]
     fn dir_list_navigation_wraps() {
-        let mut form = CreateForm::new("claude");
+        let mut form = CreateForm::new("claude", &[]);
         form.dir_entries = vec!["a".into(), "b".into(), "c".into()];
         form.dir_selected = 0;
         form.dir_select_next();
@@ -661,7 +733,7 @@ mod tests {
         std::fs::create_dir_all(base.join("sub_a")).unwrap();
         std::fs::create_dir_all(base.join("sub_b")).unwrap();
 
-        let mut form = CreateForm::new("claude");
+        let mut form = CreateForm::new("claude", &[]);
         form.dir = format!("{}/", base.display());
         form.refresh_dir_entries();
         assert_eq!(
@@ -679,7 +751,7 @@ mod tests {
 
     #[test]
     fn create_form_starts_in_home_dir() {
-        let form = CreateForm::new("claude");
+        let form = CreateForm::new("claude", &[]);
         assert_eq!(form.dir, "~/");
     }
 
@@ -719,5 +791,21 @@ mod tests {
         assert_eq!(app.selected, 1);
         app.handle_key(key('g'));
         assert_eq!(app.selected, 0);
+    }
+
+    #[test]
+    fn agent_cycle_wraps_and_sets_command() {
+        let mut form = CreateForm::new("claude", &["claude".into(), "codex".into()]);
+        assert_eq!(form.agent, "claude");
+        form.cycle_agent(1);
+        assert_eq!(form.agent_choices[form.agent_index], "codex");
+        assert_eq!(form.agent, "codex");
+        // step to custom slot → agent cleared for free typing
+        form.cycle_agent(1);
+        assert!(form.agent_is_custom());
+        assert_eq!(form.agent, "");
+        // wrap back to first
+        form.cycle_agent(1);
+        assert_eq!(form.agent, "claude");
     }
 }

@@ -238,7 +238,7 @@ mod tests {
     fn renders_error_footer_and_create_modal() {
         let mut app = App::new(Config::default());
         app.error = Some("boom".into());
-        app.mode = crate::app::Mode::Create(crate::app::CreateForm::new("claude"));
+        app.mode = crate::app::Mode::Create(crate::app::CreateForm::new("claude", &[]));
 
         let backend = TestBackend::new(100, 20);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -254,7 +254,7 @@ mod tests {
         use crate::app::{CreateField, CreateForm, Mode};
 
         let mut app = App::new(Config::default());
-        let mut form = CreateForm::new("claude");
+        let mut form = CreateForm::new("claude", &[]);
         form.field = CreateField::Dir;
         form.dir_entries = vec!["alpha".into(), "beta".into()];
         form.dir_selected = 0;
@@ -275,7 +275,7 @@ mod tests {
         use crate::app::{CreateField, CreateForm, Mode};
 
         let mut app = App::new(Config::default());
-        let mut form = CreateForm::new("claude");
+        let mut form = CreateForm::new("claude", &[]);
         form.field = CreateField::Dir;
         form.dir_entries = (0..40).map(|i| format!("entry{i:02}")).collect();
         form.dir_selected = 39; // last entry
