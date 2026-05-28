@@ -1,18 +1,14 @@
 mod footer;
 mod header;
+mod sessions;
 
 use crate::app::{App, CreateField, Mode};
 use crate::theme as th;
-use crate::tmux::Status;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
-
-// TODO(Task 8): these move into the sessions submodule when draw_sidebar is replaced.
-const SPINNER: char = '\u{283B}'; // ⠻ : shown for Running
-const READY: char = '\u{25CF}'; //   ● : shown for Idle
 
 pub fn draw(f: &mut Frame, app: &App) {
     let root = ratatui::layout::Layout::vertical([
@@ -42,7 +38,7 @@ fn draw_body(f: &mut Frame, area: Rect, app: &App) {
         Constraint::Min(0),
     ])
     .split(area);
-    draw_sidebar(f, cols[0], app);
+    sessions::render(f, cols[0], app);
     // vertical separator
     f.render_widget(
         Block::default()
@@ -53,40 +49,6 @@ fn draw_body(f: &mut Frame, area: Rect, app: &App) {
     draw_preview(f, cols[2], app);
 }
 
-fn draw_sidebar(f: &mut Frame, area: Rect, app: &App) {
-    let items: Vec<ListItem> = app
-        .sessions
-        .iter()
-        .map(|s| {
-            let marker = match s.status {
-                Status::Running => SPINNER,
-                Status::Idle => READY,
-            };
-            ListItem::new(Line::from(format!("{marker} {}", s.name)))
-        })
-        .collect();
-
-    let sym = format!("{} ", th::SEL_BAR);
-    let list = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(format!("sessions ({})", app.sessions.len())),
-        )
-        .highlight_style(
-            Style::default()
-                .bg(th::SEL_BG)
-                .fg(th::AMBER_HI)
-                .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol(sym.as_str());
-
-    let mut state = ListState::default();
-    if !app.sessions.is_empty() {
-        state.select(Some(app.selected));
-    }
-    f.render_stateful_widget(list, area, &mut state);
-}
 
 fn draw_preview(f: &mut Frame, area: Rect, app: &App) {
     let title = match app.sessions.get(app.selected) {
@@ -227,7 +189,7 @@ mod tests {
     use super::*;
     use crate::app::App;
     use crate::config::Config;
-    use crate::tmux::Session;
+    use crate::tmux::{Session, Status};
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
     use ratatui::Terminal;
