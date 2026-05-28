@@ -378,6 +378,10 @@ impl App {
                             new_preview = Some(content);
                         }
                     }
+                    // TODO(perf): git::read shells out to `git` per session per
+                    // tick on the main thread. Fine for local repos / few
+                    // sessions; move to a background thread if it ever stalls
+                    // the UI on slow filesystems.
                     s.git = crate::git::read(&s.dir);
                 }
                 self.snapshots = new_snaps;
