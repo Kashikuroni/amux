@@ -33,6 +33,8 @@ pub fn render(f: &mut Frame, form: &CreateForm) {
 
     if form.field == CreateField::Dir {
         // Live subdir picker (browse-aware). Window the selection to keep it visible.
+        // 10 rows reserved: 4 above (title, blank, name, dir) + 6 below (blank,
+        // agent label, segments, $ cmd, resolved-path hint, trailing blank).
         let h = area.height.saturating_sub(2) as usize;
         let cap = h.saturating_sub(10).max(1);
         let total = form.dir_entries.len();
@@ -79,6 +81,10 @@ pub fn render(f: &mut Frame, form: &CreateForm) {
     lines.push(Line::from(""));
     lines.push(Line::from(seg));
 
+    // TODO: forks `sh -c "command -v ..."` on every redraw (incl. every keystroke
+    // in the agent field). Modal is short-lived so fine for now; a
+    // `(last_agent, resolved): (String, Option<String>)` cache on CreateForm
+    // would eliminate it.
     // Resolved command line
     let resolved = resolve_agent_path(&form.agent);
     let cmd = if form.agent.is_empty() {

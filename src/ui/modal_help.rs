@@ -16,7 +16,7 @@ pub fn render(f: &mut Frame) {
     let mut lines = vec![
         Line::from(vec![
             Span::styled("? Help", Style::default().fg(th::AMBER).add_modifier(Modifier::BOLD)),
-            Span::styled("   keys & shortcuts", Style::default().fg(th::MUTED)),
+            Span::styled("   keys & shortcuts", Style::default().fg(th::DIM)),
         ]),
         Line::from(""),
     ];
