@@ -32,7 +32,7 @@ fn new_list_rename_capture_kill_roundtrip() {
     let sessions = tmux::list_sessions().expect("list_sessions");
     let found = sessions.iter().find(|s| s.name == name).expect("session present");
     assert_eq!(found.agent, "bash");
-    assert_eq!(found.status, Status::Waiting);
+    assert_eq!(found.status, Status::Idle);
 
     tmux::rename_session(&name, &renamed).expect("rename_session");
     let sessions = tmux::list_sessions().expect("list after rename");

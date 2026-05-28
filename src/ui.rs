@@ -34,7 +34,7 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
         .map(|s| {
             let marker = match s.status {
                 Status::Running => SPINNER,
-                Status::Waiting => READY,
+                Status::Idle => READY,
             };
             ListItem::new(Line::from(format!("{marker} {}", s.name)))
         })
@@ -221,6 +221,7 @@ mod tests {
             agent: "claude".into(),
             status: Status::Running,
             attached: false,
+            git: None,
         }];
 
         let backend = TestBackend::new(100, 20);

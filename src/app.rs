@@ -136,6 +136,9 @@ pub struct App {
     pub snapshots: HashMap<String, u64>,
     pub error: Option<String>,
     pub should_quit: bool,
+    pub filter: Option<String>,
+    pub spinner_frame: usize,
+    pub now_unix: i64,
 }
 
 impl App {
@@ -149,6 +152,9 @@ impl App {
             snapshots: HashMap::new(),
             error: None,
             should_quit: false,
+            filter: None,
+            spinner_frame: 0,
+            now_unix: crate::timeutil::now_unix(),
         }
     }
 
@@ -360,6 +366,7 @@ impl App {
         match crate::tmux::list_sessions() {
             Ok(mut sessions) => {
                 let selected_name = self.selected_name();
+                self.now_unix = crate::timeutil::now_unix();
                 let mut new_snaps = HashMap::new();
                 let mut new_preview = None;
                 for s in &mut sessions {
@@ -371,6 +378,7 @@ impl App {
                             new_preview = Some(content);
                         }
                     }
+                    s.git = crate::git::read(&s.dir);
                 }
                 self.snapshots = new_snaps;
                 self.sessions = sessions;
@@ -396,11 +404,11 @@ pub fn content_hash(s: &str) -> u64 {
     h.finish()
 }
 
-/// First observation (no previous snapshot) is `Waiting`; changed → `Running`.
+/// First observation (no previous snapshot) is `Idle`; changed → `Running`.
 pub fn compute_status(prev: Option<u64>, current: u64) -> Status {
     match prev {
         Some(p) if p != current => Status::Running,
-        _ => Status::Waiting, // first observation OR content unchanged
+        _ => Status::Idle, // first observation OR content unchanged
     }
 }
 
@@ -452,16 +460,18 @@ mod tests {
                 dir: "/a".into(),
                 created: 1,
                 agent: "claude".into(),
-                status: Status::Waiting,
+                status: Status::Idle,
                 attached: false,
+                git: None,
             },
             Session {
                 name: "b".into(),
                 dir: "/b".into(),
                 created: 2,
                 agent: "claude".into(),
-                status: Status::Waiting,
+                status: Status::Idle,
                 attached: false,
+                git: None,
             },
         ];
         app
@@ -514,8 +524,8 @@ mod tests {
     }
 
     #[test]
-    fn status_is_waiting_on_first_observation() {
-        assert_eq!(compute_status(None, 42), Status::Waiting);
+    fn status_is_idle_on_first_observation() {
+        assert_eq!(compute_status(None, 42), Status::Idle);
     }
 
     #[test]
@@ -524,8 +534,8 @@ mod tests {
     }
 
     #[test]
-    fn status_is_waiting_when_content_unchanged() {
-        assert_eq!(compute_status(Some(7), 7), Status::Waiting);
+    fn status_is_idle_when_content_unchanged() {
+        assert_eq!(compute_status(Some(7), 7), Status::Idle);
     }
 
     #[test]

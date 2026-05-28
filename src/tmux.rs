@@ -9,7 +9,7 @@ pub const LIST_FORMAT: &str =
 #[derive(Debug, Clone, PartialEq)]
 pub enum Status {
     Running,
-    Waiting,
+    Idle,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -20,10 +20,11 @@ pub struct Session {
     pub agent: String,
     pub status: Status,
     pub attached: bool,
+    pub git: Option<crate::git::GitInfo>,
 }
 
 /// Parses `tmux list-sessions` output, keeping only sessions marked `@cm_managed=1`.
-/// `status` defaults to `Waiting`; the app overwrites it via capture-pane diffing.
+/// `status` defaults to `Idle`; the app overwrites it via capture-pane diffing.
 pub fn parse_sessions(output: &str) -> Vec<Session> {
     output.lines().filter_map(parse_line).collect()
 }
@@ -43,12 +44,13 @@ fn parse_line(line: &str) -> Option<Session> {
         dir,
         created,
         agent,
-        status: Status::Waiting,
+        status: Status::Idle,
         attached: f
             .next()
             .and_then(|s| s.trim().parse::<u32>().ok())
             .map(|n| n > 0)
             .unwrap_or(false),
+        git: None,
     })
 }
 
@@ -114,7 +116,7 @@ pub fn rename_session(old: &str, new: &str) -> io::Result<()> {
 /// Captures the visible pane content of a session as plain text.
 pub fn capture_pane(name: &str) -> io::Result<String> {
     let out = Command::new("tmux")
-        .args(["capture-pane", "-p", "-t", name])
+        .args(["capture-pane", "-p", "-e", "-t", name])
         .output()?;
     if !out.status.success() {
         return Err(io::Error::other(
@@ -145,7 +147,7 @@ mod tests {
         assert_eq!(sessions[0].dir, "/home/u/proj-a");
         assert_eq!(sessions[0].created, 1716800000);
         assert_eq!(sessions[0].agent, "claude");
-        assert_eq!(sessions[0].status, Status::Waiting);
+        assert_eq!(sessions[0].status, Status::Idle);
         assert!(!sessions[0].attached);
     }
 
