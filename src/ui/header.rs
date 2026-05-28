@@ -1,7 +1,6 @@
 use crate::app::App;
 use crate::spinner;
 use crate::theme as th;
-use crate::timeutil;
 use crate::tmux::Status;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -16,9 +15,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let running = app.sessions.iter().filter(|s| s.status == Status::Running).count();
     let idle = total - running;
     let spin = spinner::glyph(app.spinner_frame);
-    // TODO(Task 11): main loop caches the clock once per minute in `app.clock`
-    // — header will read that instead so we don't fork `date` on every draw.
-    let clock = timeutil::clock_hhmm();
+    let clock = &app.clock;
 
     let mut spans = vec![
         Span::styled(th::LOGO, Style::default().fg(th::AMBER).add_modifier(Modifier::BOLD)),

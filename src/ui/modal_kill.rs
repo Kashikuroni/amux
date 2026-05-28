@@ -1,13 +1,14 @@
 use crate::theme as th;
+use crate::tmux::Session;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
-pub fn render(f: &mut Frame, name: &str) {
+pub fn render(f: &mut Frame, name: &str, session: Option<&Session>) {
     let area = super::centered(56, 36, f.area());
     f.render_widget(Clear, area);
-    let lines = vec![
+    let mut lines = vec![
         Line::from(vec![
             Span::styled("✕ ", Style::default().fg(th::RED).add_modifier(Modifier::BOLD)),
             Span::styled(
@@ -16,7 +17,29 @@ pub fn render(f: &mut Frame, name: &str) {
             ),
         ]),
         Line::from(""),
-        Line::from(Span::styled(name.to_string(), Style::default().fg(th::AMBER))),
+    ];
+    // session header line: name [· status]
+    let mut head = vec![Span::styled(name.to_string(), Style::default().fg(th::AMBER))];
+    if let Some(s) = session {
+        let label = match s.status {
+            crate::tmux::Status::Running => "running",
+            crate::tmux::Status::Idle => "idle",
+        };
+        head.push(Span::styled(format!("  ·  {label}"), Style::default().fg(th::MUTED)));
+    }
+    lines.push(Line::from(head));
+    // path · ⎇ branch
+    if let Some(s) = session {
+        let mut sub = vec![Span::styled(s.dir.clone(), Style::default().fg(th::MUTED))];
+        if let Some(g) = &s.git {
+            sub.push(Span::styled(
+                format!("  ·  {} {}", th::BRANCH, g.branch),
+                Style::default().fg(th::DIM),
+            ));
+        }
+        lines.push(Line::from(sub));
+    }
+    lines.extend([
         Line::from(""),
         Line::from(Span::styled(
             "Stops the agent process and discards unsaved scratch. Files on disk are unaffected.",
@@ -29,13 +52,14 @@ pub fn render(f: &mut Frame, name: &str) {
             Span::styled(" n · no ", Style::default().fg(th::TEXT)),
             Span::styled("     esc to dismiss", Style::default().fg(th::DIM)),
         ]),
-    ];
+    ]);
     f.render_widget(
         Paragraph::new(lines).block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(th::RED))
-                .title(" confirm "),
+                .title(" confirm ")
+                .style(Style::default().bg(th::BG_RAISED)),
         ),
         area,
     );
@@ -60,7 +84,7 @@ mod tests {
         // Use a tall-enough terminal so the 36%-height modal (≥9 rows for 7 lines + 2 borders)
         // can display all content. 70×30 gives ~10 inner rows at 36%.
         let mut t = Terminal::new(TestBackend::new(70, 30)).unwrap();
-        t.draw(|f| render(f, "project-a")).unwrap();
+        t.draw(|f| render(f, "project-a", None)).unwrap();
         let s = buf_to_string(t.backend().buffer());
         assert!(s.contains("Kill session?"));
         assert!(s.contains("project-a"));

@@ -109,7 +109,8 @@ pub fn render(f: &mut Frame, form: &CreateForm) {
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(th::AMBER))
-                .title(" new session "),
+                .title(" new session ")
+                .style(Style::default().bg(th::BG_RAISED)),
         ),
         area,
     );

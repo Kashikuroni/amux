@@ -38,7 +38,8 @@ pub fn render(f: &mut Frame) {
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(th::BORDER_HI))
-                .title(" help "),
+                .title(" help ")
+                .style(Style::default().bg(th::BG_RAISED)),
         ),
         area,
     );

@@ -180,6 +180,7 @@ pub struct App {
     pub spinner_frame: usize,
     pub now_unix: i64,
     pub tmux_missing: bool,
+    pub clock: String,
 }
 
 impl App {
@@ -197,6 +198,7 @@ impl App {
             spinner_frame: 0,
             now_unix: crate::timeutil::now_unix(),
             tmux_missing: false,
+            clock: crate::timeutil::clock_hhmm(),
         }
     }
 
@@ -275,6 +277,9 @@ impl App {
         match self.mode_kind() {
             ModeKind::List => self.handle_list_key(key),
             ModeKind::Help => {
+                if key.code == KeyCode::Char('q') {
+                    self.should_quit = true;
+                }
                 self.mode = Mode::List;
                 None
             }
@@ -497,6 +502,7 @@ impl App {
             Ok(mut sessions) => {
                 let selected_name = self.selected_name();
                 self.now_unix = crate::timeutil::now_unix();
+                self.clock = crate::timeutil::clock_hhmm();
                 let mut new_snaps = HashMap::new();
                 let mut new_preview = None;
                 for s in &mut sessions {

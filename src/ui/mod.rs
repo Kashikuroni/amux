@@ -35,7 +35,10 @@ pub fn draw(f: &mut Frame, app: &App) {
     match &app.mode {
         Mode::Create(form) => modal_new::render(f, form),
         Mode::Rename(_) => draw_rename_modal(f, app),
-        Mode::ConfirmDelete(name) => modal_kill::render(f, name),
+        Mode::ConfirmDelete(name) => {
+            let s = app.sessions.iter().find(|s| &s.name == name);
+            modal_kill::render(f, name, s);
+        }
         Mode::Help => modal_help::render(f),
         Mode::List | Mode::Filter => {}
     }
