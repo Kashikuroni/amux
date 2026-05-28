@@ -32,7 +32,17 @@ pub fn parse_shortstat(s: &str) -> (u32, u32) {
 }
 
 fn git_out(dir: &str, args: &[&str]) -> Option<String> {
-    let out = Command::new("git").arg("-C").arg(dir).args(args).output().ok()?;
+    // `LC_ALL=C` forces English so we can parse "insertion"/"deletion" reliably
+    // regardless of the user's locale. `GIT_OPTIONAL_LOCKS=0` is safe for our
+    // read-only commands and avoids stalling on a locked index.
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("LC_ALL", "C")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .output()
+        .ok()?;
     if !out.status.success() {
         return None;
     }
@@ -43,7 +53,10 @@ fn git_out(dir: &str, args: &[&str]) -> Option<String> {
 pub fn read(dir: &str) -> Option<GitInfo> {
     let branch = git_out(dir, &["symbolic-ref", "--short", "HEAD"])
         .or_else(|| git_out(dir, &["rev-parse", "--short", "HEAD"]))?;
-    let shortstat = git_out(dir, &["diff", "--shortstat"]).unwrap_or_default();
+    // `diff HEAD` includes both staged and unstaged changes (vs plain `diff`,
+    // which is unstaged only). On a brand-new repo with no commits this is
+    // simply empty, which the unwrap_or_default handles.
+    let shortstat = git_out(dir, &["diff", "HEAD", "--shortstat"]).unwrap_or_default();
     let (added, removed) = parse_shortstat(&shortstat);
     Some(GitInfo { branch, added, removed })
 }
@@ -93,6 +106,8 @@ mod tests {
         run(&["commit", "-qm", "init"]);
         // modify tracked file → uncommitted diff
         std::fs::write(dir.join("f.txt"), "a\nb\nc\n").unwrap();
+        // stage the modification — `diff HEAD` must still count it
+        run(&["add", "f.txt"]);
 
         let info = read(d).expect("repo");
         assert_eq!(info.branch, "main");
