@@ -10,8 +10,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
 
+// TODO(Task 8): these move into the sessions submodule when draw_sidebar is replaced.
 const SPINNER: char = '\u{283B}'; // ⠻ : shown for Running
-const READY: char = '\u{25CF}'; //   ● : shown for Waiting
+const READY: char = '\u{25CF}'; //   ● : shown for Idle
 
 pub fn draw(f: &mut Frame, app: &App) {
     let root = ratatui::layout::Layout::vertical([
@@ -34,19 +35,19 @@ pub fn draw(f: &mut Frame, app: &App) {
     }
 }
 
-fn draw_body(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &App) {
-    let cols = ratatui::layout::Layout::horizontal([
-        ratatui::layout::Constraint::Percentage(40),
-        ratatui::layout::Constraint::Length(1),
-        ratatui::layout::Constraint::Min(0),
+fn draw_body(f: &mut Frame, area: Rect, app: &App) {
+    let cols = Layout::horizontal([
+        Constraint::Percentage(40),
+        Constraint::Length(1),
+        Constraint::Min(0),
     ])
     .split(area);
     draw_sidebar(f, cols[0], app);
     // vertical separator
     f.render_widget(
-        ratatui::widgets::Block::default()
-            .borders(ratatui::widgets::Borders::LEFT)
-            .border_style(ratatui::style::Style::default().fg(th::BORDER)),
+        Block::default()
+            .borders(Borders::LEFT)
+            .border_style(Style::default().fg(th::BORDER)),
         cols[1],
     );
     draw_preview(f, cols[2], app);
@@ -102,6 +103,7 @@ fn draw_preview(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(para, area);
 }
 
+/// Centered Rect helper shared with modal submodules (Task 10).
 /// A centered rectangle `pct_x`/`pct_y` percent of the screen.
 /// Pass even percentages: `(100 - pct)` is halved with integer division, so
 /// odd values leave the dialog 1 cell off-center.
@@ -265,9 +267,8 @@ mod tests {
     }
 
     #[test]
-    fn renders_error_footer_and_create_modal() {
+    fn renders_create_modal() {
         let mut app = App::new(Config::default());
-        app.error = Some("boom".into());
         app.mode = crate::app::Mode::Create(crate::app::CreateForm::new("claude", &[]));
 
         let backend = TestBackend::new(100, 20);

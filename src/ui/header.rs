@@ -16,6 +16,8 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let running = app.sessions.iter().filter(|s| s.status == Status::Running).count();
     let idle = total - running;
     let spin = spinner::glyph(app.spinner_frame);
+    // TODO(Task 11): main loop caches the clock once per minute in `app.clock`
+    // — header will read that instead so we don't fork `date` on every draw.
     let clock = timeutil::clock_hhmm();
 
     let mut spans = vec![

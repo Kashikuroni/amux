@@ -16,6 +16,7 @@ pub fn humanize_age(secs: i64) -> String {
 }
 
 /// Current local time as "HH:MM" via `date`. Empty string if it fails.
+/// NOTE: forks a process — callers should cache (Task 11 wires this in main loop).
 pub fn clock_hhmm() -> String {
     Command::new("date")
         .args(["+%H:%M"])

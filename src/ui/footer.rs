@@ -62,6 +62,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         spans.push(Span::styled(format!(" {label}"), Style::default().fg(th::MUTED)));
     }
     if let Some(q) = &app.filter {
+        // Appended inline; clips silently at narrow widths (ratatui won't wrap a Line).
         spans.push(Span::styled(format!("    /{q}"), Style::default().fg(th::AMBER_HI)));
     }
     f.render_widget(Paragraph::new(Line::from(spans)), rows[1]);
