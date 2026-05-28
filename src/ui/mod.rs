@@ -1,13 +1,16 @@
 mod footer;
 mod header;
+mod modal_help;
+mod modal_kill;
+mod modal_new;
 mod preview;
 mod sessions;
 
-use crate::app::{App, CreateField, Mode};
+use crate::app::{App, Mode};
 use crate::theme as th;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
+use ratatui::style::Style;
+use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
@@ -24,10 +27,10 @@ pub fn draw(f: &mut Frame, app: &App) {
     footer::render(f, root[2], app);
 
     match &app.mode {
-        Mode::Create(_) => draw_create_modal(f, app),
+        Mode::Create(form) => modal_new::render(f, form),
         Mode::Rename(_) => draw_rename_modal(f, app),
-        Mode::ConfirmDelete(name) => draw_confirm_modal(f, name),
-        Mode::Help => draw_help_modal(f),
+        Mode::ConfirmDelete(name) => modal_kill::render(f, name),
+        Mode::Help => modal_help::render(f),
         Mode::List | Mode::Filter => {}
     }
 }
@@ -69,67 +72,6 @@ pub(crate) fn centered(pct_x: u16, pct_y: u16, area: Rect) -> Rect {
     .split(v[1])[1]
 }
 
-fn field_line(label: &str, value: &str, focused: bool) -> Line<'static> {
-    let prefix = if focused { "> " } else { "  " };
-    Line::from(format!("{prefix}{label}: {value}"))
-}
-
-fn draw_create_modal(f: &mut Frame, app: &App) {
-    let Mode::Create(form) = &app.mode else { return };
-    let area = centered(60, 60, f.area());
-    f.render_widget(Clear, area);
-
-    let mut lines = vec![
-        field_line("name ", &form.name, form.field == CreateField::Name),
-        field_line("dir  ", &form.dir, form.field == CreateField::Dir),
-        field_line("agent", &form.agent, form.field == CreateField::Agent),
-        Line::from(""),
-    ];
-
-    if form.field == CreateField::Dir {
-        // Window the list so the highlighted row stays visible when entries overflow
-        // the modal. inner height = area minus borders; reserve 4 header rows
-        // (3 fields + blank) and 2 footer rows (blank + hint).
-        let inner_h = area.height.saturating_sub(2) as usize;
-        let cap = inner_h.saturating_sub(6).max(1);
-        let total = form.dir_entries.len();
-        let start = if form.dir_selected >= cap {
-            form.dir_selected + 1 - cap
-        } else {
-            0
-        };
-        let end = (start + cap).min(total);
-        for i in start..end {
-            let selected = i == form.dir_selected;
-            let text = format!(
-                "{}{}/",
-                if selected { "> " } else { "  " },
-                form.dir_entries[i]
-            );
-            if selected {
-                lines.push(Line::from(Span::styled(
-                    text,
-                    Style::default().add_modifier(Modifier::REVERSED),
-                )));
-            } else {
-                lines.push(Line::from(text));
-            }
-        }
-        lines.push(Line::from(""));
-        lines.push(Line::from(
-            "↑↓ select · Tab/→ enter · Enter confirm · Esc cancel",
-        ));
-    } else {
-        lines.push(Line::from(
-            "Tab/Enter: next · Enter on agent: create · Esc: cancel",
-        ));
-    }
-
-    let para = Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title("new session"));
-    f.render_widget(para, area);
-}
-
 fn draw_rename_modal(f: &mut Frame, app: &App) {
     let Mode::Rename(form) = &app.mode else { return };
     let area = centered(60, 20, f.area());
@@ -138,34 +80,12 @@ fn draw_rename_modal(f: &mut Frame, app: &App) {
         Line::from(format!("new name: {}", form.buffer)),
         Line::from("Enter: rename  ·  Esc: cancel"),
     ])
-    .block(Block::default().borders(Borders::ALL).title("rename"));
-    f.render_widget(para, area);
-}
-
-fn draw_confirm_modal(f: &mut Frame, name: &str) {
-    let area = centered(50, 20, f.area());
-    f.render_widget(Clear, area);
-    let para = Paragraph::new(format!("Kill session \"{name}\"? (y/n)"))
-        .block(Block::default().borders(Borders::ALL).title("confirm"));
-    f.render_widget(para, area);
-}
-
-fn draw_help_modal(f: &mut Frame) {
-    let area = centered(50, 60, f.area());
-    f.render_widget(Clear, area);
-    let lines = vec![
-        Line::from("k / j        navigate up / down"),
-        Line::from("Enter / o    attach to session"),
-        Line::from("n            new session"),
-        Line::from("d            kill session"),
-        Line::from("r            rename session"),
-        Line::from("q            quit (sessions keep running)"),
-        Line::from("?            toggle this help"),
-        Line::from(""),
-        Line::from("any key to close"),
-    ];
-    let para = Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title("help"));
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(th::AMBER))
+            .title("rename"),
+    );
     f.render_widget(para, area);
 }
 
