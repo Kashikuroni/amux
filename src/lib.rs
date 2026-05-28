@@ -1,6 +1,7 @@
 pub mod app;
 pub mod browse;
 pub mod config;
+pub mod git;
 pub mod spinner;
 pub mod theme;
 pub mod timeutil;
