@@ -4,6 +4,9 @@ use std::collections::HashMap;
 
 use crossterm::event::{KeyCode, KeyEvent};
 
+/// Sentinel label for the free-text agent slot in `CreateForm::agent_choices`.
+pub const CUSTOM_AGENT_SLOT: &str = "custom\u{2026}"; // "custom…"
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CreateField {
     Name,
@@ -32,7 +35,7 @@ impl CreateForm {
                 choices.push(p.clone());
             }
         }
-        choices.push("custom…".to_string());
+        choices.push(CUSTOM_AGENT_SLOT.to_string());
         Self {
             name: String::new(),
             dir: "~/".to_string(),
@@ -90,7 +93,7 @@ impl CreateForm {
     pub fn agent_is_custom(&self) -> bool {
         self.agent_choices
             .get(self.agent_index)
-            .map(|c| c == "custom…")
+            .map(|c| c == CUSTOM_AGENT_SLOT)
             .unwrap_or(false)
     }
 
@@ -377,8 +380,9 @@ impl App {
             KeyCode::Right if form.field == CreateField::Agent => form.cycle_agent(1),
             KeyCode::Backspace => {
                 if form.field == CreateField::Agent && !form.agent_is_custom() {
-                    // editing a preset turns it into a custom command
+                    // Backspace off a preset: jump to custom and start fresh (matches Char).
                     form.agent_index = form.agent_choices.len().saturating_sub(1);
+                    form.agent.clear();
                 }
                 form.current_mut().pop();
             }
@@ -556,11 +560,10 @@ pub fn expand_tilde(path: &str) -> String {
 /// or None if not found / empty. Display-only; never executes the command.
 pub fn resolve_agent_path(cmd: &str) -> Option<String> {
     let bin = cmd.split_whitespace().next()?;
-    if bin.is_empty() {
-        return None;
-    }
+    // Pass `bin` as a positional arg ($0) so `command -v` receives it as data,
+    // not as shell code — prevents injection via ';', '$(...)', backticks, etc.
     let out = std::process::Command::new("sh")
-        .args(["-c", &format!("command -v {bin}")])
+        .args(["-c", "command -v -- \"$0\"", bin])
         .output()
         .ok()?;
     if !out.status.success() {
@@ -807,5 +810,9 @@ mod tests {
         // wrap back to first
         form.cycle_agent(1);
         assert_eq!(form.agent, "claude");
+        // negative delta wraps the other direction
+        form.cycle_agent(-1);
+        assert!(form.agent_is_custom());
+        assert_eq!(form.agent, "");
     }
 }
