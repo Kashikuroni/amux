@@ -1,3 +1,5 @@
+mod empty;
+mod error;
 mod footer;
 mod header;
 mod modal_help;
@@ -15,6 +17,10 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
 pub fn draw(f: &mut Frame, app: &App) {
+    if app.tmux_missing {
+        error::render(f);
+        return;
+    }
     let root = ratatui::layout::Layout::vertical([
         ratatui::layout::Constraint::Length(2), // header + rule
         ratatui::layout::Constraint::Min(1),    // body
@@ -36,6 +42,10 @@ pub fn draw(f: &mut Frame, app: &App) {
 }
 
 fn draw_body(f: &mut Frame, area: Rect, app: &App) {
+    if app.sessions.is_empty() {
+        empty::render(f, area);
+        return;
+    }
     let cols = Layout::horizontal([
         Constraint::Percentage(40),
         Constraint::Length(1),

@@ -179,6 +179,7 @@ pub struct App {
     pub filter: Option<String>,
     pub spinner_frame: usize,
     pub now_unix: i64,
+    pub tmux_missing: bool,
 }
 
 impl App {
@@ -195,6 +196,7 @@ impl App {
             filter: None,
             spinner_frame: 0,
             now_unix: crate::timeutil::now_unix(),
+            tmux_missing: false,
         }
     }
 

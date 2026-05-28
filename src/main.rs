@@ -10,7 +10,7 @@ use crossterm::terminal::{
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use std::io::{self, stdout, Stdout};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 type Term = Terminal<CrosstermBackend<Stdout>>;
 
@@ -25,22 +25,24 @@ fn install_panic_hook() {
 }
 
 fn main() -> io::Result<()> {
-    if !tmux::is_available() {
-        eprintln!("error: `tmux` not found in PATH. Install tmux and try again.");
-        std::process::exit(1);
-    }
-
     let config = Config::load();
-    let interval = Duration::from_millis(config.refresh_interval_ms.max(100));
+    let refresh = Duration::from_millis(config.refresh_interval_ms.max(100));
     let mut app = App::new(config);
-    app.refresh();
+    if !tmux::is_available() {
+        app.tmux_missing = true;
+    } else {
+        app.refresh();
+    }
 
     install_panic_hook();
     let mut terminal = init_terminal()?;
-    let result = run(&mut terminal, &mut app, interval);
+    let result = run(&mut terminal, &mut app, refresh);
     let restore = restore_terminal(&mut terminal);
-    // Preserve the loop's error if it failed; otherwise surface any restore error.
-    result.and(restore)
+    result.and(restore)?;
+    if app.tmux_missing {
+        std::process::exit(1);
+    }
+    Ok(())
 }
 
 fn init_terminal() -> io::Result<Term> {
@@ -57,25 +59,37 @@ fn restore_terminal(terminal: &mut Term) -> io::Result<()> {
     Ok(())
 }
 
-fn run(terminal: &mut Term, app: &mut App, interval: Duration) -> io::Result<()> {
+fn run(terminal: &mut Term, app: &mut App, refresh: Duration) -> io::Result<()> {
+    let start = Instant::now();
+    let tick = Duration::from_millis(80);
+    let mut last_refresh = Instant::now();
     loop {
+        app.spinner_frame = cm::spinner::frame_index(start.elapsed().as_millis());
         terminal.draw(|f| ui::draw(f, app))?;
 
-        if event::poll(interval)? {
+        if event::poll(tick)? {
             if let Event::Key(key) = event::read()? {
                 if key.kind != KeyEventKind::Press {
                     continue;
                 }
-                // Ctrl-C always quits (raw mode suppresses SIGINT).
                 if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
                     break;
+                }
+                if app.tmux_missing {
+                    if key.code == KeyCode::Char('q') {
+                        break;
+                    }
+                    continue;
                 }
                 if let Some(action) = app.handle_key(key) {
                     handle_action(terminal, app, action)?;
                 }
             }
-        } else {
+        }
+
+        if !app.tmux_missing && last_refresh.elapsed() >= refresh {
             app.refresh();
+            last_refresh = Instant::now();
         }
 
         if app.should_quit {
