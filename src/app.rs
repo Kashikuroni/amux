@@ -31,6 +31,9 @@ pub struct CreateForm {
     pub base_branches: Vec<String>,
     pub base_index: usize,
     pub new_branch: String,
+    /// True when opened pre-filled for an existing project (`N`): `dir` and
+    /// `agent` are fixed and the flow only walks Name → Worktree → [Base → Branch].
+    pub prefilled: bool,
 }
 
 impl CreateForm {
@@ -56,7 +59,20 @@ impl CreateForm {
             base_branches: Vec::new(),
             base_index: 0,
             new_branch: String::new(),
+            prefilled: false,
         }
+    }
+
+    /// New-session form pre-filled for an existing project: `dir` and `agent`
+    /// are fixed, so the streamlined flow only walks Name → Worktree → [Base →
+    /// Branch]. `new(project_agent, ...)` already puts `project_agent` first in
+    /// `agent_choices` and selects it (index 0), so the agent is pre-chosen.
+    pub fn for_project(project_dir: &str, project_agent: &str, presets: &[String]) -> Self {
+        let mut f = CreateForm::new(project_agent, presets);
+        f.dir = collapse_home(project_dir);
+        f.prefilled = true;
+        f.field = CreateField::Name;
+        f
     }
 
     fn current_mut(&mut self) -> &mut String {
@@ -70,6 +86,16 @@ impl CreateForm {
     }
 
     fn next_field(&self) -> CreateField {
+        if self.prefilled {
+            return match self.field {
+                CreateField::Name => CreateField::Worktree,
+                CreateField::Worktree if self.worktree => CreateField::Base,
+                CreateField::Worktree => CreateField::Name,
+                CreateField::Base => CreateField::Branch,
+                CreateField::Branch => CreateField::Name,
+                CreateField::Dir | CreateField::Agent => CreateField::Name,
+            };
+        }
         match self.field {
             CreateField::Name => CreateField::Dir,
             CreateField::Dir => CreateField::Worktree,
@@ -123,6 +149,9 @@ impl CreateForm {
 
     /// Total number of steps shown in the `N of M` indicator.
     pub fn total_steps(&self) -> usize {
+        if self.prefilled {
+            return if self.worktree { 4 } else { 2 };
+        }
         if self.worktree {
             5
         } else {
@@ -188,6 +217,15 @@ impl CreateForm {
 
     /// 1-based position of the focused field, for the `N of M` step indicator.
     pub fn step(&self) -> usize {
+        if self.prefilled {
+            return match self.field {
+                CreateField::Name => 1,
+                CreateField::Worktree => 2,
+                CreateField::Base => 3,
+                CreateField::Branch => 4,
+                _ => 1,
+            };
+        }
         match self.field {
             CreateField::Name => 1,
             CreateField::Dir => 2,
@@ -1954,6 +1992,51 @@ mod tests {
     fn create_form_starts_in_home_dir() {
         let form = CreateForm::new("claude", &[]);
         assert_eq!(form.dir, "~/");
+    }
+
+    #[test]
+    fn for_project_prefills_dir_agent_and_starts_at_name() {
+        let form = CreateForm::for_project("/home/u/proj", "claude", &["codex".into()]);
+        assert!(form.prefilled);
+        assert_eq!(form.dir, "/home/u/proj"); // not under $HOME → unchanged by collapse_home
+        assert_eq!(form.agent, "claude");
+        assert_eq!(form.agent_index, 0); // project agent pre-selected
+        assert_eq!(form.field, CreateField::Name);
+    }
+
+    #[test]
+    fn prefilled_flow_skips_dir_and_agent() {
+        let mut form = CreateForm::for_project("/home/u/proj", "claude", &[]);
+        form.advance();
+        assert_eq!(form.field, CreateField::Worktree);
+        form.advance();
+        assert_eq!(form.field, CreateField::Name);
+    }
+
+    #[test]
+    fn prefilled_flow_with_worktree_walks_base_then_branch() {
+        let mut form = CreateForm::for_project("/home/u/proj", "claude", &[]);
+        form.field = CreateField::Worktree;
+        form.worktree = true;
+        form.advance();
+        assert_eq!(form.field, CreateField::Base);
+        form.advance();
+        assert_eq!(form.field, CreateField::Branch);
+        form.advance();
+        assert_eq!(form.field, CreateField::Name);
+    }
+
+    #[test]
+    fn prefilled_step_indicator_counts() {
+        let mut form = CreateForm::for_project("/home/u/proj", "claude", &[]);
+        assert_eq!(form.total_steps(), 2);
+        assert_eq!(form.step(), 1);
+        form.field = CreateField::Worktree;
+        assert_eq!(form.step(), 2);
+        form.worktree = true;
+        assert_eq!(form.total_steps(), 4);
+        form.field = CreateField::Branch;
+        assert_eq!(form.step(), 4);
     }
 
     #[test]
