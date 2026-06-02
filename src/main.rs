@@ -69,9 +69,9 @@ fn main() -> io::Result<()> {
 ///
 /// The first request still fires immediately at startup.
 fn spawn_usage_poller() -> mpsc::Receiver<am::usage::Account> {
-    const POLL_INTERVAL: Duration = Duration::from_secs(300); // 5 min, steady state
-    const RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(120); // after a 429
-    const RETRY_INTERVAL: Duration = Duration::from_secs(30); // transient error
+    const POLL_INTERVAL: Duration = Duration::from_secs(180); // 3 min, steady state
+    const RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(180); // 3 min after a 429
+    const RETRY_INTERVAL: Duration = Duration::from_secs(30); // transient error (net/token)
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         let mut got_usage = false;
