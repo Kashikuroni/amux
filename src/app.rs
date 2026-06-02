@@ -11,6 +11,9 @@ pub const CUSTOM_AGENT_SLOT: &str = "custom\u{2026}"; // "custom…"
 pub enum CreateField {
     Name,
     Dir,
+    Worktree,
+    Base,
+    Branch,
     Agent,
 }
 
@@ -24,6 +27,10 @@ pub struct CreateForm {
     pub dir_selected: usize,
     pub agent_choices: Vec<String>,
     pub agent_index: usize,
+    pub worktree: bool,
+    pub base_branches: Vec<String>,
+    pub base_index: usize,
+    pub new_branch: String,
 }
 
 impl CreateForm {
@@ -45,6 +52,10 @@ impl CreateForm {
             dir_selected: 0,
             agent_choices: choices,
             agent_index: 0,
+            worktree: false,
+            base_branches: Vec::new(),
+            base_index: 0,
+            new_branch: String::new(),
         }
     }
 
@@ -52,15 +63,60 @@ impl CreateForm {
         match self.field {
             CreateField::Name => &mut self.name,
             CreateField::Dir => &mut self.dir,
+            CreateField::Branch => &mut self.new_branch,
             CreateField::Agent => &mut self.agent,
+            CreateField::Worktree | CreateField::Base => &mut self.agent,
         }
     }
 
     fn next_field(&self) -> CreateField {
         match self.field {
             CreateField::Name => CreateField::Dir,
-            CreateField::Dir => CreateField::Agent,
+            CreateField::Dir => CreateField::Worktree,
+            CreateField::Worktree if self.worktree => CreateField::Base,
+            CreateField::Worktree => CreateField::Agent,
+            CreateField::Base => CreateField::Branch,
+            CreateField::Branch => CreateField::Agent,
             CreateField::Agent => CreateField::Name,
+        }
+    }
+
+    /// Advance focus to the next field (used by Tab/Enter and tests).
+    pub fn advance(&mut self) {
+        self.field = self.next_field();
+        if self.field == CreateField::Dir {
+            self.refresh_dir_entries();
+        }
+    }
+
+    /// Toggle the worktree option. On enabling, load branches and prefill the
+    /// new-branch name from the session name (only if still empty).
+    pub fn toggle_worktree(&mut self) {
+        self.worktree = !self.worktree;
+        if self.worktree {
+            self.base_branches = crate::git::list_branches(&expand_tilde(&self.dir));
+            self.base_index = 0;
+            if self.new_branch.is_empty() {
+                self.new_branch = self.name.trim().to_string();
+            }
+        }
+    }
+
+    /// Move the base-branch selection by `delta` (wraps). No-op if no branches.
+    pub fn cycle_base(&mut self, delta: isize) {
+        let n = self.base_branches.len() as isize;
+        if n == 0 {
+            return;
+        }
+        self.base_index = (((self.base_index as isize + delta) % n + n) % n) as usize;
+    }
+
+    /// Total number of steps shown in the `N of M` indicator.
+    pub fn total_steps(&self) -> usize {
+        if self.worktree {
+            5
+        } else {
+            3
         }
     }
 
@@ -120,12 +176,15 @@ impl CreateForm {
         }
     }
 
-    /// 1-based position of the focused field, for the `N of 3` step indicator.
+    /// 1-based position of the focused field, for the `N of M` step indicator.
     pub fn step(&self) -> usize {
         match self.field {
             CreateField::Name => 1,
             CreateField::Dir => 2,
-            CreateField::Agent => 3,
+            CreateField::Worktree => 3,
+            CreateField::Base => 3,
+            CreateField::Branch => 4,
+            CreateField::Agent => self.total_steps(),
         }
     }
 
@@ -1219,6 +1278,12 @@ pub fn session_root(s: &Session) -> &str {
     }
 }
 
+/// True if the session runs in a worktree rather than the project root — i.e.
+/// its directory sits below the project root (e.g. under `.worktrees/`).
+pub fn is_worktree(s: &Session) -> bool {
+    session_root(s) != s.dir.trim_end_matches('/')
+}
+
 /// Default display name for a project: the last path component of its root.
 pub fn project_default_name(root: &str) -> &str {
     root.trim_end_matches('/')
@@ -1464,6 +1529,18 @@ mod tests {
         let mut s = at("w", "/home/u/proj/.worktrees/feat");
         s.worktree_repo = Some("/home/u/proj".into());
         assert_eq!(session_root(&s), "/home/u/proj");
+    }
+
+    #[test]
+    fn is_worktree_detects_subdir_sessions() {
+        // Root session: dir == project root → not a worktree.
+        assert!(!is_worktree(&at("main", "/home/u/proj")));
+        // Path-based worktree (no @cm_repo set).
+        assert!(is_worktree(&at("feat", "/home/u/proj/.worktrees/feat")));
+        // Worktree flagged via @cm_repo.
+        let mut s = at("feat", "/home/u/proj/.worktrees/feat");
+        s.worktree_repo = Some("/home/u/proj".into());
+        assert!(is_worktree(&s));
     }
 
     #[test]
@@ -1937,5 +2014,36 @@ mod tests {
         assert_eq!(abbreviate_path("~/work"), "~/work");
         assert_eq!(abbreviate_path("~/"), "~");
         assert_eq!(abbreviate_path("/a/b/c"), "/\u{2026}/c");
+    }
+
+    #[test]
+    fn worktree_off_skips_base_and_branch() {
+        let mut form = CreateForm::new("claude", &[]);
+        form.field = CreateField::Worktree;
+        assert!(!form.worktree);
+        form.advance(); // toggle off -> straight to Agent
+        assert_eq!(form.field, CreateField::Agent);
+    }
+
+    #[test]
+    fn worktree_on_visits_base_and_branch() {
+        let mut form = CreateForm::new("claude", &[]);
+        form.field = CreateField::Worktree;
+        form.toggle_worktree(); // turn on
+        assert!(form.worktree);
+        form.advance();
+        assert_eq!(form.field, CreateField::Base);
+        form.advance();
+        assert_eq!(form.field, CreateField::Branch);
+        form.advance();
+        assert_eq!(form.field, CreateField::Agent);
+    }
+
+    #[test]
+    fn step_count_grows_with_worktree() {
+        let mut form = CreateForm::new("claude", &[]);
+        assert_eq!(form.total_steps(), 3);
+        form.worktree = true;
+        assert_eq!(form.total_steps(), 5);
     }
 }
