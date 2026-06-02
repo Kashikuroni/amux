@@ -89,16 +89,26 @@ impl CreateForm {
         }
     }
 
+    /// True when the current `dir` resolves inside a git repository.
+    pub fn dir_is_repo(&self) -> bool {
+        crate::git::repo_root(&expand_tilde(&self.dir)).is_some()
+    }
+
     /// Toggle the worktree option. On enabling, load branches and prefill the
     /// new-branch name from the session name (only if still empty).
     pub fn toggle_worktree(&mut self) {
-        self.worktree = !self.worktree;
         if self.worktree {
-            self.base_branches = crate::git::list_branches(&expand_tilde(&self.dir));
-            self.base_index = 0;
-            if self.new_branch.is_empty() {
-                self.new_branch = self.name.trim().to_string();
-            }
+            self.worktree = false;
+            return;
+        }
+        if !self.dir_is_repo() {
+            return; // not a git repo — cannot enable
+        }
+        self.worktree = true;
+        self.base_branches = crate::git::list_branches(&expand_tilde(&self.dir));
+        self.base_index = 0;
+        if self.new_branch.is_empty() {
+            self.new_branch = self.name.trim().to_string();
         }
     }
 
@@ -991,7 +1001,7 @@ impl App {
                     match validate_create(&form.name, &form.dir, &existing) {
                         Ok(()) => {
                             self.error = None;
-                            form.field = CreateField::Agent;
+                            form.advance();
                         }
                         Err(e) => self.error = Some(e),
                     }
@@ -2129,11 +2139,43 @@ mod tests {
         assert_eq!(abbreviate_path("/a/b/c"), "/\u{2026}/c");
     }
 
+    fn temp_git_repo(tag: &str) -> std::path::PathBuf {
+        use std::process::Command;
+        let dir = std::env::temp_dir().join(format!("am_app_wt_{}_{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let d = dir.to_str().unwrap();
+        let run = |a: &[&str]| {
+            Command::new("git")
+                .arg("-C")
+                .arg(d)
+                .args(a)
+                .output()
+                .unwrap();
+        };
+        run(&["init", "-q", "-b", "main"]);
+        run(&["config", "user.email", "t@t"]);
+        run(&["config", "user.name", "t"]);
+        std::fs::write(dir.join("f.txt"), "a\n").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-qm", "init"]);
+        dir
+    }
+
     #[test]
     fn space_toggles_worktree_on_worktree_step() {
+        if std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let repo = temp_git_repo("space");
         let mut app = App::new(Config::default());
         let mut form = CreateForm::new("claude", &[]);
         form.name = "s".into();
+        form.dir = repo.to_str().unwrap().to_string();
         form.field = CreateField::Worktree;
         app.mode = Mode::Create(form);
         app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
@@ -2144,6 +2186,7 @@ mod tests {
             }
             _ => panic!("still in create mode"),
         }
+        let _ = std::fs::remove_dir_all(&repo);
     }
 
     #[test]
@@ -2172,8 +2215,17 @@ mod tests {
 
     #[test]
     fn worktree_on_visits_base_and_branch() {
+        if std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let repo = temp_git_repo("visits");
         let mut form = CreateForm::new("claude", &[]);
         form.field = CreateField::Worktree;
+        form.dir = repo.to_str().unwrap().to_string();
         form.toggle_worktree(); // turn on
         assert!(form.worktree);
         form.advance();
@@ -2182,6 +2234,7 @@ mod tests {
         assert_eq!(form.field, CreateField::Branch);
         form.advance();
         assert_eq!(form.field, CreateField::Agent);
+        let _ = std::fs::remove_dir_all(&repo);
     }
 
     #[test]
@@ -2190,6 +2243,34 @@ mod tests {
         assert_eq!(form.total_steps(), 3);
         form.worktree = true;
         assert_eq!(form.total_steps(), 5);
+    }
+
+    #[test]
+    fn dir_enter_advances_to_worktree_step() {
+        let mut app = App::new(Config::default());
+        app.mode = Mode::Create(CreateForm::new("claude", &[]));
+        // Name step: type a name, Enter -> Dir.
+        for c in "iso".chars() {
+            app.handle_key(key(c));
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        match &app.mode {
+            Mode::Create(f) => assert_eq!(f.field, CreateField::Dir),
+            _ => panic!("expected Dir step"),
+        }
+        // Dir step: set an existing dir, Enter -> Worktree (NOT Agent).
+        if let Mode::Create(f) = &mut app.mode {
+            f.dir = "/tmp".into();
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        match &app.mode {
+            Mode::Create(f) => assert_eq!(
+                f.field,
+                CreateField::Worktree,
+                "Dir Enter must advance to the Worktree step, not skip it"
+            ),
+            _ => panic!("expected Worktree step"),
+        }
     }
 
     #[test]

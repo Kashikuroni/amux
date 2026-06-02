@@ -223,15 +223,22 @@ pub fn render(f: &mut Frame, form: &CreateForm) {
     }
     y += 1;
     if let Some(r) = row(x, y, w, bottom) {
-        let mark = if form.worktree { "[x]" } else { "[ ]" };
-        f.render_widget(
-            Paragraph::new(Line::from(vec![
+        let is_repo = form.dir_is_repo();
+        let line = if !is_repo {
+            Line::from(vec![
+                Span::styled("[ ] ", Style::default().fg(th::DIM)),
+                Span::styled("Create worktree", Style::default().fg(th::DIM)),
+                Span::styled("   requires a git repo", Style::default().fg(th::DIM)),
+            ])
+        } else {
+            let mark = if form.worktree { "[x]" } else { "[ ]" };
+            Line::from(vec![
                 Span::styled(format!("{mark} "), Style::default().fg(th::AMBER)),
                 Span::styled("Create worktree", Style::default().fg(th::TEXT_BOLD)),
                 Span::styled("   space to toggle", Style::default().fg(th::DIM)),
-            ])),
-            r,
-        );
+            ])
+        };
+        f.render_widget(Paragraph::new(line), r);
     }
     y += 1;
     if form.worktree {
