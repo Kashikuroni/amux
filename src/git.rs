@@ -1,5 +1,6 @@
 //! Read-only git info for a directory (branch + uncommitted diff stat).
 //! Never mutates the repo; non-repo dirs return None.
+use std::io::Write as _;
 use std::process::Command;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -67,6 +68,64 @@ pub fn read(dir: &str) -> Option<GitInfo> {
         added,
         removed,
     })
+}
+
+/// Runs a *mutating* git command in `dir`. Unlike `git_out`, returns the
+/// stderr-bearing error on failure so the UI can show why it failed.
+fn git_run(dir: &str, args: &[&str]) -> std::io::Result<()> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("LC_ALL", "C")
+        .output()?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(
+            String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        ))
+    }
+}
+
+/// Creates a new worktree at `wt_path` on a new branch `new_branch` forked from `base`.
+/// Fails if `new_branch` already exists.
+pub fn add_worktree(
+    repo_root: &str,
+    wt_path: &str,
+    new_branch: &str,
+    base: &str,
+) -> std::io::Result<()> {
+    git_run(
+        repo_root,
+        &["worktree", "add", "-b", new_branch, wt_path, base],
+    )
+}
+
+/// Removes the worktree at `wt_path`. No `--force`: a dirty worktree errors
+/// instead of silently discarding work. The branch itself is left intact.
+pub fn remove_worktree(repo_root: &str, wt_path: &str) -> std::io::Result<()> {
+    git_run(repo_root, &["worktree", "remove", wt_path])
+}
+
+/// Appends `entry` as its own line to `<repo_root>/.gitignore` if not already
+/// present (exact-line match). Creates the file when missing.
+pub fn ensure_gitignore(repo_root: &str, entry: &str) -> std::io::Result<()> {
+    let path = std::path::Path::new(repo_root).join(".gitignore");
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    if existing.lines().any(|l| l == entry) {
+        return Ok(());
+    }
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)?;
+    if !existing.is_empty() && !existing.ends_with('\n') {
+        f.write_all(b"\n")?;
+    }
+    f.write_all(entry.as_bytes())?;
+    f.write_all(b"\n")?;
+    Ok(())
 }
 
 /// Absolute path of the repository containing `dir`, or None if `dir` is not in a repo.
@@ -174,6 +233,61 @@ mod tests {
         let branches = list_branches(d);
         assert_eq!(branches.first().map(String::as_str), Some("main"));
         assert!(branches.iter().any(|b| b == "feature"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn add_then_remove_worktree() {
+        if Command::new("git").arg("--version").output().is_err() {
+            return;
+        }
+        let dir = temp_repo("wt");
+        let root = dir.to_str().unwrap();
+        let wt = dir.join(".worktrees").join("feature-x");
+        let wt_s = wt.to_str().unwrap();
+
+        add_worktree(root, wt_s, "feature-x", "main").expect("add");
+        assert!(
+            wt.join("f.txt").exists(),
+            "worktree checked out base content"
+        );
+        let branches = list_branches(root);
+        assert!(branches.iter().any(|b| b == "feature-x"));
+
+        remove_worktree(root, wt_s).expect("remove");
+        assert!(!wt.exists(), "worktree dir gone after remove");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn add_worktree_existing_branch_errors() {
+        if Command::new("git").arg("--version").output().is_err() {
+            return;
+        }
+        let dir = temp_repo("wtdup");
+        let root = dir.to_str().unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["branch", "dup"])
+            .output()
+            .unwrap();
+        let wt = dir.join(".worktrees").join("dup");
+        let err = add_worktree(root, wt.to_str().unwrap(), "dup", "main");
+        assert!(err.is_err(), "creating an existing branch must fail");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ensure_gitignore_appends_once() {
+        let dir = std::env::temp_dir().join(format!("cm_ign_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let root = dir.to_str().unwrap();
+        ensure_gitignore(root, ".worktrees/").unwrap();
+        ensure_gitignore(root, ".worktrees/").unwrap(); // idempotent
+        let body = std::fs::read_to_string(dir.join(".gitignore")).unwrap();
+        assert_eq!(body.matches(".worktrees/").count(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
