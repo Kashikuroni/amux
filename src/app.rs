@@ -1055,7 +1055,26 @@ impl App {
             match key.code {
                 KeyCode::Esc => return None,
                 KeyCode::Char(' ') => form.toggle_worktree(),
-                KeyCode::Tab | KeyCode::Enter => form.advance(),
+                KeyCode::Tab => form.advance(),
+                KeyCode::Enter => {
+                    if form.prefilled && !form.worktree {
+                        let existing: Vec<String> =
+                            self.sessions.iter().map(|s| s.name.clone()).collect();
+                        match build_create_action(&form, &existing) {
+                            Ok(action) => {
+                                self.error = None;
+                                return Some(action);
+                            }
+                            Err(e) => {
+                                self.error = Some(e);
+                                self.mode = Mode::Create(form);
+                                return None;
+                            }
+                        }
+                    } else {
+                        form.advance();
+                    }
+                }
                 _ => {}
             }
             self.mode = Mode::Create(form);
@@ -1097,30 +1116,15 @@ impl App {
             }
             KeyCode::Tab => form.advance(),
             KeyCode::Enter => {
-                if form.field == CreateField::Agent {
+                let submit = form.field == CreateField::Agent
+                    || (form.prefilled && form.field == CreateField::Branch);
+                if submit {
                     let existing: Vec<String> =
                         self.sessions.iter().map(|s| s.name.clone()).collect();
-                    match validate_create(&form.name, &form.dir, &existing) {
-                        Ok(()) => {
+                    match build_create_action(&form, &existing) {
+                        Ok(action) => {
                             self.error = None;
-                            let worktree = if form.worktree {
-                                Some(WorktreeSpec {
-                                    base: form
-                                        .base_branches
-                                        .get(form.base_index)
-                                        .cloned()
-                                        .unwrap_or_default(),
-                                    new_branch: form.new_branch.trim().to_string(),
-                                })
-                            } else {
-                                None
-                            };
-                            return Some(Action::Create {
-                                name: form.name.trim().to_string(),
-                                dir: expand_tilde(&form.dir),
-                                agent: form.agent.clone(),
-                                worktree,
-                            });
+                            return Some(action);
                         }
                         Err(e) => {
                             self.error = Some(e);
@@ -1129,7 +1133,7 @@ impl App {
                         }
                     }
                 } else {
-                    // Non-Agent step → advance (handles Dir refresh when needed).
+                    // Non-submit step → advance (handles Dir refresh when needed).
                     form.advance();
                 }
             }
@@ -1531,6 +1535,31 @@ pub fn abbreviate_path(path: &str) -> String {
         return trimmed.to_string();
     }
     format!("{}/\u{2026}/{}", segs[0], segs[segs.len() - 1])
+}
+
+/// Builds the create action from a completed form, or an error string if the
+/// name/dir fail validation. Shared by the Agent-step submit (non-prefilled)
+/// and the Worktree/Branch submit (prefilled) so the assembly lives in one place.
+pub fn build_create_action(form: &CreateForm, existing: &[String]) -> Result<Action, String> {
+    validate_create(&form.name, &form.dir, existing)?;
+    let worktree = if form.worktree {
+        Some(WorktreeSpec {
+            base: form
+                .base_branches
+                .get(form.base_index)
+                .cloned()
+                .unwrap_or_default(),
+            new_branch: form.new_branch.trim().to_string(),
+        })
+    } else {
+        None
+    };
+    Ok(Action::Create {
+        name: form.name.trim().to_string(),
+        dir: expand_tilde(&form.dir),
+        agent: form.agent.clone(),
+        worktree,
+    })
 }
 
 /// Validates create-form input. `dir` is checked after tilde expansion.
@@ -2024,6 +2053,67 @@ mod tests {
         assert_eq!(form.field, CreateField::Branch);
         form.advance();
         assert_eq!(form.field, CreateField::Name);
+    }
+
+    #[test]
+    fn prefilled_submit_without_worktree_creates_in_project() {
+        let dir = std::env::temp_dir().to_string_lossy().to_string();
+        let mut app = app_with(vec![at("s", "/p")]);
+        let mut form = CreateForm::for_project(&dir, "claude", &[]);
+        form.name = "sess".into();
+        form.field = CreateField::Worktree; // worktree off
+        app.mode = Mode::Create(form);
+        let act = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        match act {
+            Some(Action::Create { name, dir: d, agent, worktree }) => {
+                assert_eq!(name, "sess");
+                assert_eq!(d, dir);
+                assert_eq!(agent, "claude");
+                assert_eq!(worktree, None);
+            }
+            other => panic!("expected Action::Create, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prefilled_submit_with_worktree_carries_spec() {
+        let dir = std::env::temp_dir().to_string_lossy().to_string();
+        let mut app = app_with(vec![at("s", "/p")]);
+        let mut form = CreateForm::for_project(&dir, "claude", &[]);
+        form.name = "sess".into();
+        form.worktree = true;
+        form.base_branches = vec!["main".into()];
+        form.base_index = 0;
+        form.new_branch = "feat".into();
+        form.field = CreateField::Branch;
+        app.mode = Mode::Create(form);
+        let act = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        match act {
+            Some(Action::Create { worktree: Some(spec), .. }) => {
+                assert_eq!(spec.base, "main");
+                assert_eq!(spec.new_branch, "feat");
+            }
+            other => panic!("expected Action::Create with worktree, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn non_prefilled_still_submits_on_agent_step() {
+        let dir = std::env::temp_dir().to_string_lossy().to_string();
+        let mut app = app_with(vec![at("s", "/p")]);
+        let mut form = CreateForm::new("claude", &[]);
+        form.name = "sess".into();
+        form.dir = dir.clone();
+        form.field = CreateField::Agent;
+        app.mode = Mode::Create(form);
+        let act = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        match act {
+            Some(Action::Create { name, dir: d, .. }) => {
+                assert_eq!(name, "sess");
+                assert_eq!(d, dir);
+            }
+            other => panic!("expected Action::Create, got {other:?}"),
+        }
     }
 
     #[test]
