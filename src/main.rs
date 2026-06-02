@@ -230,7 +230,10 @@ fn handle_action(terminal: &mut Term, app: &mut App, action: Action) -> io::Resu
             }
             app.refresh();
         }
-        Action::Kill(name) => {
+        Action::Kill {
+            name,
+            remove_worktree: _,
+        } => {
             if let Err(e) = tmux::kill_session(&name) {
                 app.error = Some(e.to_string());
             }

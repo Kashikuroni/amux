@@ -214,6 +214,15 @@ impl RenameForm {
     }
 }
 
+/// Form carried by `Mode::ConfirmDelete`: the session to kill + worktree toggle.
+#[derive(Debug, Clone)]
+pub struct KillForm {
+    pub name: String,
+    /// (repo_root, worktree_path) when the session is worktree-backed; enables the toggle.
+    pub worktree: Option<(String, String)>,
+    pub remove_worktree: bool,
+}
+
 /// Free-text reply being composed for a specific session.
 ///
 /// `cursor` is a *character* index into `buffer` (0..=char_count), so editing
@@ -374,7 +383,7 @@ pub enum Mode {
     List,
     Create(CreateForm),
     Rename(RenameForm),
-    ConfirmDelete(String),
+    ConfirmDelete(KillForm),
     Help,
     Filter,
     Reply(ReplyForm),
@@ -409,7 +418,10 @@ pub enum Action {
         agent: String,
         worktree: Option<WorktreeSpec>,
     },
-    Kill(String),
+    Kill {
+        name: String,
+        remove_worktree: bool,
+    },
     Rename {
         old: String,
         new: String,
@@ -781,8 +793,13 @@ impl App {
                 ));
             }
             KeyCode::Char('d') => {
-                if let Some(name) = self.selected_name() {
-                    self.mode = Mode::ConfirmDelete(name);
+                if let Some(s) = self.selected_session() {
+                    let worktree = s.worktree_repo.clone().map(|repo| (repo, s.dir.clone()));
+                    self.mode = Mode::ConfirmDelete(KillForm {
+                        name: s.name.clone(),
+                        worktree,
+                        remove_worktree: false,
+                    });
                 }
             }
             KeyCode::Char('r') => {
@@ -927,13 +944,22 @@ impl App {
     }
 
     fn handle_confirm_key(&mut self, key: KeyEvent) -> Option<Action> {
-        let Mode::ConfirmDelete(name) = std::mem::replace(&mut self.mode, Mode::List) else {
+        let Mode::ConfirmDelete(mut form) = std::mem::replace(&mut self.mode, Mode::List) else {
             return None;
         };
         match latin_code(key.code) {
-            KeyCode::Char('y') => return Some(Action::Kill(name)),
-            KeyCode::Char('n') | KeyCode::Esc => {} // mode already reset to List
-            _ => self.mode = Mode::ConfirmDelete(name), // unknown key: stay in confirm
+            KeyCode::Char('y') => {
+                return Some(Action::Kill {
+                    name: form.name.clone(),
+                    remove_worktree: form.worktree.is_some() && form.remove_worktree,
+                })
+            }
+            KeyCode::Char(' ') if form.worktree.is_some() => {
+                form.remove_worktree = !form.remove_worktree;
+                self.mode = Mode::ConfirmDelete(form);
+            }
+            KeyCode::Char('n') | KeyCode::Esc => {}
+            _ => self.mode = Mode::ConfirmDelete(form),
         }
         None
     }
@@ -1766,8 +1792,51 @@ mod tests {
         app.handle_key(key('d'));
         assert!(matches!(app.mode, Mode::ConfirmDelete(_)));
         let action = app.handle_key(key('y'));
-        assert_eq!(action, Some(Action::Kill("a".into())));
+        assert_eq!(
+            action,
+            Some(Action::Kill {
+                name: "a".into(),
+                remove_worktree: false
+            })
+        );
         assert!(matches!(app.mode, Mode::List));
+    }
+
+    #[test]
+    fn kill_without_worktree_yields_plain_kill() {
+        let mut app = app_with_two_sessions(); // sessions have worktree_repo: None
+        app.handle_key(key('d'));
+        let action = app.handle_key(key('y'));
+        match action {
+            Some(Action::Kill {
+                name,
+                remove_worktree,
+            }) => {
+                assert_eq!(name, "a");
+                assert!(!remove_worktree);
+            }
+            other => panic!("expected Kill, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn kill_toggles_and_removes_worktree() {
+        let mut app = app_with_two_sessions();
+        app.sessions[0].worktree_repo = Some("/repo".into());
+        app.selected = 0;
+        app.handle_key(key('d'));
+        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        let action = app.handle_key(key('y'));
+        match action {
+            Some(Action::Kill {
+                name,
+                remove_worktree,
+            }) => {
+                assert_eq!(name, "a");
+                assert!(remove_worktree);
+            }
+            other => panic!("expected Kill, got {other:?}"),
+        }
     }
 
     #[test]
