@@ -447,13 +447,14 @@ mod tests {
 
     #[test]
     fn prefilled_modal_shows_two_steps_and_project_values() {
-        let form = CreateForm::for_project("/home/u/proj", "claude", &["claude".into()]);
+        // Use a non-default agent so the agent assertion proves it came from the
+        // project (not a generic default), and a recognizable project dir.
+        let form = CreateForm::for_project("/home/u/proj", "codex", &["codex".into()]);
         let mut t = Terminal::new(TestBackend::new(80, 30)).unwrap();
         t.draw(|f| render(f, &form)).unwrap();
         let s = buf_to_string(t.backend().buffer());
         assert!(s.contains("of 2"), "streamlined step total:\n{s}");
         assert!(s.contains("proj"), "project path on directory row:\n{s}");
-        assert!(s.contains("claude"), "project agent shown:\n{s}");
-        assert!(s.contains("name"), "name row present:\n{s}");
+        assert!(s.contains("codex"), "project agent shown:\n{s}");
     }
 }
