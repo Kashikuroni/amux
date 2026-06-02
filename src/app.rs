@@ -1012,6 +1012,25 @@ impl App {
         None
     }
 
+    /// Validate + submit a completed create form. On success returns the
+    /// `Action::Create` (caller returns it up); on failure records the error and
+    /// re-stores the form so the user can correct it. Either way the caller
+    /// should `return` the resulting `Option<Action>`.
+    fn submit_create(&mut self, form: CreateForm) -> Option<Action> {
+        let existing: Vec<String> = self.sessions.iter().map(|s| s.name.clone()).collect();
+        match build_create_action(&form, &existing) {
+            Ok(action) => {
+                self.error = None;
+                Some(action)
+            }
+            Err(e) => {
+                self.error = Some(e);
+                self.mode = Mode::Create(form);
+                None
+            }
+        }
+    }
+
     fn handle_create_key(&mut self, key: KeyEvent) -> Option<Action> {
         // Take the form out so we can borrow `self.sessions` for validation.
         let Mode::Create(mut form) = std::mem::replace(&mut self.mode, Mode::List) else {
@@ -1058,19 +1077,7 @@ impl App {
                 KeyCode::Tab => form.advance(),
                 KeyCode::Enter => {
                     if form.prefilled && !form.worktree {
-                        let existing: Vec<String> =
-                            self.sessions.iter().map(|s| s.name.clone()).collect();
-                        match build_create_action(&form, &existing) {
-                            Ok(action) => {
-                                self.error = None;
-                                return Some(action);
-                            }
-                            Err(e) => {
-                                self.error = Some(e);
-                                self.mode = Mode::Create(form);
-                                return None;
-                            }
-                        }
+                        return self.submit_create(form);
                     } else {
                         form.advance();
                     }
@@ -1119,19 +1126,7 @@ impl App {
                 let submit = form.field == CreateField::Agent
                     || (form.prefilled && form.field == CreateField::Branch);
                 if submit {
-                    let existing: Vec<String> =
-                        self.sessions.iter().map(|s| s.name.clone()).collect();
-                    match build_create_action(&form, &existing) {
-                        Ok(action) => {
-                            self.error = None;
-                            return Some(action);
-                        }
-                        Err(e) => {
-                            self.error = Some(e);
-                            self.mode = Mode::Create(form);
-                            return None;
-                        }
-                    }
+                    return self.submit_create(form);
                 } else {
                     // Non-submit step → advance (handles Dir refresh when needed).
                     form.advance();
