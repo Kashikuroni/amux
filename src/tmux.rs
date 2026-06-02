@@ -196,6 +196,17 @@ pub fn new_session(name: &str, dir: &str, agent: &str) -> io::Result<()> {
     Ok(())
 }
 
+/// Like `new_session`, but also tags the session with `@cm_repo=<repo_root>` so
+/// the UI knows it runs in a worktree (enables worktree-aware kill).
+pub fn new_worktree_session(name: &str, dir: &str, agent: &str, repo_root: &str) -> io::Result<()> {
+    new_session(name, dir, agent)?;
+    if let Err(e) = run(&["set-option", "-t", name, "@cm_repo", repo_root]) {
+        let _ = run(&["kill-session", "-t", name]);
+        return Err(e);
+    }
+    Ok(())
+}
+
 pub fn kill_session(name: &str) -> io::Result<()> {
     run(&["kill-session", "-t", name])
 }
