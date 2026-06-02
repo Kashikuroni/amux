@@ -5,7 +5,7 @@ use ansi_to_tui::IntoText;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::Frame;
 
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
@@ -59,16 +59,15 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let text: Text = trimmed
         .into_text()
         .unwrap_or_else(|_| Text::raw(trimmed.to_string()));
-    let total = text.lines.len() as u16;
-    // Bottom-anchored, then offset upward by the user's manual scroll.
+    let para = Paragraph::new(text)
+        .wrap(Wrap { trim: false })
+        .style(Style::default().fg(th::TEXT));
+    // Bottom-anchor against the *wrapped* display-row count (one logical line
+    // may wrap to several rows), then offset upward by the user's manual scroll.
+    let total = para.line_count(rows[3].width) as u16;
     let bottom = total.saturating_sub(rows[3].height);
     let scroll_y = bottom.saturating_sub(app.preview_scroll);
-    f.render_widget(
-        Paragraph::new(text)
-            .scroll((scroll_y, 0))
-            .style(Style::default().fg(th::TEXT)),
-        rows[3],
-    );
+    f.render_widget(para.scroll((scroll_y, 0)), rows[3]);
 }
 
 #[cfg(test)]
@@ -114,5 +113,52 @@ mod tests {
         assert!(s.contains("hello"), "missing 'hello':\n{s}");
         assert!(s.contains("world"), "missing 'world':\n{s}");
         assert!(!s.contains('\u{1b}'), "raw escape leaked into buffer:\n{s}");
+    }
+
+    #[test]
+    fn wraps_wide_lines_instead_of_clipping() {
+        let mut app = App::new(Config::default());
+        app.sessions = vec![Session {
+            name: "proj".into(),
+            dir: "~/work/proj".into(),
+            created: 0,
+            agent: "claude".into(),
+            status: Status::Idle,
+            attached: false,
+            git: None,
+            worktree_repo: None,
+        }];
+        app.now_unix = 0;
+        // A line far wider than the 20-col backend; with wrapping the tail
+        // ("zzz") must still appear in the buffer rather than being clipped.
+        app.preview = "aaaaaaaaaaaaaaaaaaaa bbbbbbbbbb zzz".into();
+        let mut t = Terminal::new(TestBackend::new(20, 12)).unwrap();
+        t.draw(|f| render(f, f.area(), &app)).unwrap();
+        let s = buf_to_string(t.backend().buffer());
+        assert!(s.contains("zzz"), "wrapped tail must be visible:\n{s}");
+    }
+
+    #[test]
+    fn bottom_anchors_newest_line_when_wrapped_content_overflows() {
+        let mut app = App::new(Config::default());
+        app.sessions = vec![Session {
+            name: "proj".into(),
+            dir: "~/work/proj".into(),
+            created: 0,
+            agent: "claude".into(),
+            status: Status::Idle,
+            attached: false,
+            git: None,
+            worktree_repo: None,
+        }];
+        app.now_unix = 0;
+        app.preview_scroll = 0;
+        // Many lines: far more than the content area (height 8 - 3 chrome = 5 rows).
+        app.preview = (0..40).map(|i| format!("line{i:02}")).collect::<Vec<_>>().join("\n");
+        let mut t = Terminal::new(TestBackend::new(20, 8)).unwrap();
+        t.draw(|f| render(f, f.area(), &app)).unwrap();
+        let s = buf_to_string(t.backend().buffer());
+        assert!(s.contains("line39"), "newest line must be anchored visible:\n{s}");
+        assert!(!s.contains("line00"), "oldest line must have scrolled off:\n{s}");
     }
 }

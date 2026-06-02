@@ -4,8 +4,9 @@ use am::state::State;
 use am::{tmux, ui};
 
 use crossterm::event::{
-    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind, KeyModifiers,
-    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event, KeyCode, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -26,7 +27,7 @@ fn install_panic_hook() {
     let original = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = disable_raw_mode();
-        let _ = execute!(stdout(), LeaveAlternateScreen);
+        let _ = execute!(stdout(), DisableMouseCapture, LeaveAlternateScreen);
         original(info);
     }));
 }
@@ -98,7 +99,7 @@ fn spawn_usage_poller() -> mpsc::Receiver<am::usage::Account> {
 fn init_terminal() -> io::Result<Term> {
     enable_raw_mode()?;
     let mut out = stdout();
-    execute!(out, EnterAlternateScreen, EnableBracketedPaste)?;
+    execute!(out, EnterAlternateScreen, EnableBracketedPaste, EnableMouseCapture)?;
     enable_key_disambiguation(&mut out);
     Terminal::new(CrosstermBackend::new(out))
 }
@@ -123,6 +124,7 @@ fn restore_terminal(terminal: &mut Term) -> io::Result<()> {
     execute!(
         terminal.backend_mut(),
         DisableBracketedPaste,
+        DisableMouseCapture,
         LeaveAlternateScreen
     )?;
     terminal.show_cursor()?;
@@ -160,6 +162,9 @@ fn run(
                     app.handle_paste(text);
                 }
                 continue;
+            }
+            if let Event::Mouse(_) = &ev {
+                continue; // wheel/click do nothing — kills accidental list scroll
             }
             if let Event::Key(key) = ev {
                 if key.kind != KeyEventKind::Press {
@@ -214,7 +219,8 @@ fn handle_action(terminal: &mut Term, app: &mut App, action: Action) -> io::Resu
             execute!(
                 terminal.backend_mut(),
                 EnterAlternateScreen,
-                EnableBracketedPaste
+                EnableBracketedPaste,
+                EnableMouseCapture
             )?;
             enable_key_disambiguation(terminal.backend_mut());
             terminal.clear()?;
