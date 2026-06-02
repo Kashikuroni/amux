@@ -1,3 +1,4 @@
+use crate::app::collapse_home;
 use crate::theme as th;
 use crate::tmux::Session;
 use ratatui::style::{Modifier, Style};
@@ -10,27 +11,42 @@ pub fn render(f: &mut Frame, name: &str, session: Option<&Session>) {
     f.render_widget(Clear, area);
     let mut lines = vec![
         Line::from(vec![
-            Span::styled("✕ ", Style::default().fg(th::RED).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "✕ ",
+                Style::default().fg(th::RED).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(
                 "Kill session?",
-                Style::default().fg(th::TEXT_BOLD).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(th::TEXT_BOLD)
+                    .add_modifier(Modifier::BOLD),
             ),
         ]),
         Line::from(""),
     ];
     // session header line: name [· status]
-    let mut head = vec![Span::styled(name.to_string(), Style::default().fg(th::AMBER))];
+    let mut head = vec![Span::styled(
+        name.to_string(),
+        Style::default().fg(th::AMBER),
+    )];
     if let Some(s) = session {
         let label = match s.status {
             crate::tmux::Status::Running => "running",
             crate::tmux::Status::Idle => "idle",
+            crate::tmux::Status::Waiting => "waiting",
         };
-        head.push(Span::styled(format!("  ·  {label}"), Style::default().fg(th::MUTED)));
+        head.push(Span::styled(
+            format!("  ·  {label}"),
+            Style::default().fg(th::MUTED),
+        ));
     }
     lines.push(Line::from(head));
     // path · ⎇ branch
     if let Some(s) = session {
-        let mut sub = vec![Span::styled(s.dir.clone(), Style::default().fg(th::MUTED))];
+        let mut sub = vec![Span::styled(
+            collapse_home(&s.dir),
+            Style::default().fg(th::MUTED),
+        )];
         if let Some(g) = &s.git {
             sub.push(Span::styled(
                 format!("  ·  {} {}", th::BRANCH, g.branch),
@@ -56,7 +72,7 @@ pub fn render(f: &mut Frame, name: &str, session: Option<&Session>) {
     f.render_widget(
         Paragraph::new(lines).block(
             th::panel()
-                .border_style(Style::default().fg(th::RED))
+                .border_style(th::chrome(th::RED))
                 .title(" confirm ")
                 .style(Style::default().bg(th::BG_RAISED)),
         ),
@@ -73,7 +89,9 @@ mod tests {
     fn buf_to_string(buf: &Buffer) -> String {
         let mut s = String::new();
         for y in 0..buf.area.height {
-            for x in 0..buf.area.width { s.push_str(buf[(x, y)].symbol()); }
+            for x in 0..buf.area.width {
+                s.push_str(buf[(x, y)].symbol());
+            }
             s.push('\n');
         }
         s

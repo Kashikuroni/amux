@@ -15,16 +15,27 @@ pub fn render(f: &mut Frame) {
         Line::from(""),
         Line::from(Span::styled(
             "tmux not found in PATH",
-            Style::default().fg(th::TEXT_BOLD).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(th::TEXT_BOLD)
+                .add_modifier(Modifier::BOLD),
         )),
         Line::from(Span::styled(
-            "cm manages tmux sessions and needs the tmux binary.",
+            "am manages tmux sessions and needs the tmux binary.",
             Style::default().fg(th::MUTED),
         )),
         Line::from(""),
-        Line::from(Span::styled("  macOS    brew install tmux", Style::default().fg(th::TEXT))),
-        Line::from(Span::styled("  Ubuntu   sudo apt install tmux", Style::default().fg(th::TEXT))),
-        Line::from(Span::styled("  Arch     sudo pacman -S tmux", Style::default().fg(th::TEXT))),
+        Line::from(Span::styled(
+            "  macOS    brew install tmux",
+            Style::default().fg(th::TEXT),
+        )),
+        Line::from(Span::styled(
+            "  Ubuntu   sudo apt install tmux",
+            Style::default().fg(th::TEXT),
+        )),
+        Line::from(Span::styled(
+            "  Arch     sudo pacman -S tmux",
+            Style::default().fg(th::TEXT),
+        )),
         Line::from(""),
         Line::from(Span::styled("  q to quit", Style::default().fg(th::DIM))),
     ];

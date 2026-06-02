@@ -2,7 +2,7 @@ use crate::config::Config;
 use crate::tmux::{Session, Status};
 use std::collections::HashMap;
 
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 /// Sentinel label for the free-text agent slot in `CreateForm::agent_choices`.
 pub const CUSTOM_AGENT_SLOT: &str = "custom\u{2026}"; // "custom…"
@@ -112,6 +112,14 @@ impl CreateForm {
         }
     }
 
+    /// Appends pasted text to the focused field (reloads dir listing if on Dir).
+    pub fn paste(&mut self, text: &str) {
+        self.current_mut().push_str(text);
+        if self.field == CreateField::Dir {
+            self.refresh_dir_entries();
+        }
+    }
+
     /// 1-based position of the focused field, for the `N of 3` step indicator.
     pub fn step(&self) -> usize {
         match self.field {
@@ -147,6 +155,161 @@ impl RenameForm {
     }
 }
 
+/// Free-text reply being composed for a specific session.
+///
+/// `cursor` is a *character* index into `buffer` (0..=char_count), so editing
+/// stays correct with multi-byte input (e.g. Cyrillic). All byte offsets are
+/// derived from it on demand.
+#[derive(Debug, Clone)]
+pub struct ReplyForm {
+    pub name: String,
+    pub buffer: String,
+    pub cursor: usize,
+}
+
+impl ReplyForm {
+    fn new(name: String) -> Self {
+        Self {
+            name,
+            buffer: String::new(),
+            cursor: 0,
+        }
+    }
+
+    fn char_count(&self) -> usize {
+        self.buffer.chars().count()
+    }
+
+    /// Byte offset of character `idx` (or end of buffer if out of range).
+    fn byte_at(&self, idx: usize) -> usize {
+        self.buffer
+            .char_indices()
+            .nth(idx)
+            .map(|(b, _)| b)
+            .unwrap_or(self.buffer.len())
+    }
+
+    fn insert_char(&mut self, c: char) {
+        let b = self.byte_at(self.cursor);
+        self.buffer.insert(b, c);
+        self.cursor += 1;
+    }
+
+    fn insert_str(&mut self, s: &str) {
+        let b = self.byte_at(self.cursor);
+        self.buffer.insert_str(b, s);
+        self.cursor += s.chars().count();
+    }
+
+    fn backspace(&mut self) {
+        if self.cursor == 0 {
+            return;
+        }
+        let b = self.byte_at(self.cursor - 1);
+        self.buffer.remove(b);
+        self.cursor -= 1;
+    }
+
+    fn delete(&mut self) {
+        if self.cursor >= self.char_count() {
+            return;
+        }
+        let b = self.byte_at(self.cursor);
+        self.buffer.remove(b);
+    }
+
+    fn left(&mut self) {
+        self.cursor = self.cursor.saturating_sub(1);
+    }
+
+    fn right(&mut self) {
+        if self.cursor < self.char_count() {
+            self.cursor += 1;
+        }
+    }
+
+    /// Start/end character index of the logical line the cursor sits on.
+    fn line_bounds(&self) -> (usize, usize) {
+        let chars: Vec<char> = self.buffer.chars().collect();
+        let mut start = self.cursor.min(chars.len());
+        while start > 0 && chars[start - 1] != '\n' {
+            start -= 1;
+        }
+        let mut end = self.cursor.min(chars.len());
+        while end < chars.len() && chars[end] != '\n' {
+            end += 1;
+        }
+        (start, end)
+    }
+
+    fn home(&mut self) {
+        self.cursor = self.line_bounds().0;
+    }
+
+    fn end(&mut self) {
+        self.cursor = self.line_bounds().1;
+    }
+
+    /// Move up one logical line, preserving the column where possible.
+    fn up(&mut self) {
+        let chars: Vec<char> = self.buffer.chars().collect();
+        let (start, _) = self.line_bounds();
+        if start == 0 {
+            self.cursor = 0;
+            return;
+        }
+        let col = self.cursor - start;
+        let prev_end = start - 1; // the '\n'
+        let mut prev_start = prev_end;
+        while prev_start > 0 && chars[prev_start - 1] != '\n' {
+            prev_start -= 1;
+        }
+        let prev_len = prev_end - prev_start;
+        self.cursor = prev_start + col.min(prev_len);
+    }
+
+    /// Move down one logical line, preserving the column where possible.
+    fn down(&mut self) {
+        let chars: Vec<char> = self.buffer.chars().collect();
+        let (start, end) = self.line_bounds();
+        if end >= chars.len() {
+            self.cursor = chars.len();
+            return;
+        }
+        let col = self.cursor - start;
+        let next_start = end + 1;
+        let mut next_end = next_start;
+        while next_end < chars.len() && chars[next_end] != '\n' {
+            next_end += 1;
+        }
+        let next_len = next_end - next_start;
+        self.cursor = next_start + col.min(next_len);
+    }
+
+    /// Delete the word (and any trailing spaces) before the cursor (Ctrl+W).
+    fn delete_word(&mut self) {
+        let chars: Vec<char> = self.buffer.chars().collect();
+        let mut i = self.cursor;
+        while i > 0 && chars[i - 1] == ' ' {
+            i -= 1;
+        }
+        while i > 0 && chars[i - 1] != ' ' && chars[i - 1] != '\n' {
+            i -= 1;
+        }
+        let (sb, eb) = (self.byte_at(i), self.byte_at(self.cursor));
+        self.buffer.replace_range(sb..eb, "");
+        self.cursor = i;
+    }
+
+    /// Delete from the start of the current line to the cursor (Ctrl+U).
+    fn delete_to_line_start(&mut self) {
+        let (start, _) = self.line_bounds();
+        let (sb, eb) = (self.byte_at(start), self.byte_at(self.cursor));
+        self.buffer.replace_range(sb..eb, "");
+        self.cursor = start;
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Mode {
     List,
@@ -155,15 +318,35 @@ pub enum Mode {
     ConfirmDelete(String),
     Help,
     Filter,
+    Reply(ReplyForm),
+    /// Awaiting a 1–9 digit to jump to that session (entered with `s`).
+    SelectSession,
 }
 
 /// Side effects the event loop must perform (kept out of `App` so it stays IO-free).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
     Attach(String),
-    Create { name: String, dir: String, agent: String },
+    Create {
+        name: String,
+        dir: String,
+        agent: String,
+    },
     Kill(String),
-    Rename { old: String, new: String },
+    Rename {
+        old: String,
+        new: String,
+    },
+    /// Send a menu digit (then Enter) to a session's agent.
+    SendChoice {
+        name: String,
+        digit: char,
+    },
+    /// Send free-text (then Enter) to a session's agent.
+    SendText {
+        name: String,
+        text: String,
+    },
 }
 
 #[derive(Copy, Clone)]
@@ -174,6 +357,8 @@ enum ModeKind {
     ConfirmDelete,
     Help,
     Filter,
+    Reply,
+    SelectSession,
 }
 
 pub struct App {
@@ -190,6 +375,22 @@ pub struct App {
     pub now_unix: i64,
     pub tmux_missing: bool,
     pub clock: String,
+    /// Detected numbered prompt per session: option labels for digits 1..N.
+    pub prompts: HashMap<String, Vec<String>>,
+    /// Lines the preview is scrolled up from the bottom (0 = latest/bottom).
+    pub preview_scroll: u16,
+    /// Left (sessions) pane width as a percentage of the body.
+    pub split_pct: u16,
+    /// Latest Claude Code subscription usage (5h / 7d), shown in the header.
+    /// `None` until the first successful fetch (or if unauthenticated).
+    pub usage: Option<crate::usage::Usage>,
+    /// Subscription plan badge (e.g. "Max 5×"), shown in the header.
+    pub plan: Option<String>,
+    /// User's custom session order (by name). Empty = fall back to tmux order.
+    pub order: Vec<String>,
+    /// Set when persisted state (split width / order) changed and needs saving.
+    /// The event loop saves and clears it; keeps `App` itself IO-free.
+    pub dirty: bool,
 }
 
 impl App {
@@ -208,7 +409,102 @@ impl App {
             now_unix: crate::timeutil::now_unix(),
             tmux_missing: false,
             clock: crate::timeutil::clock_hhmm(),
+            prompts: HashMap::new(),
+            preview_scroll: 0,
+            split_pct: 40,
+            usage: None,
+            plan: None,
+            order: Vec::new(),
+            dirty: false,
         }
+    }
+
+    /// Applies persisted UI state (split width + session order) loaded at startup.
+    pub fn apply_state(&mut self, state: crate::state::State) {
+        if let Some(pct) = state.split_pct {
+            self.split_pct = pct.clamp(20, 75);
+        }
+        self.order = state.order;
+    }
+
+    /// Snapshots the persistable UI state for saving to disk.
+    pub fn snapshot_state(&self) -> crate::state::State {
+        crate::state::State {
+            split_pct: Some(self.split_pct),
+            order: self.order.clone(),
+        }
+    }
+
+    /// Scroll the preview up (into history) / down (toward latest) by `n` lines.
+    fn preview_scroll_up(&mut self, n: u16) {
+        self.preview_scroll = self.preview_scroll.saturating_add(n).min(5000);
+    }
+    fn preview_scroll_down(&mut self, n: u16) {
+        self.preview_scroll = self.preview_scroll.saturating_sub(n);
+    }
+    /// Jump the preview to the latest output (bottom).
+    fn preview_to_end(&mut self) {
+        self.preview_scroll = 0;
+    }
+
+    /// Adjust the left pane width by `delta` percent, clamped to a sane range.
+    fn resize_split(&mut self, delta: i16) {
+        let next = (self.split_pct as i16 + delta).clamp(20, 75);
+        if next as u16 != self.split_pct {
+            self.split_pct = next as u16;
+            self.dirty = true; // persist the new width
+        }
+    }
+
+    /// Move the selected session up (`delta = -1`) or down (`delta = +1`) one
+    /// slot in the custom order, persisting the result. No-op while a filter is
+    /// active (the visible subset hides neighbors, making a move ambiguous) or at
+    /// the list edges. The selection follows the moved session.
+    fn move_selected(&mut self, delta: isize) {
+        if self.filter.is_some() {
+            return;
+        }
+        // With no filter, visible_indices() == 0..len, so `selected` indexes
+        // `sessions` directly.
+        let n = self.sessions.len();
+        if n < 2 {
+            return;
+        }
+        let i = self.selected.min(n - 1);
+        let j = i as isize + delta;
+        if j < 0 || j as usize >= n {
+            return;
+        }
+        let j = j as usize;
+        self.sessions.swap(i, j);
+        self.selected = j;
+        // Re-derive the full order from the new arrangement (drops dead names).
+        self.order = self.sessions.iter().map(|s| s.name.clone()).collect();
+        self.dirty = true;
+        self.update_preview();
+    }
+
+    /// Inserts pasted text into whatever text field is currently focused.
+    pub fn handle_paste(&mut self, text: &str) {
+        // Most terminals deliver a CR for newlines in a paste; normalize away.
+        let text = text.replace('\r', "");
+        match &mut self.mode {
+            Mode::Reply(f) => f.insert_str(&text),
+            Mode::Rename(f) => f.buffer.push_str(&text),
+            Mode::Create(f) => f.paste(&text),
+            Mode::Filter => {
+                if let Some(s) = self.filter.as_mut() {
+                    s.push_str(&text);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Detected prompt options for the currently selected session, if any.
+    pub fn selected_prompt(&self) -> Option<&Vec<String>> {
+        let name = self.selected_session()?.name.clone();
+        self.prompts.get(&name)
     }
 
     /// Indices into `self.sessions` that match the active filter (all if none).
@@ -250,7 +546,11 @@ impl App {
         if n == 0 {
             return;
         }
-        self.selected = if self.selected == 0 { n - 1 } else { self.selected - 1 };
+        self.selected = if self.selected == 0 {
+            n - 1
+        } else {
+            self.selected - 1
+        };
     }
 
     fn clamp_selection(&mut self) {
@@ -266,11 +566,6 @@ impl App {
         self.selected = 0;
     }
 
-    fn select_last(&mut self) {
-        let n = self.visible_indices().len();
-        self.selected = n.saturating_sub(1);
-    }
-
     fn mode_kind(&self) -> ModeKind {
         match self.mode {
             Mode::List => ModeKind::List,
@@ -279,6 +574,8 @@ impl App {
             Mode::ConfirmDelete(_) => ModeKind::ConfirmDelete,
             Mode::Help => ModeKind::Help,
             Mode::Filter => ModeKind::Filter,
+            Mode::Reply(_) => ModeKind::Reply,
+            Mode::SelectSession => ModeKind::SelectSession,
         }
     }
 
@@ -286,7 +583,7 @@ impl App {
         match self.mode_kind() {
             ModeKind::List => self.handle_list_key(key),
             ModeKind::Help => {
-                if key.code == KeyCode::Char('q') {
+                if latin_code(key.code) == KeyCode::Char('q') {
                     self.should_quit = true;
                 }
                 self.mode = Mode::List;
@@ -296,14 +593,50 @@ impl App {
             ModeKind::Create => self.handle_create_key(key),
             ModeKind::Rename => self.handle_rename_key(key),
             ModeKind::Filter => self.handle_filter_key(key),
+            ModeKind::Reply => self.handle_reply_key(key),
+            ModeKind::SelectSession => self.handle_select_session_key(key),
+        }
+    }
+
+    /// Immediately refreshes the preview for the selected session (one capture),
+    /// so switching sessions feels instant instead of waiting for the next tick.
+    pub fn update_preview(&mut self) {
+        // Reset scroll to the latest output whenever the selection changes, and
+        // capture extra scrollback so the preview can be paged back.
+        self.preview_scroll = 0;
+        match self.selected_name() {
+            Some(name) => {
+                self.preview = crate::tmux::capture_scrollback(&name, 500)
+                    .or_else(|_| crate::tmux::capture_pane(&name))
+                    .unwrap_or_default();
+            }
+            None => self.preview.clear(),
         }
     }
 
     fn handle_list_key(&mut self, key: KeyEvent) -> Option<Action> {
-        match key.code {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        // Hotkeys are layout-independent: a Cyrillic char is mapped to the Latin
+        // letter on the same physical key.
+        match latin_code(key.code) {
             KeyCode::Char('q') => self.should_quit = true,
-            KeyCode::Char('j') | KeyCode::Down => self.select_next(),
-            KeyCode::Char('k') | KeyCode::Up => self.select_prev(),
+            // Plain j/k move the selection; Ctrl+j/Ctrl+k scroll the preview (below).
+            KeyCode::Char('j') if !ctrl => {
+                self.select_next();
+                self.update_preview();
+            }
+            KeyCode::Down => {
+                self.select_next();
+                self.update_preview();
+            }
+            KeyCode::Char('k') if !ctrl => {
+                self.select_prev();
+                self.update_preview();
+            }
+            KeyCode::Up => {
+                self.select_prev();
+                self.update_preview();
+            }
             KeyCode::Char('n') => {
                 self.error = None;
                 self.mode = Mode::Create(CreateForm::new(
@@ -332,10 +665,114 @@ impl App {
                 self.selected = 0;
                 self.mode = Mode::Filter;
             }
-            KeyCode::Char('g') => self.select_first(),
-            KeyCode::Char('G') => self.select_last(),
+            KeyCode::Char('g') => {
+                self.select_first();
+                self.update_preview();
+            }
+            // Preview scroll (without attaching). G jumps to the latest output.
+            // Note: Ctrl+J only arrives distinctly under the kitty keyboard
+            // protocol; on terminals without it, Ctrl+J == Enter (= attach).
+            KeyCode::Char('G') => self.preview_to_end(),
+            KeyCode::PageUp => self.preview_scroll_up(10),
+            KeyCode::PageDown => self.preview_scroll_down(10),
+            KeyCode::Char('k') if ctrl => self.preview_scroll_up(10),
+            KeyCode::Char('j') if ctrl => self.preview_scroll_down(10),
+            KeyCode::End => self.preview_to_end(),
+            // Resize the split: [ / ] small step; { / } or Ctrl+←/→ bigger step.
+            KeyCode::Char('[') => self.resize_split(-3),
+            KeyCode::Char(']') => self.resize_split(3),
+            KeyCode::Char('{') => self.resize_split(-8),
+            KeyCode::Char('}') => self.resize_split(8),
+            KeyCode::Left if ctrl => self.resize_split(-8),
+            KeyCode::Right if ctrl => self.resize_split(8),
+            // Reorder the selected session within the list (Shift+K up / Shift+J
+            // down). Persisted; mirrors the j/k navigation keys.
+            KeyCode::Char('K') => self.move_selected(-1),
+            KeyCode::Char('J') => self.move_selected(1),
+            // Enter session-select mode: a following 1–9 jumps to that session.
+            KeyCode::Char('s') => self.mode = Mode::SelectSession,
+            // Quick reply: answer a detected numbered prompt with 1..9.
+            KeyCode::Char(c @ '1'..='9') => {
+                let idx = c as usize - '1' as usize;
+                if let Some(opts) = self.selected_prompt() {
+                    if idx < opts.len() {
+                        if let Some(name) = self.selected_name() {
+                            return Some(Action::SendChoice { name, digit: c });
+                        }
+                    }
+                }
+            }
+            // Free-text reply to the selected session.
+            KeyCode::Char('i') => {
+                if let Some(name) = self.selected_name() {
+                    self.mode = Mode::Reply(ReplyForm::new(name));
+                }
+            }
             _ => {}
         }
+        None
+    }
+
+    /// Session-select mode (entered with `s`): a 1–9 digit jumps to that visible
+    /// session; Esc cancels. An out-of-range digit is ignored (stays in mode).
+    fn handle_select_session_key(&mut self, key: KeyEvent) -> Option<Action> {
+        match latin_code(key.code) {
+            KeyCode::Esc => self.mode = Mode::List,
+            KeyCode::Char(c @ '1'..='9') => {
+                let pos = c as usize - '1' as usize;
+                if pos < self.visible_indices().len() {
+                    self.selected = pos;
+                    self.update_preview();
+                    self.mode = Mode::List;
+                }
+            }
+            _ => {} // ignore other keys; stay in select mode
+        }
+        None
+    }
+
+    fn handle_reply_key(&mut self, key: KeyEvent) -> Option<Action> {
+        let Mode::Reply(mut form) = std::mem::replace(&mut self.mode, Mode::List) else {
+            return None;
+        };
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        match key.code {
+            KeyCode::Esc => return None, // mode already reset to List → cancels
+            // Newline on Shift+Enter; plain Enter sends (see below). Shift+Enter
+            // requires the kitty keyboard protocol to be reported distinctly
+            // (enabled in main); Alt+Enter is a fallback on terminals without it.
+            KeyCode::Enter if shift || alt => form.insert_char('\n'),
+            // Editing chords (readline-ish).
+            KeyCode::Char('w') if ctrl => form.delete_word(),
+            KeyCode::Char('u') if ctrl => form.delete_to_line_start(),
+            KeyCode::Char('a') if ctrl => form.home(),
+            KeyCode::Char('e') if ctrl => form.end(),
+            // Plain text entry — guard against control chords leaking through.
+            KeyCode::Char(c) if !ctrl => form.insert_char(c),
+            // Plain Enter sends the composed message.
+            KeyCode::Enter => {
+                let text = form.buffer.trim().to_string();
+                if text.is_empty() {
+                    return None;
+                }
+                return Some(Action::SendText {
+                    name: form.name,
+                    text,
+                });
+            }
+            KeyCode::Backspace => form.backspace(),
+            KeyCode::Delete => form.delete(),
+            KeyCode::Left => form.left(),
+            KeyCode::Right => form.right(),
+            KeyCode::Up => form.up(),
+            KeyCode::Down => form.down(),
+            KeyCode::Home => form.home(),
+            KeyCode::End => form.end(),
+            _ => {}
+        }
+        self.mode = Mode::Reply(form);
         None
     }
 
@@ -343,7 +780,7 @@ impl App {
         let Mode::ConfirmDelete(name) = std::mem::replace(&mut self.mode, Mode::List) else {
             return None;
         };
-        match key.code {
+        match latin_code(key.code) {
             KeyCode::Char('y') => return Some(Action::Kill(name)),
             KeyCode::Char('n') | KeyCode::Esc => {} // mode already reset to List
             _ => self.mode = Mode::ConfirmDelete(name), // unknown key: stay in confirm
@@ -513,14 +950,26 @@ impl App {
                 self.now_unix = crate::timeutil::now_unix();
                 self.clock = crate::timeutil::clock_hhmm();
                 let mut new_snaps = HashMap::new();
+                let mut new_prompts = HashMap::new();
                 let mut new_preview = None;
                 for s in &mut sessions {
                     if let Ok(content) = crate::tmux::capture_pane(&s.name) {
                         let h = content_hash(&content);
                         s.status = compute_status(self.snapshots.get(&s.name).copied(), h);
                         new_snaps.insert(s.name.clone(), h);
+                        let opts = parse_prompt(&content);
+                        if !opts.is_empty() {
+                            // A pending numbered prompt means the agent is blocked
+                            // on the user; this overrides the pane-diff status.
+                            s.status = Status::Waiting;
+                            new_prompts.insert(s.name.clone(), opts);
+                        }
                         if selected_name.as_deref() == Some(s.name.as_str()) {
-                            new_preview = Some(content);
+                            // Preview keeps scrollback so it can be paged back.
+                            new_preview = Some(
+                                crate::tmux::capture_scrollback(&s.name, 500)
+                                    .unwrap_or(content),
+                            );
                         }
                     }
                     // TODO(perf): git::read shells out to `git` per session per
@@ -530,7 +979,8 @@ impl App {
                     s.git = crate::git::read(&s.dir);
                 }
                 self.snapshots = new_snaps;
-                self.sessions = sessions;
+                self.prompts = new_prompts;
+                self.sessions = apply_order(&self.order, sessions);
                 self.clamp_selection();
                 if let Some(p) = new_preview {
                     self.preview = p;
@@ -541,6 +991,77 @@ impl App {
             }
             Err(e) => self.error = Some(e.to_string()),
         }
+    }
+}
+
+/// Maps a Cyrillic (ЙЦУКЕН) character to the Latin letter on the same physical
+/// key, so command hotkeys (j/k/o/i/n/d/r/g/q…) work on a Russian layout too.
+/// Non-Cyrillic input passes through unchanged.
+pub fn latinize(c: char) -> char {
+    const CYR: &str = "йцукенгшщзхъфывапролджэячсмитьбю";
+    const LAT: &str = "qwertyuiop[]asdfghjkl;'zxcvbnm,.";
+    let lower = c.to_lowercase().next().unwrap_or(c);
+    if let Some(pos) = CYR.chars().position(|x| x == lower) {
+        let l = LAT.chars().nth(pos).unwrap();
+        return if c.is_uppercase() { l.to_ascii_uppercase() } else { l };
+    }
+    c
+}
+
+/// `key.code` with any Cyrillic `Char` remapped to its Latin QWERTY-position key.
+pub fn latin_code(code: KeyCode) -> KeyCode {
+    match code {
+        KeyCode::Char(c) => KeyCode::Char(latinize(c)),
+        other => other,
+    }
+}
+
+/// Removes ANSI/CSI escape sequences so captured pane text can be matched.
+pub fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            // Skip the escape and everything up to its final byte (a letter).
+            while let Some(n) = chars.next() {
+                if n.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Detects a bottom-anchored numbered menu (Claude Code permission/choice prompt)
+/// in captured pane content. Returns the option labels for digits 1..N, or empty
+/// if no consecutive 1., 2., … run is found in the last lines.
+pub fn parse_prompt(content: &str) -> Vec<String> {
+    let plain = strip_ansi(content);
+    let lines: Vec<&str> = plain.lines().collect();
+    let start = lines.len().saturating_sub(20);
+    let mut opts: Vec<String> = Vec::new();
+    let mut expect = 1u32;
+    for line in &lines[start..] {
+        // Drop leading selection markers/indentation (❯, >, ●, ·, spaces).
+        let t = line
+            .trim_start()
+            .trim_start_matches(['❯', '>', '●', '·', ' '])
+            .trim_start();
+        if let Some(rest) = t.strip_prefix(&format!("{expect}.")) {
+            let label = rest.trim();
+            if !label.is_empty() {
+                opts.push(label.chars().take(40).collect());
+                expect += 1;
+            }
+        }
+    }
+    if opts.len() >= 2 {
+        opts
+    } else {
+        Vec::new()
     }
 }
 
@@ -561,12 +1082,41 @@ pub fn compute_status(prev: Option<u64>, current: u64) -> Status {
     }
 }
 
+/// Reorders `sessions` by the user's custom `order` (a list of names). Sessions
+/// named in `order` come first, in that order; any others keep their incoming
+/// (tmux) order and follow. Stale names in `order` (no matching session) are
+/// ignored. A stable sort keyed by rank does exactly this.
+pub fn apply_order(order: &[String], mut sessions: Vec<Session>) -> Vec<Session> {
+    if order.is_empty() {
+        return sessions;
+    }
+    let rank = |name: &str| order.iter().position(|n| n == name).unwrap_or(usize::MAX);
+    sessions.sort_by_key(|s| rank(&s.name));
+    sessions
+}
+
 /// Expands a leading `~` using `$HOME`. Leaves other paths untouched.
 pub fn expand_tilde(path: &str) -> String {
     if let Some(rest) = path.strip_prefix('~') {
         if rest.is_empty() || rest.starts_with('/') {
             if let Ok(home) = std::env::var("HOME") {
                 return format!("{home}{rest}");
+            }
+        }
+    }
+    path.to_string()
+}
+
+/// Collapses a leading `$HOME` to `~` for display: `/Users/me/work` → `~/work`.
+/// Inverse of [`expand_tilde`]. Leaves paths outside `$HOME` untouched.
+pub fn collapse_home(path: &str) -> String {
+    if let Ok(home) = std::env::var("HOME") {
+        if !home.is_empty() {
+            if path == home {
+                return "~".to_string();
+            }
+            if let Some(rest) = path.strip_prefix(&format!("{home}/")) {
+                return format!("~/{rest}");
             }
         }
     }
@@ -645,6 +1195,29 @@ mod tests {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
     }
 
+    #[test]
+    fn reply_enter_sends_shift_enter_newlines() {
+        let mut app = app_with_two_sessions();
+        app.mode = Mode::Reply(ReplyForm::new("a".into()));
+        // Type a couple chars.
+        app.handle_key(key('h'));
+        app.handle_key(key('i'));
+        // Shift+Enter inserts a newline (stays in Reply mode, no action).
+        let act = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+        assert!(act.is_none());
+        assert!(matches!(app.mode, Mode::Reply(_)));
+        app.handle_key(key('x'));
+        // Plain Enter sends the whole buffer.
+        let act = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        match act {
+            Some(Action::SendText { name, text }) => {
+                assert_eq!(name, "a");
+                assert_eq!(text, "hi\nx");
+            }
+            other => panic!("expected SendText, got {other:?}"),
+        }
+    }
+
     fn app_with_two_sessions() -> App {
         let mut app = App::new(Config::default());
         app.sessions = vec![
@@ -668,6 +1241,94 @@ mod tests {
             },
         ];
         app
+    }
+
+    fn named(name: &str) -> Session {
+        Session {
+            name: name.into(),
+            dir: "/x".into(),
+            created: 0,
+            agent: "claude".into(),
+            status: Status::Idle,
+            attached: false,
+            git: None,
+        }
+    }
+
+    #[test]
+    fn apply_order_sorts_known_first_then_unknown_and_ignores_stale() {
+        let sessions = vec![named("a"), named("b"), named("c")];
+        // Order wants c first, then b; "a" is unknown → appended; "z" is stale.
+        let order = vec!["c".to_string(), "z".to_string(), "b".to_string()];
+        let out = apply_order(&order, sessions);
+        let names: Vec<&str> = out.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["c", "b", "a"]);
+    }
+
+    #[test]
+    fn empty_order_preserves_input_order() {
+        let sessions = vec![named("a"), named("b")];
+        let out = apply_order(&[], sessions);
+        let names: Vec<&str> = out.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn shift_j_k_reorder_selected_and_mark_dirty() {
+        let mut app = app_with_two_sessions(); // [a, b], selected 0
+        // Shift+J moves "a" down; selection follows.
+        app.handle_key(key('J'));
+        let names: Vec<&str> = app.sessions.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["b", "a"]);
+        assert_eq!(app.selected, 1);
+        assert_eq!(app.order, vec!["b".to_string(), "a".to_string()]);
+        assert!(app.dirty);
+        // Shift+K moves it back up.
+        app.dirty = false;
+        app.handle_key(key('K'));
+        let names: Vec<&str> = app.sessions.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["a", "b"]);
+        assert_eq!(app.selected, 0);
+        assert!(app.dirty);
+    }
+
+    #[test]
+    fn reorder_is_noop_at_edges_and_when_filtered() {
+        let mut app = app_with_two_sessions();
+        // At the top, Shift+K does nothing.
+        app.handle_key(key('K'));
+        assert_eq!(app.selected, 0);
+        assert!(!app.dirty);
+        // With a filter active, reordering is disabled.
+        app.filter = Some(String::new());
+        app.handle_key(key('J'));
+        let names: Vec<&str> = app.sessions.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["a", "b"]);
+        assert!(!app.dirty);
+    }
+
+    #[test]
+    fn s_then_digit_jumps_to_session_by_number() {
+        let mut app = app_with_two_sessions();
+        assert_eq!(app.selected, 0);
+        // `s` enters select mode; a following digit jumps and exits to List.
+        app.handle_key(key('s'));
+        assert!(matches!(app.mode, Mode::SelectSession));
+        app.handle_key(key('2'));
+        assert_eq!(app.selected, 1);
+        assert!(matches!(app.mode, Mode::List));
+        // `s` then 1 → first session.
+        app.handle_key(key('s'));
+        app.handle_key(key('1'));
+        assert_eq!(app.selected, 0);
+        // Out-of-range digit is ignored and stays in select mode.
+        app.handle_key(key('s'));
+        app.handle_key(key('9'));
+        assert_eq!(app.selected, 0);
+        assert!(matches!(app.mode, Mode::SelectSession));
+        // Esc cancels back to List.
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(matches!(app.mode, Mode::List));
     }
 
     #[test]
@@ -738,6 +1399,21 @@ mod tests {
         };
         assert_eq!(expand_tilde("~/proj"), format!("{home}/proj"));
         assert_eq!(expand_tilde("/abs/path"), "/abs/path");
+    }
+
+    #[test]
+    fn collapse_home_replaces_leading_home() {
+        let Ok(home) = std::env::var("HOME") else {
+            return; // no HOME in this environment; nothing to assert
+        };
+        assert_eq!(collapse_home(&format!("{home}/proj")), "~/proj");
+        assert_eq!(collapse_home(&home), "~");
+        assert_eq!(collapse_home("/abs/path"), "/abs/path");
+        // a path that merely shares a prefix substring is left untouched
+        assert_eq!(
+            collapse_home(&format!("{home}x/proj")),
+            format!("{home}x/proj")
+        );
     }
 
     #[test]
@@ -828,12 +1504,16 @@ mod tests {
     }
 
     #[test]
-    fn g_and_shift_g_jump_first_last() {
+    fn g_jumps_to_first_session() {
         let mut app = app_with_two_sessions();
-        app.handle_key(key('G'));
+        app.select_next();
         assert_eq!(app.selected, 1);
         app.handle_key(key('g'));
         assert_eq!(app.selected, 0);
+        // `G` no longer moves the selection — it scrolls the preview to latest.
+        app.select_next();
+        app.handle_key(key('G'));
+        assert_eq!(app.selected, 1);
     }
 
     #[test]
@@ -857,6 +1537,41 @@ mod tests {
     }
 
     #[test]
+    fn latinize_maps_russian_layout() {
+        // Physical j/k/o/i/n keys produce these Cyrillic chars on ЙЦУКЕН.
+        assert_eq!(latinize('о'), 'j');
+        assert_eq!(latinize('л'), 'k');
+        assert_eq!(latinize('щ'), 'o');
+        assert_eq!(latinize('ш'), 'i');
+        assert_eq!(latinize('т'), 'n');
+        assert_eq!(latinize('П'), 'G'); // Shift preserved
+        assert_eq!(latinize('a'), 'a'); // Latin passes through
+        assert_eq!(latinize('1'), '1');
+    }
+
+    #[test]
+    fn parse_prompt_detects_numbered_menu() {
+        let pane = "Do you want to proceed?\n❯ 1. Yes\n  2. Yes, and don't ask again\n  3. No, tell Claude what to do\n";
+        let opts = parse_prompt(pane);
+        assert_eq!(opts.len(), 3);
+        assert_eq!(opts[0], "Yes");
+        assert!(opts[2].starts_with("No"));
+    }
+
+    #[test]
+    fn parse_prompt_strips_ansi() {
+        let pane = "\u{1b}[1m❯ 1.\u{1b}[0m Yes\n  2. No\n";
+        let opts = parse_prompt(pane);
+        assert_eq!(opts, vec!["Yes".to_string(), "No".to_string()]);
+    }
+
+    #[test]
+    fn parse_prompt_empty_without_menu() {
+        assert!(parse_prompt("just some normal output\nno menu here\n").is_empty());
+        assert!(parse_prompt("1. only one option\n").is_empty());
+    }
+
+    #[test]
     fn step_tracks_focused_field() {
         let mut form = CreateForm::new("claude", &[]);
         assert_eq!(form.step(), 1);
@@ -877,9 +1592,66 @@ mod tests {
     }
 
     #[test]
+    fn reply_insert_and_edit_is_char_aware() {
+        let mut f = ReplyForm::new("s".into());
+        // Cyrillic: each char is multi-byte; cursor must track chars, not bytes.
+        for c in "привет".chars() {
+            f.insert_char(c);
+        }
+        assert_eq!(f.buffer, "привет");
+        assert_eq!(f.cursor, 6);
+        // Move into the middle and insert (cursor lands before "е").
+        f.left();
+        f.left();
+        f.insert_char('Х');
+        assert_eq!(f.buffer, "привХет");
+        // Backspace removes the char we just inserted.
+        f.backspace();
+        assert_eq!(f.buffer, "привет");
+        // Delete (forward) removes "е".
+        f.delete();
+        assert_eq!(f.buffer, "привт");
+    }
+
+    #[test]
+    fn reply_delete_word_and_line_start() {
+        let mut f = ReplyForm::new("s".into());
+        f.insert_str("hello world foo");
+        f.delete_word();
+        assert_eq!(f.buffer, "hello world ");
+        f.delete_to_line_start();
+        assert_eq!(f.buffer, "");
+        assert_eq!(f.cursor, 0);
+    }
+
+    #[test]
+    fn reply_up_down_preserve_column_within_lines() {
+        let mut f = ReplyForm::new("s".into());
+        f.insert_str("abcd\nef\nghij");
+        // cursor at end (line "ghij", col 4)
+        assert_eq!(f.cursor, 12);
+        f.up(); // onto "ef" (len 2) → column clamps to 2
+        let (start, _) = f.line_bounds();
+        assert_eq!(f.cursor - start, 2);
+        f.up(); // onto "abcd", same column 2
+        let (start, _) = f.line_bounds();
+        assert_eq!(f.cursor - start, 2);
+        f.home();
+        assert_eq!(f.cursor, 0);
+        f.end();
+        assert_eq!(f.cursor, 4); // end of first logical line, before '\n'
+    }
+
+    #[test]
     fn abbreviate_path_collapses_middle() {
-        assert_eq!(abbreviate_path("~/work/proj-c/auth-rewrite"), "~/\u{2026}/auth-rewrite");
-        assert_eq!(abbreviate_path("~/work/proj-c/auth-rewrite/"), "~/\u{2026}/auth-rewrite");
+        assert_eq!(
+            abbreviate_path("~/work/proj-c/auth-rewrite"),
+            "~/\u{2026}/auth-rewrite"
+        );
+        assert_eq!(
+            abbreviate_path("~/work/proj-c/auth-rewrite/"),
+            "~/\u{2026}/auth-rewrite"
+        );
         assert_eq!(abbreviate_path("~/work"), "~/work");
         assert_eq!(abbreviate_path("~/"), "~");
         assert_eq!(abbreviate_path("/a/b/c"), "/\u{2026}/c");

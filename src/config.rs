@@ -23,15 +23,19 @@ impl Config {
         toml::from_str(toml_str)
     }
 
-    /// Loads `~/.claude-manager/config.toml`. Missing file or parse error → defaults.
+    /// Loads `~/.agent-multiplexer/config.toml`, falling back to the legacy
+    /// `~/.claude-manager/config.toml` if the new path is absent (so existing
+    /// users keep their config after the rename). Missing/invalid → defaults.
     pub fn load() -> Config {
         let Ok(home) = std::env::var("HOME") else {
             return Config::default();
         };
-        let path = std::path::Path::new(&home)
-            .join(".claude-manager")
-            .join("config.toml");
-        match std::fs::read_to_string(&path) {
+        let home = std::path::Path::new(&home);
+        let new_path = home.join(".agent-multiplexer").join("config.toml");
+        let legacy_path = home.join(".claude-manager").join("config.toml");
+        let contents =
+            std::fs::read_to_string(&new_path).or_else(|_| std::fs::read_to_string(&legacy_path));
+        match contents {
             Ok(contents) => Config::parse(&contents).unwrap_or_default(),
             Err(_) => Config::default(),
         }

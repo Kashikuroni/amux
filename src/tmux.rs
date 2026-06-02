@@ -10,6 +10,9 @@ pub const LIST_FORMAT: &str =
 pub enum Status {
     Running,
     Idle,
+    /// Agent is blocked on the user: a numbered prompt (digits 1–9) is on screen
+    /// awaiting a choice or answer. Set from prompt detection, not pane diffing.
+    Waiting,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -54,9 +57,20 @@ fn parse_line(line: &str) -> Option<Session> {
     })
 }
 
+/// Dedicated tmux socket so `cm` sessions and key bindings stay isolated from
+/// the user's default tmux server.
+const SOCKET: &str = "cm";
+
+/// A `tmux` command pre-pointed at our private socket.
+fn tmux() -> Command {
+    let mut c = Command::new("tmux");
+    c.args(["-L", SOCKET]);
+    c
+}
+
 /// Runs a tmux subcommand, returning an error containing stderr on failure.
 fn run(args: &[&str]) -> io::Result<()> {
-    let out = Command::new("tmux").args(args).output()?;
+    let out = tmux().args(args).output()?;
     if out.status.success() {
         Ok(())
     } else {
@@ -75,25 +89,46 @@ pub fn is_available() -> bool {
         .unwrap_or(false)
 }
 
-/// True if `cm` itself is running inside a tmux client (nested attach is unsafe).
+/// True if `am` itself is running inside a tmux client (nested attach is unsafe).
 pub fn in_tmux() -> bool {
     std::env::var_os("TMUX").is_some()
 }
 
 /// Lists managed sessions. Any tmux failure (e.g. no server running) is treated as an empty list.
 pub fn list_sessions() -> io::Result<Vec<Session>> {
-    let out = Command::new("tmux")
-        .args(["list-sessions", "-F", LIST_FORMAT])
-        .output()?;
+    let out = tmux().args(["list-sessions", "-F", LIST_FORMAT]).output()?;
     if !out.status.success() {
         return Ok(Vec::new());
     }
     Ok(parse_sessions(&String::from_utf8_lossy(&out.stdout)))
 }
 
+/// Server options that keep panes sized to the attaching client (avoids stale
+/// redraw artifacts when am's terminal differs from the detached default size).
+fn apply_resize_options() {
+    let _ = run(&["set-option", "-g", "window-size", "latest"]);
+    let _ = run(&["set-window-option", "-g", "aggressive-resize", "on"]);
+}
+
 /// Creates a detached session running `agent` in `dir` and tags it as managed.
 pub fn new_session(name: &str, dir: &str, agent: &str) -> io::Result<()> {
-    run(&["new-session", "-d", "-s", name, "-c", dir, agent])?;
+    // Create at the current terminal size so the first attach needs no resize.
+    let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+    let (cols, rows) = (cols.max(1).to_string(), rows.max(1).to_string());
+    run(&[
+        "new-session",
+        "-d",
+        "-s",
+        name,
+        "-x",
+        &cols,
+        "-y",
+        &rows,
+        "-c",
+        dir,
+        agent,
+    ])?;
+    apply_resize_options();
     // If tagging fails, the session would exist untagged (invisible to list_sessions);
     // kill it so creation is all-or-nothing.
     if let Err(e) = run(&["set-option", "-t", name, "@cm_managed", "1"])
@@ -102,11 +137,28 @@ pub fn new_session(name: &str, dir: &str, agent: &str) -> io::Result<()> {
         let _ = run(&["kill-session", "-t", name]);
         return Err(e);
     }
+    // Ctrl-q detaches (returns to cm). Server-global, but our socket only ever
+    // hosts am sessions, so it stays scoped to them. Best-effort.
+    let _ = run(&["bind-key", "-n", "C-q", "detach-client"]);
+    // Hide tmux's status bar — am provides its own chrome. Best-effort.
+    let _ = run(&["set-option", "-g", "status", "off"]);
     Ok(())
 }
 
 pub fn kill_session(name: &str) -> io::Result<()> {
     run(&["kill-session", "-t", name])
+}
+
+/// Sends a single key (e.g. a menu digit) to a session, then Enter to confirm.
+pub fn send_choice(name: &str, digit: char) -> io::Result<()> {
+    let d = digit.to_string();
+    run(&["send-keys", "-t", name, &d, "Enter"])
+}
+
+/// Sends literal text followed by Enter (a free-text reply).
+pub fn send_text(name: &str, text: &str) -> io::Result<()> {
+    run(&["send-keys", "-t", name, "-l", text])?;
+    run(&["send-keys", "-t", name, "Enter"])
 }
 
 pub fn rename_session(old: &str, new: &str) -> io::Result<()> {
@@ -115,8 +167,23 @@ pub fn rename_session(old: &str, new: &str) -> io::Result<()> {
 
 /// Captures the visible pane content of a session as plain text.
 pub fn capture_pane(name: &str) -> io::Result<String> {
-    let out = Command::new("tmux")
+    let out = tmux()
         .args(["capture-pane", "-p", "-e", "-t", name])
+        .output()?;
+    if !out.status.success() {
+        return Err(io::Error::other(
+            String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Captures the pane plus `history` lines of scrollback, so the preview can be
+/// scrolled back without attaching. Falls back to the visible pane on failure.
+pub fn capture_scrollback(name: &str, history: u32) -> io::Result<String> {
+    let start = format!("-{history}");
+    let out = tmux()
+        .args(["capture-pane", "-p", "-e", "-S", &start, "-t", name])
         .output()?;
     if !out.status.success() {
         return Err(io::Error::other(
@@ -128,9 +195,12 @@ pub fn capture_pane(name: &str) -> io::Result<String> {
 
 /// Attaches in the foreground (inherits stdio) and returns when the user detaches.
 pub fn attach_session(name: &str) -> io::Result<()> {
-    Command::new("tmux")
-        .args(["attach-session", "-t", name])
-        .status()?;
+    // Ensure chrome/sizing options are applied for sessions created before they
+    // existed, so attaching an existing session resizes its pane to fill.
+    let _ = run(&["set-option", "-g", "status", "off"]);
+    let _ = run(&["bind-key", "-n", "C-q", "detach-client"]);
+    apply_resize_options();
+    tmux().args(["attach-session", "-t", name]).status()?;
     Ok(())
 }
 

@@ -1,19 +1,20 @@
 [package]
-name = "cm"
+name = "am"
 version = "0.1.0"
 edition = "2021"
 
 [lib]
-name = "cm"
+name = "am"
 path = "src/lib.rs"
 
 [[bin]]
-name = "cm"
+name = "am"
 path = "src/main.rs"
 
 [dependencies]
 ratatui = "0.29"
 crossterm = "0.28"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 toml = "0.8"
 ansi-to-tui = "7"

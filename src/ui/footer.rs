@@ -24,14 +24,24 @@ fn items_for(mode: &Mode) -> Vec<Item> {
         ],
         Mode::Help => vec![("esc", "close", true), ("q", "quit", false)],
         Mode::Rename(_) => vec![("↵", "rename", true), ("esc", "cancel", false)],
+        Mode::Reply(_) => vec![
+            ("↵", "send", true),
+            ("⇧↵", "newline", false),
+            ("esc", "cancel", false),
+        ],
         Mode::Filter => vec![
             ("type", "filter", true),
             ("↑↓", "move", false),
             ("esc", "clear", false),
         ],
+        Mode::SelectSession => vec![("1-9", "select session", true), ("esc", "cancel", false)],
         Mode::List => vec![
             ("n", "new", true),
             ("↵", "attach", false),
+            ("s", "select", false),
+            ("⇧JK", "reorder", false),
+            ("1-9", "answer", false),
+            ("i", "reply", false),
             ("d", "kill", false),
             ("r", "rename", false),
             ("/", "filter", false),
@@ -44,8 +54,7 @@ fn items_for(mode: &Mode) -> Vec<Item> {
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let rows = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(area);
     f.render_widget(
-        Paragraph::new(th::RULE_CHAR.repeat(area.width as usize))
-            .style(Style::default().fg(th::BORDER)),
+        Paragraph::new(th::RULE_CHAR.repeat(area.width as usize)).style(th::chrome(th::BORDER)),
         rows[0],
     );
     let mut spans: Vec<Span> = Vec::new();
@@ -59,11 +68,17 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(th::TEXT_BOLD)
         };
         spans.push(Span::styled(k, key_style));
-        spans.push(Span::styled(format!(" {label}"), Style::default().fg(th::MUTED)));
+        spans.push(Span::styled(
+            format!(" {label}"),
+            Style::default().fg(th::MUTED),
+        ));
     }
     if let Some(q) = &app.filter {
         // Appended inline; clips silently at narrow widths (ratatui won't wrap a Line).
-        spans.push(Span::styled(format!("    /{q}"), Style::default().fg(th::AMBER_HI)));
+        spans.push(Span::styled(
+            format!("    /{q}"),
+            Style::default().fg(th::AMBER_HI),
+        ));
     }
     f.render_widget(Paragraph::new(Line::from(spans)), rows[1]);
 }

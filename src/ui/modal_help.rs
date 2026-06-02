@@ -8,14 +8,42 @@ pub fn render(f: &mut Frame) {
     let area = super::centered(70, 70, f.area());
     f.render_widget(Clear, area);
     let groups: [(&str, &[(&str, &str)]); 4] = [
-        ("Navigation", &[("k j / ↑↓", "move"), ("g G", "first · last"), ("/", "filter")]),
-        ("Session", &[("↵ o", "attach"), ("n", "new"), ("d", "kill"), ("r", "rename")]),
-        ("Preview", &[("auto", "refresh on interval")]),
+        (
+            "Navigation",
+            &[
+                ("k j / ↑↓", "move"),
+                ("⇧K ⇧J", "reorder up · down"),
+                ("s 1-9", "jump to session"),
+                ("g", "first session"),
+                ("/", "filter"),
+            ],
+        ),
+        (
+            "Session",
+            &[
+                ("↵ o", "attach"),
+                ("n", "new"),
+                ("d", "kill"),
+                ("r", "rename"),
+            ],
+        ),
+        (
+            "Preview",
+            &[
+                ("^k ^j", "scroll up · down"),
+                ("PgUp PgDn", "scroll up · down"),
+                ("G", "jump to latest"),
+                ("auto", "refresh on interval"),
+            ],
+        ),
         ("App", &[("?", "help"), ("q", "quit (sessions stay)")]),
     ];
     let mut lines = vec![
         Line::from(vec![
-            Span::styled("? Help", Style::default().fg(th::AMBER).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "? Help",
+                Style::default().fg(th::AMBER).add_modifier(Modifier::BOLD),
+            ),
             Span::styled("   keys & shortcuts", Style::default().fg(th::DIM)),
         ]),
         Line::from(""),
@@ -36,7 +64,7 @@ pub fn render(f: &mut Frame) {
     f.render_widget(
         Paragraph::new(lines).block(
             th::panel()
-                .border_style(Style::default().fg(th::BORDER_HI))
+                .border_style(th::chrome(th::BORDER_HI))
                 .title(" help ")
                 .style(Style::default().bg(th::BG_RAISED)),
         ),
@@ -53,7 +81,9 @@ mod tests {
     fn buf_to_string(buf: &Buffer) -> String {
         let mut s = String::new();
         for y in 0..buf.area.height {
-            for x in 0..buf.area.width { s.push_str(buf[(x, y)].symbol()); }
+            for x in 0..buf.area.width {
+                s.push_str(buf[(x, y)].symbol());
+            }
             s.push('\n');
         }
         s

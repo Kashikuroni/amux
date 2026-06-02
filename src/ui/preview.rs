@@ -1,11 +1,11 @@
-use crate::app::App;
+use crate::app::{collapse_home, App};
 use crate::theme as th;
 use crate::timeutil;
 use ansi_to_tui::IntoText;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Paragraph, Wrap};
+use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
@@ -25,7 +25,10 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
 
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(format!("{} ", th::PREVIEW_MARK), Style::default().fg(th::AMBER)),
+            Span::styled(
+                format!("{} ", th::PREVIEW_MARK),
+                Style::default().fg(th::AMBER),
+            ),
             Span::styled(title.to_string(), Style::default().fg(th::TEXT_BOLD)),
             Span::styled(format!("    {age}"), Style::default().fg(th::DIM)),
         ])),
@@ -33,32 +36,36 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     );
 
     let mut sub = vec![Span::styled(
-        sel.map(|s| s.dir.clone()).unwrap_or_default(),
+        sel.map(|s| collapse_home(&s.dir)).unwrap_or_default(),
         Style::default().fg(th::MUTED),
     )];
     if let Some(g) = sel.and_then(|s| s.git.as_ref()) {
         sub.push(Span::styled(
-            format!(" {} {} {}", th::IDLE_DOT, th::BRANCH, g.branch),
+            format!(" · {} {}", th::BRANCH, g.branch),
             Style::default().fg(th::DIM),
         ));
     }
     f.render_widget(Paragraph::new(Line::from(sub)), rows[1]);
 
     f.render_widget(
-        Paragraph::new(th::RULE_CHAR.repeat(area.width as usize))
-            .style(Style::default().fg(th::BORDER)),
+        Paragraph::new(th::RULE_CHAR.repeat(area.width as usize)).style(th::chrome(th::BORDER)),
         rows[2],
     );
 
     // Content: parse ANSI from capture-pane into styled Text; fall back to plain.
-    let text: Text = app
-        .preview
-        .as_str()
+    // Drop trailing blank lines (tmux pads the pane), then scroll to the bottom so
+    // the agent's latest output — and any pending prompt — is always visible.
+    let trimmed = app.preview.trim_end_matches(['\n', ' ', '\t']);
+    let text: Text = trimmed
         .into_text()
-        .unwrap_or_else(|_| Text::raw(app.preview.clone()));
+        .unwrap_or_else(|_| Text::raw(trimmed.to_string()));
+    let total = text.lines.len() as u16;
+    // Bottom-anchored, then offset upward by the user's manual scroll.
+    let bottom = total.saturating_sub(rows[3].height);
+    let scroll_y = bottom.saturating_sub(app.preview_scroll);
     f.render_widget(
         Paragraph::new(text)
-            .wrap(Wrap { trim: false })
+            .scroll((scroll_y, 0))
             .style(Style::default().fg(th::TEXT)),
         rows[3],
     );

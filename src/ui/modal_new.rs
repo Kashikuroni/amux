@@ -16,7 +16,12 @@ fn row(x: u16, y: u16, w: u16, bottom: u16) -> Option<Rect> {
     if y >= bottom {
         return None;
     }
-    Some(Rect { x, y, width: w, height: 1 })
+    Some(Rect {
+        x,
+        y,
+        width: w,
+        height: 1,
+    })
 }
 
 /// Uppercase section label with light letter-spacing (e.g. "NAME" → "N A M E").
@@ -27,7 +32,10 @@ fn label(text: &str, color: ratatui::style::Color) -> Span<'static> {
         .collect::<String>()
         .trim_end()
         .to_string();
-    Span::styled(spaced, Style::default().fg(color).add_modifier(Modifier::BOLD))
+    Span::styled(
+        spaced,
+        Style::default().fg(color).add_modifier(Modifier::BOLD),
+    )
 }
 
 /// Filled input box: sunken background, an accent bar on the left, then the value.
@@ -72,7 +80,7 @@ pub fn render(f: &mut Frame, form: &CreateForm) {
     // Outer rounded panel; the header lives inside so we leave the title empty.
     f.render_widget(
         th::panel()
-            .border_style(Style::default().fg(th::BORDER_HI))
+            .border_style(th::chrome(th::BORDER_HI))
             .style(Style::default().bg(th::BG_RAISED)),
         area,
     );
@@ -106,7 +114,7 @@ pub fn render(f: &mut Frame, form: &CreateForm) {
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 "─".repeat(w as usize),
-                Style::default().fg(th::BORDER),
+                th::chrome(th::BORDER),
             ))),
             r,
         );
@@ -181,9 +189,15 @@ pub fn render(f: &mut Frame, form: &CreateForm) {
         for i in start..end {
             let Some(r) = row(x, y, w, bottom) else { break };
             let selected = i == form.dir_selected;
-            let text = format!("  {}{}/", if selected { "> " } else { "  " }, form.dir_entries[i]);
+            let text = format!(
+                "  {}{}/",
+                if selected { "> " } else { "  " },
+                form.dir_entries[i]
+            );
             let style = if selected {
-                Style::default().fg(th::AMBER_HI).add_modifier(Modifier::REVERSED)
+                Style::default()
+                    .fg(th::AMBER_HI)
+                    .add_modifier(Modifier::REVERSED)
             } else {
                 Style::default().fg(th::MUTED)
             };
@@ -290,7 +304,7 @@ pub fn render(f: &mut Frame, form: &CreateForm) {
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 "─".repeat(w as usize),
-                Style::default().fg(th::BORDER),
+                th::chrome(th::BORDER),
             ))),
             r,
         );

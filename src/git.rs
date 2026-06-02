@@ -20,7 +20,11 @@ pub fn parse_shortstat(s: &str) -> (u32, u32) {
     let mut removed = 0;
     for part in s.split(',') {
         let p = part.trim();
-        if let Some(n) = p.split_whitespace().next().and_then(|w| w.parse::<u32>().ok()) {
+        if let Some(n) = p
+            .split_whitespace()
+            .next()
+            .and_then(|w| w.parse::<u32>().ok())
+        {
             if p.contains("insertion") {
                 added = n;
             } else if p.contains("deletion") {
@@ -58,7 +62,11 @@ pub fn read(dir: &str) -> Option<GitInfo> {
     // simply empty, which the unwrap_or_default handles.
     let shortstat = git_out(dir, &["diff", "HEAD", "--shortstat"]).unwrap_or_default();
     let (added, removed) = parse_shortstat(&shortstat);
-    Some(GitInfo { branch, added, removed })
+    Some(GitInfo {
+        branch,
+        added,
+        removed,
+    })
 }
 
 #[cfg(test)]
@@ -96,7 +104,12 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let d = dir.to_str().unwrap();
         let run = |args: &[&str]| {
-            Command::new("git").arg("-C").arg(d).args(args).output().unwrap();
+            Command::new("git")
+                .arg("-C")
+                .arg(d)
+                .args(args)
+                .output()
+                .unwrap();
         };
         run(&["init", "-q", "-b", "main"]);
         run(&["config", "user.email", "t@t"]);
@@ -111,7 +124,10 @@ mod tests {
 
         let info = read(d).expect("repo");
         assert_eq!(info.branch, "main");
-        assert!(info.added >= 1, "expected at least one insertion, got {info:?}");
+        assert!(
+            info.added >= 1,
+            "expected at least one insertion, got {info:?}"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

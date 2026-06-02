@@ -1,4 +1,4 @@
-use cm::tmux::{self, Status};
+use am::tmux::{self, Status};
 
 /// Full round-trip against a real tmux server. Skipped if tmux is unavailable.
 #[test]
@@ -30,7 +30,10 @@ fn new_list_rename_capture_kill_roundtrip() {
     tmux::new_session(&name, dir, "bash").expect("new_session");
 
     let sessions = tmux::list_sessions().expect("list_sessions");
-    let found = sessions.iter().find(|s| s.name == name).expect("session present");
+    let found = sessions
+        .iter()
+        .find(|s| s.name == name)
+        .expect("session present");
     assert_eq!(found.agent, "bash");
     assert_eq!(found.status, Status::Idle);
 

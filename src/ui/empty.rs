@@ -15,7 +15,9 @@ pub fn render(f: &mut Frame, area: Rect) {
         Line::from(""),
         Line::from(Span::styled(
             "No sessions yet",
-            Style::default().fg(th::TEXT_BOLD).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(th::TEXT_BOLD)
+                .add_modifier(Modifier::BOLD),
         )),
         Line::from(Span::styled(
             "Spin up an agent in any directory. Sessions keep running after you quit.",
@@ -25,7 +27,10 @@ pub fn render(f: &mut Frame, area: Rect) {
         Line::from(vec![
             Span::styled(
                 " n ",
-                Style::default().bg(th::AMBER).fg(th::BG).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .bg(th::AMBER)
+                    .fg(th::BG)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled("  start your first session", Style::default().fg(th::TEXT)),
         ]),
