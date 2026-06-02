@@ -44,20 +44,32 @@ impl Usage {
 pub struct Account {
     pub usage: Option<Usage>,
     pub plan: Option<String>,
+    /// Why the last usage fetch failed (short code: HTTP status like "429", or
+    /// "no auth" / "net" / "parse"), or `None` if it succeeded. Surfaced in the
+    /// header so a blank limits area is explainable.
+    pub usage_error: Option<String>,
 }
 
 /// Fetches usage + plan in one cycle (called from the background poller).
 pub fn fetch_account() -> Account {
+    let (usage, usage_error) = match fetch_usage() {
+        Ok(u) => (Some(u), None),
+        Err(e) => (None, Some(e)),
+    };
     Account {
-        usage: fetch_usage(),
+        usage,
         plan: fetch_plan(),
+        usage_error,
     }
 }
 
-/// GETs an OAuth endpoint with the stored token, returning the response body.
-/// `None` when unauthenticated, offline, or on a non-success exit.
-fn oauth_get(path: &str) -> Option<Vec<u8>> {
-    let token = read_token()?;
+/// GETs an OAuth endpoint with the stored token. On success returns the body;
+/// on failure a short reason: "no auth" (no token), "net" (curl/connection
+/// failure), or the HTTP status code ("401", "429", …) for a non-2xx response.
+/// `curl` is run without `-f`, so HTTP errors arrive as a 0 exit with an error
+/// body — we read the status via `-w` to distinguish them.
+fn oauth_get(path: &str) -> Result<Vec<u8>, String> {
+    let token = read_token().ok_or("no auth")?;
     let out = Command::new("curl")
         .args([
             "-sS",
@@ -68,17 +80,38 @@ fn oauth_get(path: &str) -> Option<Vec<u8>> {
             &format!("Authorization: Bearer {token}"),
             "-H",
             "anthropic-beta: oauth-2025-04-20",
+            // Append "\n<status>" to the body so we can read the HTTP code.
+            "-w",
+            "\n%{http_code}",
         ])
         .output()
-        .ok()?;
-    out.status.success().then_some(out.stdout)
+        .map_err(|_| "net".to_string())?;
+    if !out.status.success() {
+        return Err("net".to_string());
+    }
+    // Split the trailing "\n<status>" the -w format appended.
+    let mut body = out.stdout;
+    let Some(nl) = body.iter().rposition(|&b| b == b'\n') else {
+        return Err("net".to_string());
+    };
+    let code: u16 = String::from_utf8_lossy(&body[nl + 1..])
+        .trim()
+        .parse()
+        .unwrap_or(0);
+    body.truncate(nl);
+    if (200..300).contains(&code) {
+        Ok(body)
+    } else {
+        Err(code.to_string())
+    }
 }
 
-/// Fetches current usage. Returns `None` when unauthenticated, offline, or the
-/// token has expired — callers should keep the last good value in that case.
-fn fetch_usage() -> Option<Usage> {
+/// Fetches current usage. Returns `Err(reason)` when unauthenticated, offline,
+/// rate-limited, or the token has expired — callers keep the last good value and
+/// can surface the reason.
+fn fetch_usage() -> Result<Usage, String> {
     let body = oauth_get("/api/oauth/usage")?;
-    let mut usage = parse_usage(&body)?;
+    let mut usage = parse_usage(&body).ok_or("parse")?;
     // Format reset times to local HH:MM here (off the render path).
     for w in [
         &mut usage.five_hour,
@@ -95,12 +128,12 @@ fn fetch_usage() -> Option<Usage> {
             }
         }
     }
-    Some(usage)
+    Ok(usage)
 }
 
 /// Fetches the subscription plan label (e.g. "Max 5×") from the profile.
 fn fetch_plan() -> Option<String> {
-    parse_plan(&oauth_get("/api/oauth/profile")?)
+    parse_plan(&oauth_get("/api/oauth/profile").ok()?)
 }
 
 /// Parses the `/api/oauth/usage` JSON body. Split out so it can be unit-tested

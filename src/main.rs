@@ -57,16 +57,39 @@ fn main() -> io::Result<()> {
     Ok(())
 }
 
-/// Spawns a daemon thread that fetches account state (usage + plan) now and
-/// every 60s, sending each snapshot down a channel. Failed fields arrive as
-/// `None` so the loop can keep the last good value.
+/// Spawns a daemon thread that fetches account state (usage + plan) immediately
+/// (so the header is populated at startup) and then on a slow interval. Failed
+/// fields arrive as `None` so the loop keeps the last good value.
+///
+/// Cadence depends on the outcome, since the endpoint publishes no rate-limit
+/// numbers (only an opaque `429` `rate_limit_error`):
+///   - success            → `POLL_INTERVAL` (steady state; usage changes slowly)
+///   - HTTP 429           → `RATE_LIMIT_BACKOFF` (back off so we don't sustain it)
+///   - other failure/net  → `RETRY_INTERVAL` (recover quickly from a transient error)
+/// The first request still fires immediately at startup.
 fn spawn_usage_poller() -> mpsc::Receiver<am::usage::Account> {
+    const POLL_INTERVAL: Duration = Duration::from_secs(300); // 5 min, steady state
+    const RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(120); // after a 429
+    const RETRY_INTERVAL: Duration = Duration::from_secs(30); // transient error
     let (tx, rx) = mpsc::channel();
-    thread::spawn(move || loop {
-        if tx.send(am::usage::fetch_account()).is_err() {
-            break; // receiver dropped → app is shutting down
+    thread::spawn(move || {
+        let mut got_usage = false;
+        loop {
+            let acct = am::usage::fetch_account();
+            got_usage |= acct.usage.is_some();
+            let rate_limited = acct.usage_error.as_deref() == Some("429");
+            if tx.send(acct).is_err() {
+                break; // receiver dropped → app is shutting down
+            }
+            let wait = if got_usage {
+                POLL_INTERVAL
+            } else if rate_limited {
+                RATE_LIMIT_BACKOFF
+            } else {
+                RETRY_INTERVAL
+            };
+            thread::sleep(wait);
         }
-        thread::sleep(Duration::from_secs(60));
     });
     rx
 }
@@ -124,6 +147,8 @@ fn run(
             if acct.plan.is_some() {
                 app.plan = acct.plan;
             }
+            // Track the latest fetch outcome (cleared to None on success).
+            app.usage_error = acct.usage_error;
         }
         terminal.draw(|f| ui::draw(f, app))?;
 

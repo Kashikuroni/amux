@@ -66,8 +66,20 @@ fn card(
     let left = INDENT.len() + badge.chars().count() + s.name.chars().count();
     let status_width = 1 + 1 + status_label.chars().count(); // glyph + space + label
     let pad = (width as usize).saturating_sub(left + status_width).max(1);
+    // Leading gutter (same width as INDENT): the selection bar on the selected
+    // card, drawn inside the row on the SEL_BG background, else plain indent.
+    let lead = || -> Span<'static> {
+        if selected {
+            Span::styled(
+                format!("{} ", th::SEL_BAR),
+                Style::default().add_modifier(Modifier::DIM),
+            )
+        } else {
+            Span::raw(INDENT)
+        }
+    };
     let line1 = Line::from(vec![
-        Span::raw(INDENT),
+        lead(),
         Span::styled(badge, badge_style),
         Span::styled(s.name.clone(), name_style),
         Span::raw(" ".repeat(pad)),
@@ -79,7 +91,7 @@ fn card(
     // now — every session in a project shares it.)
     let accent = agent_accent(&s.agent);
     let mut l2 = vec![
-        Span::raw(INDENT),
+        lead(),
         Span::styled(th::AGENT_MARK, Style::default().fg(accent)),
         Span::styled(format!(" {}", s.agent), Style::default().fg(accent)),
     ];
@@ -99,6 +111,15 @@ fn card(
             Style::default().fg(Color::Red),
         ));
     }
+    // Mark worktree sessions (vs the one running in the repo root) with a quiet tag.
+    if crate::app::is_worktree(s) {
+        l2.push(Span::styled(
+            "   worktree",
+            Style::default()
+                .fg(Color::Reset)
+                .add_modifier(Modifier::DIM),
+        ));
+    }
     let line2 = Line::from(l2);
 
     // Line 3: reserved. Holds the answer buttons when a numbered prompt is
@@ -107,7 +128,7 @@ fn card(
     let line3 = match prompt {
         Some(opts) => {
             let mut btns: Vec<Span> = vec![
-                Span::raw(INDENT),
+                lead(),
                 Span::styled(
                     format!("{} ", th::PREVIEW_MARK),
                     Style::default().add_modifier(Modifier::DIM),
@@ -123,7 +144,9 @@ fn card(
             }
             Line::from(btns)
         }
-        None => Line::from(""),
+        // Blank reserved line still carries the bar so the highlight reads as one
+        // continuous block on the selected card.
+        None => Line::from(lead()),
     };
 
     ListItem::new(vec![line1, line2, line3])
@@ -186,9 +209,18 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     } else {
         app.selected.min(vis.len() - 1)
     };
-    // The list reserves the highlight_symbol ("▍ ", 2 cols) on the left of every
-    // row, so card content is laid out in the remaining width.
-    let content_width = rows[1].width.saturating_sub(2);
+    // Inset the list on the right so the SEL_BG background doesn't butt against
+    // the divider. No highlight-symbol gutter: the list sits flush with the
+    // "SESSIONS" label and the selection bar is drawn inside each card.
+    const RIGHT_PAD: u16 = 2;
+    // Inner pad so the status ends short of the background's right edge, mirroring
+    // the left gutter (bar + space) — the highlight gets symmetric inner padding.
+    const INNER_RIGHT_PAD: u16 = 2;
+    let list_area = Rect {
+        width: rows[1].width.saturating_sub(RIGHT_PAD),
+        ..rows[1]
+    };
+    let content_width = list_area.width.saturating_sub(INNER_RIGHT_PAD);
     // Build items grouped by project: a header precedes each project's sessions.
     // Headers aren't selectable, so the ListState index is the selected session's
     // *item* index (which differs from its session index by the headers above it).
@@ -196,9 +228,11 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     //   between sessions  = reserved(1) + 1 spacer  = 2 lines
     //   between projects  = reserved(1) + 1 spacer  = 2 lines (same as sessions)
     //   path → 1st session = 1 spacer               = 1 line  (half)
+    //   above the first project (gap from "SESSIONS")  = SPACER_TOP
     const SPACER_BETWEEN_SESSIONS: usize = 1;
     const SPACER_BETWEEN_PROJECTS: usize = 1;
     const SPACER_PATH_TO_FIRST: usize = 1;
+    const SPACER_TOP: usize = 1;
     let mut items: Vec<ListItem> = Vec::new();
     let mut selected_item: Option<usize> = None;
     let mut prev_root: Option<String> = None;
@@ -206,9 +240,12 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         let s = &app.sessions[i];
         let root = crate::app::session_root(s).to_string();
         if prev_root.as_deref() != Some(root.as_str()) {
-            if prev_root.is_some() {
-                items.extend(spacer(SPACER_BETWEEN_PROJECTS));
-            }
+            // Gap between projects, or above the very first project.
+            items.extend(spacer(if prev_root.is_some() {
+                SPACER_BETWEEN_PROJECTS
+            } else {
+                SPACER_TOP
+            }));
             items.push(project_header(&app.project_display_name(&root), &root));
             items.extend(spacer(SPACER_PATH_TO_FIRST));
             prev_root = Some(root);
@@ -229,18 +266,14 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         ));
     }
 
-    // Selection is a background-only cue: the bar (highlight_symbol) + a faint
-    // full-row background (th::SEL_BG). The selected name bolds via its own
-    // name_style; we deliberately do NOT add BOLD here, so selecting a row never
-    // changes any text's weight (the status stays consistently bold).
-    // bind sym so highlight_symbol can borrow a &str
-    let sym = format!("{} ", th::SEL_BAR);
-    let list = List::new(items)
-        .highlight_symbol(sym.as_str())
-        .highlight_style(Style::default().bg(th::SEL_BG));
+    // Selection is a background-only cue: a faint full-row background (th::SEL_BG),
+    // no left gutter so the list aligns with the "SESSIONS" label. The selected
+    // name bolds via its own name_style; we deliberately do NOT add BOLD here, so
+    // selecting a row never changes any text's weight (the status stays bold).
+    let list = List::new(items).highlight_style(Style::default().bg(th::SEL_BG));
     let mut state = ListState::default();
     state.select(selected_item);
-    f.render_stateful_widget(list, rows[1], &mut state);
+    f.render_stateful_widget(list, list_area, &mut state);
 }
 
 #[cfg(test)]

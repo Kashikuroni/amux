@@ -468,6 +468,9 @@ pub struct App {
     pub usage: Option<crate::usage::Usage>,
     /// Subscription plan badge (e.g. "Max 5×"), shown in the header.
     pub plan: Option<String>,
+    /// Reason the latest usage fetch failed ("429", "no auth", …), or `None` if
+    /// it succeeded. Shown in the header so an empty limits area is explainable.
+    pub usage_error: Option<String>,
     /// User's custom session order *within projects* (by name). Empty = tmux order.
     pub order: Vec<String>,
     /// User's custom project (group) order, by project root path.
@@ -500,6 +503,7 @@ impl App {
             split_pct: 40,
             usage: None,
             plan: None,
+            usage_error: None,
             order: Vec::new(),
             project_order: Vec::new(),
             project_names: std::collections::BTreeMap::new(),

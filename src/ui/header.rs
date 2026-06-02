@@ -81,12 +81,19 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             ));
             right.extend(block);
         }
-        if !right.is_empty() && !clock.is_empty() {
-            right.push(Span::styled(
-                format!(" {} ", th::SEP),
-                Style::default().fg(th::DIM),
-            ));
-        }
+    } else if let Some(err) = &app.usage_error {
+        // No limits to show — surface why (e.g. "429", "no auth") next to the clock.
+        right.push(Span::styled(
+            format!("  limits ✗ {err}"),
+            Style::default().fg(th::DIM),
+        ));
+    }
+    // Divider between the right cluster and the clock, when both are present.
+    if !right.is_empty() && !clock.is_empty() {
+        right.push(Span::styled(
+            format!(" {} ", th::SEP),
+            Style::default().fg(th::DIM),
+        ));
     }
     if !clock.is_empty() {
         right.push(Span::styled(clock.clone(), Style::default().fg(th::MUTED)));
@@ -209,6 +216,18 @@ mod tests {
             !s.contains("resets 04:00"),
             "weekly windows should not show a reset time:\n{s}"
         );
+    }
+
+    #[test]
+    fn header_shows_usage_error_when_no_limits() {
+        let mut app = App::new(Config::default());
+        app.usage = None;
+        app.usage_error = Some("429".to_string());
+        let mut t = Terminal::new(TestBackend::new(120, 2)).unwrap();
+        t.draw(|f| render(f, f.area(), &app)).unwrap();
+        let s = buf_to_string(t.backend().buffer());
+        assert!(s.contains("limits"), "missing limits-error label:\n{s}");
+        assert!(s.contains("429"), "missing error code:\n{s}");
     }
 
     #[test]
