@@ -224,6 +224,12 @@ fn handle_action(terminal: &mut Term, app: &mut App, action: Action) -> io::Resu
             }
             app.refresh();
         }
+        Action::SendShiftTab { name } => {
+            if let Err(e) = tmux::send_shift_tab(&name) {
+                app.error = Some(e.to_string());
+            }
+            app.refresh();
+        }
     }
     Ok(())
 }

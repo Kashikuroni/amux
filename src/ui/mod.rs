@@ -49,6 +49,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         }
         Mode::Help => modal_help::render(f),
         Mode::Reply(form) => draw_reply_modal(f, form),
+        Mode::RenameProject(form) => draw_project_rename_modal(f, form),
         // No modal: these render over the plain list (the SESSIONS label shows
         // the select-mode prompt).
         Mode::List | Mode::Filter | Mode::SelectSession => {}
@@ -283,6 +284,21 @@ fn draw_rename_modal(f: &mut Frame, app: &App) {
     f.render_widget(para, area);
 }
 
+fn draw_project_rename_modal(f: &mut Frame, form: &crate::app::ProjectRenameForm) {
+    let area = centered(60, 20, f.area());
+    f.render_widget(Clear, area);
+    let para = Paragraph::new(vec![
+        Line::from(format!("project name: {}", form.buffer)),
+        Line::from("Enter: rename  ·  Esc: cancel  (display only)"),
+    ])
+    .block(
+        th::panel()
+            .border_style(th::chrome(th::AMBER))
+            .title("rename project"),
+    );
+    f.render_widget(para, area);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -340,6 +356,7 @@ mod tests {
             status: Status::Running,
             attached: false,
             git: None,
+            worktree_repo: None,
         }];
 
         let backend = TestBackend::new(100, 20);

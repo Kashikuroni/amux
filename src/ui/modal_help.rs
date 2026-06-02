@@ -12,7 +12,6 @@ pub fn render(f: &mut Frame) {
             "Navigation",
             &[
                 ("k j / ↑↓", "move"),
-                ("⇧K ⇧J", "reorder up · down"),
                 ("s 1-9", "jump to session"),
                 ("g", "first session"),
                 ("/", "filter"),
@@ -25,6 +24,9 @@ pub fn render(f: &mut Frame) {
                 ("n", "new"),
                 ("d", "kill"),
                 ("r", "rename"),
+                ("⇧⇥", "agent mode"),
+                ("⇧K ⇧J", "reorder (project on edge)"),
+                ("⇧R", "rename project"),
             ],
         ),
         (

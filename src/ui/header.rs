@@ -43,7 +43,9 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     if let Some(plan) = &app.plan {
         spans.push(Span::styled(
             format!("  {plan}"),
-            Style::default().fg(th::TEXT_BOLD).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(th::TEXT_BOLD)
+                .add_modifier(Modifier::BOLD),
         ));
     }
     spans.extend([
@@ -70,7 +72,11 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         // Join blocks with a " │ " divider.
         for (i, block) in blocks.into_iter().enumerate() {
             right.push(Span::styled(
-                if i == 0 { "  ".to_string() } else { format!(" {} ", th::SEP) },
+                if i == 0 {
+                    "  ".to_string()
+                } else {
+                    format!(" {} ", th::SEP)
+                },
                 Style::default().fg(th::DIM),
             ));
             right.extend(block);
@@ -192,7 +198,10 @@ mod tests {
         assert!(s.contains("resets 14:40"), "missing 5h reset time:\n{s}");
         assert!(s.contains("7d 8%"), "missing 7d limit:\n{s}");
         assert!(s.contains("sonnet 1%"), "missing sonnet limit:\n{s}");
-        assert!(!s.contains("7d sonnet"), "sonnet should drop the 7d prefix:\n{s}");
+        assert!(
+            !s.contains("7d sonnet"),
+            "sonnet should drop the 7d prefix:\n{s}"
+        );
         // Blocks are divided by the separator glyph.
         assert!(s.contains(th::SEP), "missing block divider:\n{s}");
         // The weekly windows must not show a reset time (ambiguous as bare HH:MM).

@@ -114,11 +114,20 @@ mod tests {
     #[test]
     fn parse_iso8601_anchors_and_offsets() {
         assert_eq!(parse_iso8601("1970-01-01T00:00:00Z"), Some(0));
-        assert_eq!(parse_iso8601("2021-01-01T00:00:00+00:00"), Some(1_609_459_200));
+        assert_eq!(
+            parse_iso8601("2021-01-01T00:00:00+00:00"),
+            Some(1_609_459_200)
+        );
         // Same instant expressed in a +03:00 zone.
-        assert_eq!(parse_iso8601("2021-01-01T03:00:00+03:00"), Some(1_609_459_200));
+        assert_eq!(
+            parse_iso8601("2021-01-01T03:00:00+03:00"),
+            Some(1_609_459_200)
+        );
         // …and a -05:00 zone.
-        assert_eq!(parse_iso8601("2020-12-31T19:00:00-05:00"), Some(1_609_459_200));
+        assert_eq!(
+            parse_iso8601("2020-12-31T19:00:00-05:00"),
+            Some(1_609_459_200)
+        );
         // Fractional seconds + offset parse the same as the plain UTC form.
         assert_eq!(
             parse_iso8601("2026-06-02T10:40:01.229996+00:00"),

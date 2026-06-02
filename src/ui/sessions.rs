@@ -12,6 +12,11 @@ use ratatui::Frame;
 /// "accept edits on" indicator. A 256-color index so it tracks the palette.
 const INDIGO: Color = Color::Indexed(105);
 
+/// Indent of session cards under their project header (the header is itself
+/// indented from "SESSIONS" by the list's highlight-symbol gutter, so this gives
+/// sessions the same step in again).
+const INDENT: &str = "  ";
+
 /// Always-on per-agent color (ANSI names track the terminal palette / theme).
 fn agent_accent(agent: &str) -> Color {
     match agent.split_whitespace().next().unwrap_or("") {
@@ -58,10 +63,11 @@ fn card(
     let badge_style = Style::default().add_modifier(Modifier::DIM);
     // Pad between the left run (badge + name) and the right-aligned status. Glyphs
     // and ASCII labels are single-width, so a char count is exact here.
-    let left = badge.chars().count() + s.name.chars().count();
+    let left = INDENT.len() + badge.chars().count() + s.name.chars().count();
     let status_width = 1 + 1 + status_label.chars().count(); // glyph + space + label
     let pad = (width as usize).saturating_sub(left + status_width).max(1);
     let line1 = Line::from(vec![
+        Span::raw(INDENT),
         Span::styled(badge, badge_style),
         Span::styled(s.name.clone(), name_style),
         Span::raw(" ".repeat(pad)),
@@ -69,55 +75,78 @@ fn card(
         Span::styled(format!(" {status_label}"), status_style),
     ]);
 
-    // Line 2: dir
-    let line2 = Line::from(Span::styled(
-        collapse_home(&s.dir),
-        Style::default().fg(Color::Reset),
-    ));
-
-    // Line 3: ✻ agent · ⎇ branch · +a −d
+    // Line 2: ✻ agent · ⎇ branch · +a −d. (The path lives on the project header
+    // now — every session in a project shares it.)
     let accent = agent_accent(&s.agent);
-    let mut l3 = vec![
+    let mut l2 = vec![
+        Span::raw(INDENT),
         Span::styled(th::AGENT_MARK, Style::default().fg(accent)),
         Span::styled(format!(" {}", s.agent), Style::default().fg(accent)),
     ];
     if let Some(g) = &s.git {
-        l3.push(Span::styled(
+        l2.push(Span::styled(
             format!("   {} {}", th::BRANCH, g.branch),
             Style::default()
                 .fg(Color::Reset)
                 .add_modifier(Modifier::DIM),
         ));
-        l3.push(Span::styled(
+        l2.push(Span::styled(
             format!("   +{}", g.added),
             Style::default().fg(Color::Green),
         ));
-        l3.push(Span::styled(
+        l2.push(Span::styled(
             format!(" −{}", g.removed),
             Style::default().fg(Color::Red),
         ));
     }
-    let line3 = Line::from(l3);
+    let line2 = Line::from(l2);
 
-    let mut lines = vec![line1, line2, line3];
-    // Line 4 (optional): answer buttons for a detected numbered prompt.
-    if let Some(opts) = prompt {
-        let mut btns: Vec<Span> = vec![Span::styled(
-            format!("{} ", th::PREVIEW_MARK),
-            Style::default().add_modifier(Modifier::DIM),
-        )];
-        for (i, label) in opts.iter().enumerate().take(9) {
-            let short: String = label.chars().take(16).collect();
-            btns.push(Span::styled(
-                format!(" {} {} ", i + 1, short),
-                Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED),
-            ));
-            btns.push(Span::raw(" "));
+    // Line 3: reserved. Holds the answer buttons when a numbered prompt is
+    // detected, otherwise stays blank — so buttons appearing never shift the
+    // cards below, and there's always a gap between sessions.
+    let line3 = match prompt {
+        Some(opts) => {
+            let mut btns: Vec<Span> = vec![
+                Span::raw(INDENT),
+                Span::styled(
+                    format!("{} ", th::PREVIEW_MARK),
+                    Style::default().add_modifier(Modifier::DIM),
+                ),
+            ];
+            for (i, label) in opts.iter().enumerate().take(9) {
+                let short: String = label.chars().take(16).collect();
+                btns.push(Span::styled(
+                    format!(" {} {} ", i + 1, short),
+                    Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED),
+                ));
+                btns.push(Span::raw(" "));
+            }
+            Line::from(btns)
         }
-        lines.push(Line::from(btns));
-    }
+        None => Line::from(""),
+    };
 
-    ListItem::new(lines)
+    ListItem::new(vec![line1, line2, line3])
+}
+
+/// Project group header: the display name (bold) with the shared path beneath it
+/// in DIM. Inter-group spacing is handled by the caller's spacer items.
+fn project_header(name: &str, root: &str) -> ListItem<'static> {
+    ListItem::new(vec![
+        Line::from(Span::styled(
+            name.to_string(),
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            collapse_home(root),
+            Style::default().add_modifier(Modifier::DIM),
+        )),
+    ])
+}
+
+/// A non-selectable spacer of `n` blank lines (none if `n == 0`).
+fn spacer(n: usize) -> Option<ListItem<'static>> {
+    (n > 0).then(|| ListItem::new(vec![Line::from(""); n]))
 }
 
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
@@ -129,9 +158,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             Span::styled("SESSIONS", Style::default().fg(Color::Reset)),
             Span::styled(
                 "   Выберите сессию 1-9",
-                Style::default()
-                    .fg(INDIGO)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(INDIGO).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 "   esc cancel",
@@ -151,10 +178,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             ),
         ]
     };
-    f.render_widget(
-        Paragraph::new(Line::from(label)),
-        rows[0],
-    );
+    f.render_widget(Paragraph::new(Line::from(label)), rows[0]);
 
     let vis = app.visible_indices();
     let sel = if vis.is_empty() {
@@ -165,15 +189,45 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     // The list reserves the highlight_symbol ("▍ ", 2 cols) on the left of every
     // row, so card content is laid out in the remaining width.
     let content_width = rows[1].width.saturating_sub(2);
-    let items: Vec<ListItem> = vis
-        .iter()
-        .enumerate()
-        .map(|(pos, &i)| {
-            let s = &app.sessions[i];
-            let prompt = app.prompts.get(&s.name).map(|v| v.as_slice());
-            card(s, app.spinner_frame, pos == sel, prompt, content_width, pos + 1)
-        })
-        .collect();
+    // Build items grouped by project: a header precedes each project's sessions.
+    // Headers aren't selectable, so the ListState index is the selected session's
+    // *item* index (which differs from its session index by the headers above it).
+    // Vertical rhythm (the card's trailing reserved line already adds 1 line):
+    //   between sessions  = reserved(1) + 1 spacer  = 2 lines
+    //   between projects  = reserved(1) + 1 spacer  = 2 lines (same as sessions)
+    //   path → 1st session = 1 spacer               = 1 line  (half)
+    const SPACER_BETWEEN_SESSIONS: usize = 1;
+    const SPACER_BETWEEN_PROJECTS: usize = 1;
+    const SPACER_PATH_TO_FIRST: usize = 1;
+    let mut items: Vec<ListItem> = Vec::new();
+    let mut selected_item: Option<usize> = None;
+    let mut prev_root: Option<String> = None;
+    for (pos, &i) in vis.iter().enumerate() {
+        let s = &app.sessions[i];
+        let root = crate::app::session_root(s).to_string();
+        if prev_root.as_deref() != Some(root.as_str()) {
+            if prev_root.is_some() {
+                items.extend(spacer(SPACER_BETWEEN_PROJECTS));
+            }
+            items.push(project_header(&app.project_display_name(&root), &root));
+            items.extend(spacer(SPACER_PATH_TO_FIRST));
+            prev_root = Some(root);
+        } else {
+            items.extend(spacer(SPACER_BETWEEN_SESSIONS));
+        }
+        if pos == sel {
+            selected_item = Some(items.len());
+        }
+        let prompt = app.prompts.get(&s.name).map(|v| v.as_slice());
+        items.push(card(
+            s,
+            app.spinner_frame,
+            pos == sel,
+            prompt,
+            content_width,
+            pos + 1,
+        ));
+    }
 
     // Selection is a background-only cue: the bar (highlight_symbol) + a faint
     // full-row background (th::SEL_BG). The selected name bolds via its own
@@ -185,9 +239,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         .highlight_symbol(sym.as_str())
         .highlight_style(Style::default().bg(th::SEL_BG));
     let mut state = ListState::default();
-    if !vis.is_empty() {
-        state.select(Some(sel));
-    }
+    state.select(selected_item);
     f.render_stateful_widget(list, rows[1], &mut state);
 }
 
@@ -222,6 +274,7 @@ mod tests {
             status,
             attached: false,
             git,
+            worktree_repo: None,
         }
     }
 
@@ -311,9 +364,8 @@ mod tests {
         assert!(s.contains("waiting"), "missing 'waiting':\n{s}");
         assert!(s.contains(th::WAIT_MARK), "missing wait glyph:\n{s}");
         // The label must be indigo (Indexed(105)).
-        let indigo = (0..buf.area.height).any(|y| {
-            (0..buf.area.width).any(|x| buf[(x, y)].style().fg == Some(INDIGO))
-        });
+        let indigo = (0..buf.area.height)
+            .any(|y| (0..buf.area.width).any(|x| buf[(x, y)].style().fg == Some(INDIGO)));
         assert!(indigo, "no indigo cell found:\n{s}");
     }
 
@@ -324,13 +376,17 @@ mod tests {
         let mut t = Terminal::new(TestBackend::new(40, 8)).unwrap();
         t.draw(|f| render(f, f.area(), &app)).unwrap();
         let buf = t.backend().buffer();
-        // Row 0 is the "SESSIONS" header; row 1 is the first card line
-        // (badge + name … status). The status label "idle" should sit in the
-        // right half of the 40-col width, not next to the name.
-        let row1: String = (0..buf.area.width)
-            .map(|x| buf[(x, 1)].symbol().to_string())
-            .collect();
-        let col = row1.find("idle").expect("status 'idle' not on first card line");
-        assert!(col > 20, "status not right-aligned (col {col}):\n{row1}");
+        // Find whichever row carries the status label; it should sit in the right
+        // half of the 40-col width, not next to the name.
+        let row = (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .find(|r| r.contains("idle"))
+            .expect("status 'idle' not found");
+        let col = row.find("idle").unwrap();
+        assert!(col > 20, "status not right-aligned (col {col}):\n{row}");
     }
 }

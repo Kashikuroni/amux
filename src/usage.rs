@@ -194,7 +194,8 @@ fn plan_label(tier: &str) -> String {
     // A trailing "_<n>x" segment is the rate multiplier.
     let mult = t.rsplit('_').find_map(|seg| {
         let digits = seg.strip_suffix('x')?;
-        (!digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())).then(|| digits.to_string())
+        (!digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()))
+            .then(|| digits.to_string())
     });
     match mult {
         Some(n) => format!("{base} {n}×"),
@@ -224,10 +225,7 @@ mod tests {
         );
         assert!(five.reset_unix.is_some());
         assert_eq!(u.seven_day.expect("seven_day present").utilization, 8.0);
-        assert_eq!(
-            u.seven_day_sonnet.expect("sonnet present").utilization,
-            1.0
-        );
+        assert_eq!(u.seven_day_sonnet.expect("sonnet present").utilization, 1.0);
     }
 
     #[test]

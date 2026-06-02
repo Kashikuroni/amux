@@ -102,6 +102,7 @@ mod tests {
             status: Status::Idle,
             attached: false,
             git: None,
+            worktree_repo: None,
         }];
         app.now_unix = 0;
         // ANSI green "hello" — ansi-to-tui must not leave escape bytes in the buffer

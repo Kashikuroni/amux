@@ -321,6 +321,16 @@ pub enum Mode {
     Reply(ReplyForm),
     /// Awaiting a 1–9 digit to jump to that session (entered with `s`).
     SelectSession,
+    /// Editing a project's display name (entered with Shift+R). Display-only —
+    /// never renames the directory.
+    RenameProject(ProjectRenameForm),
+}
+
+/// Display-name editor for a project, keyed by its root path.
+#[derive(Debug, Clone)]
+pub struct ProjectRenameForm {
+    pub root: String,
+    pub buffer: String,
 }
 
 /// Side effects the event loop must perform (kept out of `App` so it stays IO-free).
@@ -347,6 +357,10 @@ pub enum Action {
         name: String,
         text: String,
     },
+    /// Send Shift+Tab to a session's agent (e.g. cycle Claude Code's mode).
+    SendShiftTab {
+        name: String,
+    },
 }
 
 #[derive(Copy, Clone)]
@@ -359,6 +373,7 @@ enum ModeKind {
     Filter,
     Reply,
     SelectSession,
+    RenameProject,
 }
 
 pub struct App {
@@ -386,10 +401,14 @@ pub struct App {
     pub usage: Option<crate::usage::Usage>,
     /// Subscription plan badge (e.g. "Max 5×"), shown in the header.
     pub plan: Option<String>,
-    /// User's custom session order (by name). Empty = fall back to tmux order.
+    /// User's custom session order *within projects* (by name). Empty = tmux order.
     pub order: Vec<String>,
-    /// Set when persisted state (split width / order) changed and needs saving.
-    /// The event loop saves and clears it; keeps `App` itself IO-free.
+    /// User's custom project (group) order, by project root path.
+    pub project_order: Vec<String>,
+    /// Display-name overrides for projects, keyed by project root path.
+    pub project_names: std::collections::BTreeMap<String, String>,
+    /// Set when persisted state (split width / order / names) changed and needs
+    /// saving. The event loop saves and clears it; keeps `App` itself IO-free.
     pub dirty: bool,
 }
 
@@ -415,16 +434,20 @@ impl App {
             usage: None,
             plan: None,
             order: Vec::new(),
+            project_order: Vec::new(),
+            project_names: std::collections::BTreeMap::new(),
             dirty: false,
         }
     }
 
-    /// Applies persisted UI state (split width + session order) loaded at startup.
+    /// Applies persisted UI state (split width + ordering + names) at startup.
     pub fn apply_state(&mut self, state: crate::state::State) {
         if let Some(pct) = state.split_pct {
             self.split_pct = pct.clamp(20, 75);
         }
         self.order = state.order;
+        self.project_order = state.project_order;
+        self.project_names = state.project_names;
     }
 
     /// Snapshots the persistable UI state for saving to disk.
@@ -432,7 +455,18 @@ impl App {
         crate::state::State {
             split_pct: Some(self.split_pct),
             order: self.order.clone(),
+            project_order: self.project_order.clone(),
+            project_names: self.project_names.clone(),
         }
+    }
+
+    /// Display name for a project given its root path: the user's override if set,
+    /// otherwise the default (the root's last path component).
+    pub fn project_display_name(&self, root: &str) -> String {
+        self.project_names
+            .get(root)
+            .cloned()
+            .unwrap_or_else(|| project_default_name(root).to_string())
     }
 
     /// Scroll the preview up (into history) / down (toward latest) by `n` lines.
@@ -456,32 +490,60 @@ impl App {
         }
     }
 
-    /// Move the selected session up (`delta = -1`) or down (`delta = +1`) one
-    /// slot in the custom order, persisting the result. No-op while a filter is
-    /// active (the visible subset hides neighbors, making a move ambiguous) or at
-    /// the list edges. The selection follows the moved session.
+    /// Move the selected session up (`delta = -1`) or down (`delta = +1`).
+    /// Within its project the session swaps with a sibling; at the project's edge
+    /// the whole project swaps with the neighbouring project (so a session never
+    /// leaves its group). Persisted; the selection follows the session. No-op
+    /// while a filter is active (hidden neighbours make a move ambiguous).
     fn move_selected(&mut self, delta: isize) {
-        if self.filter.is_some() {
+        if self.filter.is_some() || self.sessions.len() < 2 {
             return;
         }
-        // With no filter, visible_indices() == 0..len, so `selected` indexes
-        // `sessions` directly.
-        let n = self.sessions.len();
-        if n < 2 {
+        let sel_name = self.sessions[self.selected.min(self.sessions.len() - 1)]
+            .name
+            .clone();
+        let mut groups = group_in_order(std::mem::take(&mut self.sessions));
+        // Locate the selected session as (group index, index within group).
+        let Some((gi, si)) = groups.iter().enumerate().find_map(|(gi, (_, gs))| {
+            gs.iter()
+                .position(|s| s.name == sel_name)
+                .map(|si| (gi, si))
+        }) else {
+            self.sessions = groups.into_iter().flat_map(|(_, gs)| gs).collect();
             return;
+        };
+        let moved = if delta > 0 {
+            if si + 1 < groups[gi].1.len() {
+                groups[gi].1.swap(si, si + 1);
+                true
+            } else if gi + 1 < groups.len() {
+                groups.swap(gi, gi + 1);
+                true
+            } else {
+                false
+            }
+        } else if si > 0 {
+            groups[gi].1.swap(si, si - 1);
+            true
+        } else if gi > 0 {
+            groups.swap(gi, gi - 1);
+            true
+        } else {
+            false
+        };
+        self.sessions = groups.into_iter().flat_map(|(_, gs)| gs).collect();
+        self.selected = self
+            .sessions
+            .iter()
+            .position(|s| s.name == sel_name)
+            .unwrap_or(self.selected);
+        if moved {
+            // Re-derive both orders from the new arrangement (drops dead entries).
+            self.order = self.sessions.iter().map(|s| s.name.clone()).collect();
+            self.project_order = unique_roots(&self.sessions);
+            self.dirty = true;
+            self.update_preview();
         }
-        let i = self.selected.min(n - 1);
-        let j = i as isize + delta;
-        if j < 0 || j as usize >= n {
-            return;
-        }
-        let j = j as usize;
-        self.sessions.swap(i, j);
-        self.selected = j;
-        // Re-derive the full order from the new arrangement (drops dead names).
-        self.order = self.sessions.iter().map(|s| s.name.clone()).collect();
-        self.dirty = true;
-        self.update_preview();
     }
 
     /// Inserts pasted text into whatever text field is currently focused.
@@ -491,6 +553,7 @@ impl App {
         match &mut self.mode {
             Mode::Reply(f) => f.insert_str(&text),
             Mode::Rename(f) => f.buffer.push_str(&text),
+            Mode::RenameProject(f) => f.buffer.push_str(&text),
             Mode::Create(f) => f.paste(&text),
             Mode::Filter => {
                 if let Some(s) = self.filter.as_mut() {
@@ -576,6 +639,7 @@ impl App {
             Mode::Filter => ModeKind::Filter,
             Mode::Reply(_) => ModeKind::Reply,
             Mode::SelectSession => ModeKind::SelectSession,
+            Mode::RenameProject(_) => ModeKind::RenameProject,
         }
     }
 
@@ -595,6 +659,7 @@ impl App {
             ModeKind::Filter => self.handle_filter_key(key),
             ModeKind::Reply => self.handle_reply_key(key),
             ModeKind::SelectSession => self.handle_select_session_key(key),
+            ModeKind::RenameProject => self.handle_rename_project_key(key),
         }
     }
 
@@ -652,6 +717,20 @@ impl App {
             KeyCode::Char('r') => {
                 if let Some(name) = self.selected_name() {
                     self.mode = Mode::Rename(RenameForm::new(name));
+                }
+            }
+            // Shift+R: rename the selected session's project (display-only).
+            KeyCode::Char('R') => {
+                if let Some(s) = self.selected_session() {
+                    let root = session_root(s).to_string();
+                    let buffer = self.project_display_name(&root);
+                    self.mode = Mode::RenameProject(ProjectRenameForm { root, buffer });
+                }
+            }
+            // Shift+Tab: forward to the agent so it cycles its own mode.
+            KeyCode::BackTab => {
+                if let Some(name) = self.selected_name() {
+                    return Some(Action::SendShiftTab { name });
                 }
             }
             KeyCode::Char('?') => self.mode = Mode::Help,
@@ -909,6 +988,36 @@ impl App {
         None
     }
 
+    /// Project-rename mode: edits the display-name override (never the directory).
+    /// Enter commits (empty or equal-to-default clears the override); Esc cancels.
+    fn handle_rename_project_key(&mut self, key: KeyEvent) -> Option<Action> {
+        let Mode::RenameProject(mut form) = std::mem::replace(&mut self.mode, Mode::List) else {
+            return None;
+        };
+        match key.code {
+            KeyCode::Esc => return None,
+            KeyCode::Backspace => {
+                form.buffer.pop();
+            }
+            KeyCode::Char(c) => form.buffer.push(c),
+            KeyCode::Enter => {
+                let name = form.buffer.trim();
+                if name.is_empty() || name == project_default_name(&form.root) {
+                    // Back to the default → drop any override.
+                    self.project_names.remove(&form.root);
+                } else {
+                    self.project_names
+                        .insert(form.root.clone(), name.to_string());
+                }
+                self.dirty = true;
+                return None;
+            }
+            _ => {}
+        }
+        self.mode = Mode::RenameProject(form);
+        None
+    }
+
     fn handle_filter_key(&mut self, key: KeyEvent) -> Option<Action> {
         match key.code {
             KeyCode::Esc => {
@@ -967,8 +1076,7 @@ impl App {
                         if selected_name.as_deref() == Some(s.name.as_str()) {
                             // Preview keeps scrollback so it can be paged back.
                             new_preview = Some(
-                                crate::tmux::capture_scrollback(&s.name, 500)
-                                    .unwrap_or(content),
+                                crate::tmux::capture_scrollback(&s.name, 500).unwrap_or(content),
                             );
                         }
                     }
@@ -980,7 +1088,7 @@ impl App {
                 }
                 self.snapshots = new_snaps;
                 self.prompts = new_prompts;
-                self.sessions = apply_order(&self.order, sessions);
+                self.sessions = apply_grouped_order(&self.project_order, &self.order, sessions);
                 self.clamp_selection();
                 if let Some(p) = new_preview {
                     self.preview = p;
@@ -1003,7 +1111,11 @@ pub fn latinize(c: char) -> char {
     let lower = c.to_lowercase().next().unwrap_or(c);
     if let Some(pos) = CYR.chars().position(|x| x == lower) {
         let l = LAT.chars().nth(pos).unwrap();
-        return if c.is_uppercase() { l.to_ascii_uppercase() } else { l };
+        return if c.is_uppercase() {
+            l.to_ascii_uppercase()
+        } else {
+            l
+        };
     }
     c
 }
@@ -1082,17 +1194,88 @@ pub fn compute_status(prev: Option<u64>, current: u64) -> Status {
     }
 }
 
-/// Reorders `sessions` by the user's custom `order` (a list of names). Sessions
-/// named in `order` come first, in that order; any others keep their incoming
-/// (tmux) order and follow. Stale names in `order` (no matching session) are
-/// ignored. A stable sort keyed by rank does exactly this.
-pub fn apply_order(order: &[String], mut sessions: Vec<Session>) -> Vec<Session> {
-    if order.is_empty() {
-        return sessions;
+/// The project root for a session directory: the path with any trailing
+/// `/.worktrees/<branch>...` segment stripped. Sessions sharing a root belong to
+/// the same project. Returns a trimmed slice of `dir`.
+pub fn project_root(dir: &str) -> &str {
+    let trimmed = dir.trim_end_matches('/');
+    // Find a path component exactly equal to ".worktrees" and cut before it.
+    if let Some(pos) = trimmed.find("/.worktrees/") {
+        return &trimmed[..pos];
     }
-    let rank = |name: &str| order.iter().position(|n| n == name).unwrap_or(usize::MAX);
-    sessions.sort_by_key(|s| rank(&s.name));
-    sessions
+    if let Some(stripped) = trimmed.strip_suffix("/.worktrees") {
+        return stripped;
+    }
+    trimmed
+}
+
+/// The project root for a session: the worktree's repo root (from `@cm_repo`) if
+/// this is a worktree session, otherwise its directory with any `.worktrees/…`
+/// suffix stripped. Sessions sharing a root are one project.
+pub fn session_root(s: &Session) -> &str {
+    match s.worktree_repo.as_deref() {
+        Some(r) => r.trim_end_matches('/'),
+        None => project_root(&s.dir),
+    }
+}
+
+/// Default display name for a project: the last path component of its root.
+pub fn project_default_name(root: &str) -> &str {
+    root.trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or(root)
+}
+
+/// Groups `sessions` into `(root, sessions)` buckets, contiguous and in the
+/// order each root is first seen. Order within a bucket is the input order.
+pub fn group_in_order(sessions: Vec<Session>) -> Vec<(String, Vec<Session>)> {
+    let mut groups: Vec<(String, Vec<Session>)> = Vec::new();
+    for s in sessions {
+        let root = session_root(&s).to_string();
+        if let Some(g) = groups.iter_mut().find(|(r, _)| *r == root) {
+            g.1.push(s);
+        } else {
+            groups.push((root, vec![s]));
+        }
+    }
+    groups
+}
+
+/// Project roots in first-seen order (the persisted project order after a move).
+pub fn unique_roots(sessions: &[Session]) -> Vec<String> {
+    let mut roots: Vec<String> = Vec::new();
+    for s in sessions {
+        let root = session_root(s).to_string();
+        if !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
+    roots
+}
+
+/// Orders sessions into grouped display order: projects ordered by
+/// `project_order` (unknown roots appended in first-seen order), and within each
+/// project sessions ordered by `order` (by name; unknown appended). Groups stay
+/// contiguous. Stale entries in either list are ignored.
+pub fn apply_grouped_order(
+    project_order: &[String],
+    order: &[String],
+    sessions: Vec<Session>,
+) -> Vec<Session> {
+    let mut groups = group_in_order(sessions);
+    let proj_rank = |root: &str| {
+        project_order
+            .iter()
+            .position(|r| r == root)
+            .unwrap_or(usize::MAX)
+    };
+    groups.sort_by_key(|(root, _)| proj_rank(root));
+    let sess_rank = |name: &str| order.iter().position(|n| n == name).unwrap_or(usize::MAX);
+    for (_, gs) in &mut groups {
+        gs.sort_by_key(|s| sess_rank(&s.name));
+    }
+    groups.into_iter().flat_map(|(_, gs)| gs).collect()
 }
 
 /// Expands a leading `~` using `$HOME`. Leaves other paths untouched.
@@ -1229,6 +1412,7 @@ mod tests {
                 status: Status::Idle,
                 attached: false,
                 git: None,
+                worktree_repo: None,
             },
             Session {
                 name: "b".into(),
@@ -1238,6 +1422,7 @@ mod tests {
                 status: Status::Idle,
                 attached: false,
                 git: None,
+                worktree_repo: None,
             },
         ];
         app
@@ -1252,31 +1437,128 @@ mod tests {
             status: Status::Idle,
             attached: false,
             git: None,
+            worktree_repo: None,
+        }
+    }
+
+    fn at(name: &str, dir: &str) -> Session {
+        Session {
+            dir: dir.into(),
+            ..named(name)
         }
     }
 
     #[test]
-    fn apply_order_sorts_known_first_then_unknown_and_ignores_stale() {
-        let sessions = vec![named("a"), named("b"), named("c")];
-        // Order wants c first, then b; "a" is unknown → appended; "z" is stale.
-        let order = vec!["c".to_string(), "z".to_string(), "b".to_string()];
-        let out = apply_order(&order, sessions);
-        let names: Vec<&str> = out.iter().map(|s| s.name.as_str()).collect();
-        assert_eq!(names, vec!["c", "b", "a"]);
+    fn project_root_strips_worktrees_segment() {
+        assert_eq!(project_root("/home/u/proj"), "/home/u/proj");
+        assert_eq!(project_root("/home/u/proj/"), "/home/u/proj");
+        assert_eq!(
+            project_root("/home/u/proj/.worktrees/feat-x"),
+            "/home/u/proj"
+        );
+        assert_eq!(project_default_name("/home/u/proj"), "proj");
     }
 
     #[test]
-    fn empty_order_preserves_input_order() {
-        let sessions = vec![named("a"), named("b")];
-        let out = apply_order(&[], sessions);
+    fn session_root_prefers_worktree_repo() {
+        let mut s = at("w", "/home/u/proj/.worktrees/feat");
+        s.worktree_repo = Some("/home/u/proj".into());
+        assert_eq!(session_root(&s), "/home/u/proj");
+    }
+
+    #[test]
+    fn apply_grouped_order_keeps_groups_contiguous_and_ordered() {
+        // Two projects (/p1, /p2) interleaved on input.
+        let sessions = vec![
+            at("a", "/p1"),
+            at("x", "/p2"),
+            at("b", "/p1"),
+            at("y", "/p2"),
+        ];
+        // Want project /p2 first; within /p1 want "b" before "a".
+        let project_order = vec!["/p2".to_string(), "/p1".to_string()];
+        let order = vec!["b".to_string(), "a".to_string()];
+        let out = apply_grouped_order(&project_order, &order, sessions);
         let names: Vec<&str> = out.iter().map(|s| s.name.as_str()).collect();
-        assert_eq!(names, vec!["a", "b"]);
+        // /p2 group (x,y in input order) then /p1 group (b,a per order).
+        assert_eq!(names, vec!["x", "y", "b", "a"]);
+    }
+
+    #[test]
+    fn empty_orders_preserve_grouped_input_order() {
+        let sessions = vec![at("a", "/p1"), at("x", "/p2"), at("b", "/p1")];
+        let out = apply_grouped_order(&[], &[], sessions);
+        // Groups stay contiguous in first-seen order: /p1 (a,b) then /p2 (x).
+        let names: Vec<&str> = out.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["a", "b", "x"]);
+    }
+
+    fn app_with(sessions: Vec<Session>) -> App {
+        let mut app = App::new(Config::default());
+        app.sessions = sessions;
+        app
+    }
+
+    fn names_of(app: &App) -> Vec<String> {
+        app.sessions.iter().map(|s| s.name.clone()).collect()
+    }
+
+    #[test]
+    fn shift_j_moves_session_within_project() {
+        let mut app = app_with(vec![at("a", "/p"), at("b", "/p"), at("c", "/p")]);
+        app.selected = 0;
+        app.handle_key(key('J'));
+        assert_eq!(names_of(&app), vec!["b", "a", "c"]);
+        assert_eq!(app.selected, 1); // follows "a"
+    }
+
+    #[test]
+    fn shift_j_at_project_edge_swaps_whole_project() {
+        // /p1 = [a, b], /p2 = [x]; move "b" (bottom of /p1) down → projects swap.
+        let mut app = app_with(vec![at("a", "/p1"), at("b", "/p1"), at("x", "/p2")]);
+        app.selected = 1; // "b"
+        app.handle_key(key('J'));
+        assert_eq!(names_of(&app), vec!["x", "a", "b"]);
+        assert_eq!(
+            app.project_order,
+            vec!["/p2".to_string(), "/p1".to_string()]
+        );
+        assert!(app.dirty);
+    }
+
+    #[test]
+    fn shift_r_renames_project_display_only() {
+        let mut app = app_with(vec![at("s", "/home/u/p")]);
+        app.selected = 0;
+        app.handle_key(key('R'));
+        assert!(matches!(app.mode, Mode::RenameProject(_)));
+        // Buffer starts at the default name "p"; append to make "px".
+        app.handle_key(key('x'));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            app.project_names.get("/home/u/p").map(String::as_str),
+            Some("px")
+        );
+        assert!(app.dirty);
+        // Renaming back to the default clears the override.
+        app.handle_key(key('R'));
+        app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.project_names.is_empty());
+    }
+
+    #[test]
+    fn shift_tab_sends_to_selected_session() {
+        let mut app = app_with(vec![at("s", "/p")]);
+        app.selected = 0;
+        let act = app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE));
+        assert!(matches!(act, Some(Action::SendShiftTab { name }) if name == "s"));
     }
 
     #[test]
     fn shift_j_k_reorder_selected_and_mark_dirty() {
         let mut app = app_with_two_sessions(); // [a, b], selected 0
-        // Shift+J moves "a" down; selection follows.
+                                               // Shift+J moves "a" down; selection follows.
         app.handle_key(key('J'));
         let names: Vec<&str> = app.sessions.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, vec!["b", "a"]);

@@ -24,6 +24,9 @@ fn items_for(mode: &Mode) -> Vec<Item> {
         ],
         Mode::Help => vec![("esc", "close", true), ("q", "quit", false)],
         Mode::Rename(_) => vec![("↵", "rename", true), ("esc", "cancel", false)],
+        Mode::RenameProject(_) => {
+            vec![("↵", "rename project", true), ("esc", "cancel", false)]
+        }
         Mode::Reply(_) => vec![
             ("↵", "send", true),
             ("⇧↵", "newline", false),
@@ -40,10 +43,12 @@ fn items_for(mode: &Mode) -> Vec<Item> {
             ("↵", "attach", false),
             ("s", "select", false),
             ("⇧JK", "reorder", false),
+            ("⇧⇥", "mode", false),
             ("1-9", "answer", false),
             ("i", "reply", false),
             ("d", "kill", false),
             ("r", "rename", false),
+            ("⇧R", "rename proj", false),
             ("/", "filter", false),
             ("?", "help", false),
             ("q", "quit", false),

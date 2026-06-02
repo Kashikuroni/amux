@@ -4,6 +4,7 @@
 //! hand-edited `config.toml`. All IO is best-effort: a missing/garbage file or
 //! an unwritable home just falls back to defaults and silently skips saving.
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -12,9 +13,15 @@ pub struct State {
     /// Left (sessions) pane width as a percentage of the body, if the user has
     /// resized it. `None` keeps the app default.
     pub split_pct: Option<u16>,
-    /// Session names in the user's chosen display order. Names not present are
-    /// appended (in tmux order); names here but no longer present are ignored.
+    /// Session names in the user's chosen order *within their project group*.
+    /// Names not present are appended; names here but no longer present ignored.
     pub order: Vec<String>,
+    /// Project root paths in the user's chosen group order. Same merge rules.
+    pub project_order: Vec<String>,
+    /// Display-name overrides for projects, keyed by project root path (stable
+    /// against two projects sharing a folder name). Value is the shown name; the
+    /// directory itself is never renamed. BTreeMap → deterministic file output.
+    pub project_names: BTreeMap<String, String>,
 }
 
 fn state_path() -> Option<PathBuf> {
@@ -59,9 +66,13 @@ mod tests {
 
     #[test]
     fn roundtrips_through_toml() {
+        let mut names = BTreeMap::new();
+        names.insert("/home/u/p".to_string(), "Backend".to_string());
         let s = State {
             split_pct: Some(55),
             order: vec!["a".into(), "b".into()],
+            project_order: vec!["/home/u/p".into()],
+            project_names: names,
         };
         let toml = toml::to_string(&s).unwrap();
         let back: State = toml::from_str(&toml).unwrap();
