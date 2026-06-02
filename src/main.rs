@@ -66,6 +66,7 @@ fn main() -> io::Result<()> {
 ///   - success            → `POLL_INTERVAL` (steady state; usage changes slowly)
 ///   - HTTP 429           → `RATE_LIMIT_BACKOFF` (back off so we don't sustain it)
 ///   - other failure/net  → `RETRY_INTERVAL` (recover quickly from a transient error)
+///
 /// The first request still fires immediately at startup.
 fn spawn_usage_poller() -> mpsc::Receiver<am::usage::Account> {
     const POLL_INTERVAL: Duration = Duration::from_secs(300); // 5 min, steady state

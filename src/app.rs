@@ -1264,7 +1264,7 @@ pub fn strip_ansi(s: &str) -> String {
     while let Some(c) = chars.next() {
         if c == '\u{1b}' {
             // Skip the escape and everything up to its final byte (a letter).
-            while let Some(n) = chars.next() {
+            for n in chars.by_ref() {
                 if n.is_ascii_alphabetic() {
                     break;
                 }
