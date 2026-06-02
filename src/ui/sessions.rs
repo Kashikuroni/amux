@@ -4,57 +4,52 @@ use crate::theme as th;
 use crate::timeutil;
 use crate::tmux::{Session, Status};
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 use ratatui::Frame;
 
-fn card(s: &Session, now: i64, spinner_frame: usize) -> ListItem<'static> {
-    // Line 1: name  ........  status
-    let (status_glyph, status_label, status_color) = match s.status {
-        Status::Running => (
-            spinner::glyph(spinner_frame).to_string(),
-            "running",
-            th::AMBER_HI,
-        ),
-        Status::Idle => (th::IDLE_DOT.to_string(), "idle", th::MUTED),
+fn card(s: &Session, now: i64, spinner_frame: usize, selected: bool) -> ListItem<'static> {
+    // Line 1: name  ........  status. Colorless: running vs idle is told apart by
+    // the spinner vs dot glyph, and the selected row by its bold name + bar.
+    let (status_glyph, status_label) = match s.status {
+        Status::Running => (spinner::glyph(spinner_frame).to_string(), "running"),
+        Status::Idle => (th::IDLE_DOT.to_string(), "idle"),
     };
+    let mut name_style = Style::default();
+    if selected {
+        name_style = name_style.add_modifier(Modifier::BOLD);
+    }
     let line1 = Line::from(vec![
-        Span::styled(s.name.clone(), Style::default().fg(th::TEXT_BOLD)),
+        Span::styled(s.name.clone(), name_style),
         Span::raw("  "),
-        Span::styled(status_glyph, Style::default().fg(status_color)),
-        Span::styled(format!(" {status_label}"), Style::default().fg(status_color)),
+        Span::styled(status_glyph, Style::default().add_modifier(Modifier::DIM)),
+        Span::styled(format!(" {status_label}"), Style::default().add_modifier(Modifier::DIM)),
     ]);
 
     // Line 2: dir
     let line2 = Line::from(Span::styled(
         s.dir.clone(),
-        Style::default().fg(th::MUTED),
+        Style::default().fg(Color::Reset),
     ));
 
     // Line 3: ✻ agent · ⎇ branch · +a −d   age
     let mut l3 = vec![
-        Span::styled(th::AGENT_MARK, Style::default().fg(th::DIM)),
-        Span::styled(format!(" {}", s.agent), Style::default().fg(th::MUTED)),
+        Span::styled(th::AGENT_MARK, Style::default().fg(Color::Reset).add_modifier(Modifier::DIM)),
+        Span::styled(format!(" {}", s.agent), Style::default().fg(Color::Reset)),
     ];
     if let Some(g) = &s.git {
         l3.push(Span::styled(
             format!("   {} {}", th::BRANCH, g.branch),
-            Style::default().fg(th::DIM),
+            Style::default().fg(Color::Reset).add_modifier(Modifier::DIM),
         ));
-        l3.push(Span::styled(
-            format!("   +{}", g.added),
-            Style::default().fg(th::GREEN),
-        ));
-        l3.push(Span::styled(
-            format!(" −{}", g.removed),
-            Style::default().fg(th::RED),
-        ));
+        l3.push(Span::styled(format!("   +{}", g.added), Style::default()));
+        l3.push(Span::styled(format!(" −{}", g.removed), Style::default()));
     }
     let age = timeutil::humanize_age(now - s.created);
     l3.push(Span::styled(
         format!("   {age}"),
-        Style::default().fg(th::MUTED),
+        Style::default().fg(Color::Reset),
     ));
     let line3 = Line::from(l3);
 
@@ -67,31 +62,34 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     // Section label
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled("SESSIONS", Style::default().fg(th::MUTED)),
-            Span::styled("   ↑↓ navigate", Style::default().fg(th::DIM)),
+            Span::styled("SESSIONS", Style::default().fg(Color::Reset)),
+            Span::styled("   ↑↓ navigate", Style::default().fg(Color::Reset).add_modifier(Modifier::DIM)),
         ])),
         rows[0],
     );
 
     let vis = app.visible_indices();
+    let sel = if vis.is_empty() {
+        0
+    } else {
+        app.selected.min(vis.len() - 1)
+    };
     let items: Vec<ListItem> = vis
         .iter()
-        .map(|&i| card(&app.sessions[i], app.now_unix, app.spinner_frame))
+        .enumerate()
+        .map(|(pos, &i)| card(&app.sessions[i], app.now_unix, app.spinner_frame, pos == sel))
         .collect();
 
+    // Selection is shown by the bar (highlight_symbol) + bold, in the terminal's
+    // own colors — no foreground tint, no background.
     // bind sym so highlight_symbol can borrow a &str
     let sym = format!("{} ", th::SEL_BAR);
     let list = List::new(items)
         .highlight_symbol(sym.as_str())
-        .highlight_style(
-            Style::default()
-                .bg(th::SEL_BG)
-                .fg(th::AMBER_HI)
-                .add_modifier(Modifier::BOLD),
-        );
+        .highlight_style(Style::default().add_modifier(Modifier::BOLD));
     let mut state = ListState::default();
     if !vis.is_empty() {
-        state.select(Some(app.selected.min(vis.len() - 1)));
+        state.select(Some(sel));
     }
     f.render_stateful_widget(list, rows[1], &mut state);
 }
@@ -127,6 +125,39 @@ mod tests {
             status,
             attached: false,
             git,
+        }
+    }
+
+    #[test]
+    fn list_uses_no_custom_colors() {
+        // Every rendered cell must keep the terminal's default foreground/background.
+        let mut app = App::new(Config::default());
+        app.sessions = vec![
+            sess(
+                "project-a",
+                Status::Running,
+                Some(GitInfo { branch: "main".into(), added: 12, removed: 4 }),
+            ),
+            sess("project-b", Status::Idle, None),
+        ];
+        app.selected = 0;
+        let mut t = Terminal::new(TestBackend::new(60, 16)).unwrap();
+        t.draw(|f| render(f, f.area(), &app)).unwrap();
+        let buf = t.backend().buffer();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                let st = buf[(x, y)].style();
+                assert!(
+                    st.fg.is_none() || st.fg == Some(Color::Reset),
+                    "unexpected fg at ({x},{y}): {:?}",
+                    st.fg
+                );
+                assert!(
+                    st.bg.is_none() || st.bg == Some(Color::Reset),
+                    "unexpected bg at ({x},{y}): {:?}",
+                    st.bg
+                );
+            }
         }
     }
 

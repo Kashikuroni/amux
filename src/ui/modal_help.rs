@@ -1,7 +1,7 @@
 use crate::theme as th;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::{Clear, Paragraph};
 use ratatui::Frame;
 
 pub fn render(f: &mut Frame) {
@@ -35,8 +35,7 @@ pub fn render(f: &mut Frame) {
     }
     f.render_widget(
         Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::ALL)
+            th::panel()
                 .border_style(Style::default().fg(th::BORDER_HI))
                 .title(" help ")
                 .style(Style::default().bg(th::BG_RAISED)),

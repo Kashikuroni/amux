@@ -94,8 +94,7 @@ fn draw_rename_modal(f: &mut Frame, app: &App) {
         Line::from("Enter: rename  ·  Esc: cancel"),
     ])
     .block(
-        Block::default()
-            .borders(Borders::ALL)
+        th::panel()
             .border_style(Style::default().fg(th::AMBER))
             .title("rename"),
     );
@@ -156,7 +155,7 @@ mod tests {
         terminal.draw(|f| draw(f, &app)).unwrap();
 
         let text = buf_to_string(terminal.backend().buffer());
-        assert!(text.contains("new session"), "create modal must be visible");
+        assert!(text.contains("New session"), "create modal must be visible");
         assert!(text.contains("create"), "footer must show create key hint");
     }
 
@@ -171,14 +170,14 @@ mod tests {
         form.dir_selected = 0;
         app.mode = Mode::Create(form);
 
-        let backend = TestBackend::new(100, 24);
+        let backend = TestBackend::new(100, 32);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|f| draw(f, &app)).unwrap();
 
         let text = buf_to_string(terminal.backend().buffer());
         assert!(text.contains("alpha/"));
         assert!(text.contains("beta/"));
-        assert!(text.contains("new session"));
+        assert!(text.contains("New session"));
     }
 
     #[test]

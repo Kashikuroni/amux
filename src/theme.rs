@@ -1,23 +1,28 @@
-//! Variant A (Studio) design tokens: warm dark palette + glyphs.
+//! Design tokens. The UI is intentionally colorless: every token resolves to
+//! `Color::Reset` so text, backgrounds and borders use the terminal's own
+//! default colors and font. Visual hierarchy is conveyed purely through font
+//! attributes (`BOLD`/`DIM`/`REVERSED`), which the terminal also defines.
+//! The tokens are kept (rather than deleted) so call sites stay unchanged and a
+//! palette could be reintroduced in one place later.
 use ratatui::style::Color;
+use ratatui::widgets::{Block, BorderType, Borders};
 
-pub const BG: Color = Color::Rgb(0x1a, 0x17, 0x14);
-pub const BG_RAISED: Color = Color::Rgb(0x21, 0x1d, 0x18);
-pub const BG_SUNKEN: Color = Color::Rgb(0x16, 0x13, 0x0f);
-/// Pre-blended amber-dim used as the selected-row background (terminals have no alpha).
-pub const SEL_BG: Color = Color::Rgb(0x2a, 0x1d, 0x18);
-pub const TEXT: Color = Color::Rgb(0xe8, 0xdf, 0xd1);
-pub const TEXT_BOLD: Color = Color::Rgb(0xf4, 0xec, 0xdd);
-pub const MUTED: Color = Color::Rgb(0x8a, 0x7f, 0x6e);
-pub const DIM: Color = Color::Rgb(0x5c, 0x54, 0x4a);
-pub const BORDER: Color = Color::Rgb(0x2f, 0x2a, 0x23);
-pub const BORDER_HI: Color = Color::Rgb(0x40, 0x3a, 0x30);
-pub const AMBER: Color = Color::Rgb(0xd9, 0x77, 0x57);
-pub const AMBER_HI: Color = Color::Rgb(0xf4, 0xa3, 0x6a);
-pub const GREEN: Color = Color::Rgb(0x7a, 0xb8, 0x7a);
-pub const RED: Color = Color::Rgb(0xc7, 0x5d, 0x4a);
-pub const YELLOW: Color = Color::Rgb(0xd6, 0xb2, 0x5f);
-pub const BLUE: Color = Color::Rgb(0x6a, 0x9f, 0xb5);
+pub const BG: Color = Color::Reset;
+pub const BG_RAISED: Color = Color::Reset;
+pub const BG_SUNKEN: Color = Color::Reset;
+pub const SEL_BG: Color = Color::Reset;
+pub const TEXT: Color = Color::Reset;
+pub const TEXT_BOLD: Color = Color::Reset;
+pub const MUTED: Color = Color::Reset;
+pub const DIM: Color = Color::Reset;
+pub const BORDER: Color = Color::Reset;
+pub const BORDER_HI: Color = Color::Reset;
+pub const AMBER: Color = Color::Reset;
+pub const AMBER_HI: Color = Color::Reset;
+pub const GREEN: Color = Color::Reset;
+pub const RED: Color = Color::Reset;
+pub const YELLOW: Color = Color::Reset;
+pub const BLUE: Color = Color::Reset;
 
 // Glyphs
 pub const LOGO: &str = "◆";
@@ -29,11 +34,22 @@ pub const BRANCH: &str = "⎇";
 pub const SEP: &str = "│";
 pub const RULE_CHAR: &str = "━";
 
+/// Base panel block: full rounded border. Callers chain `.border_style`,
+/// `.title`, and `.style` to taste. Keeps the rounded-corner choice in one place.
+pub fn panel() -> Block<'static> {
+    Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn amber_token_matches_design() {
-        assert_eq!(AMBER, Color::Rgb(0xd9, 0x77, 0x57));
+    fn tokens_are_colorless() {
+        // The UI must stay on the terminal's own colors.
+        for c in [BG, BG_RAISED, SEL_BG, TEXT, TEXT_BOLD, MUTED, DIM, BORDER, AMBER, GREEN, RED] {
+            assert_eq!(c, Color::Reset);
+        }
     }
 }

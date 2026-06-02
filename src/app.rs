@@ -112,6 +112,15 @@ impl CreateForm {
         }
     }
 
+    /// 1-based position of the focused field, for the `N of 3` step indicator.
+    pub fn step(&self) -> usize {
+        match self.field {
+            CreateField::Name => 1,
+            CreateField::Dir => 2,
+            CreateField::Agent => 3,
+        }
+    }
+
     /// Append the highlighted subdir to the path (preserving `~`) and reload entries.
     fn enter_selected_dir(&mut self) {
         let Some(name) = self.dir_entries.get(self.dir_selected).cloned() else {
@@ -585,6 +594,29 @@ pub fn resolve_agent_path(cmd: &str) -> Option<String> {
     }
 }
 
+/// Human-friendly label for a known agent command (matched on its first word),
+/// falling back to the command itself for anything unrecognized.
+pub fn agent_display_name(cmd: &str) -> String {
+    match cmd.split_whitespace().next().unwrap_or("") {
+        "claude" => "Claude Code".to_string(),
+        "codex" => "Codex".to_string(),
+        "aider" => "Aider".to_string(),
+        "gemini" => "Gemini".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// Collapses the middle of a path for compact display: `~/work/proj-c/auth` →
+/// `~/…/auth`. Paths with two or fewer segments are returned unchanged.
+pub fn abbreviate_path(path: &str) -> String {
+    let trimmed = path.trim_end_matches('/');
+    let segs: Vec<&str> = trimmed.split('/').collect();
+    if segs.len() <= 2 {
+        return trimmed.to_string();
+    }
+    format!("{}/\u{2026}/{}", segs[0], segs[segs.len() - 1])
+}
+
 /// Validates create-form input. `dir` is checked after tilde expansion.
 pub fn validate_create(name: &str, dir: &str, existing: &[String]) -> Result<(), String> {
     let name = name.trim();
@@ -822,5 +854,34 @@ mod tests {
         form.cycle_agent(-1);
         assert!(form.agent_is_custom());
         assert_eq!(form.agent, "");
+    }
+
+    #[test]
+    fn step_tracks_focused_field() {
+        let mut form = CreateForm::new("claude", &[]);
+        assert_eq!(form.step(), 1);
+        form.field = CreateField::Dir;
+        assert_eq!(form.step(), 2);
+        form.field = CreateField::Agent;
+        assert_eq!(form.step(), 3);
+    }
+
+    #[test]
+    fn agent_display_name_maps_known_and_falls_back() {
+        assert_eq!(agent_display_name("claude"), "Claude Code");
+        assert_eq!(agent_display_name("codex --yolo"), "Codex");
+        assert_eq!(agent_display_name("aider"), "Aider");
+        assert_eq!(agent_display_name("gemini"), "Gemini");
+        assert_eq!(agent_display_name("my-tool --flag"), "my-tool");
+        assert_eq!(agent_display_name(""), "");
+    }
+
+    #[test]
+    fn abbreviate_path_collapses_middle() {
+        assert_eq!(abbreviate_path("~/work/proj-c/auth-rewrite"), "~/\u{2026}/auth-rewrite");
+        assert_eq!(abbreviate_path("~/work/proj-c/auth-rewrite/"), "~/\u{2026}/auth-rewrite");
+        assert_eq!(abbreviate_path("~/work"), "~/work");
+        assert_eq!(abbreviate_path("~/"), "~");
+        assert_eq!(abbreviate_path("/a/b/c"), "/\u{2026}/c");
     }
 }

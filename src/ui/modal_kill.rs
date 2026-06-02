@@ -2,7 +2,7 @@ use crate::theme as th;
 use crate::tmux::Session;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::{Clear, Paragraph};
 use ratatui::Frame;
 
 pub fn render(f: &mut Frame, name: &str, session: Option<&Session>) {
@@ -55,8 +55,7 @@ pub fn render(f: &mut Frame, name: &str, session: Option<&Session>) {
     ]);
     f.render_widget(
         Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::ALL)
+            th::panel()
                 .border_style(Style::default().fg(th::RED))
                 .title(" confirm ")
                 .style(Style::default().bg(th::BG_RAISED)),
