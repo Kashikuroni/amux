@@ -223,19 +223,36 @@ fn handle_action(terminal: &mut Term, app: &mut App, action: Action) -> io::Resu
             name,
             dir,
             agent,
-            worktree: _,
+            worktree,
         } => {
-            if let Err(e) = tmux::new_session(&name, &dir, &agent) {
+            let result = match worktree {
+                None => tmux::new_session(&name, &dir, &agent),
+                Some(spec) => create_worktree_session(&name, &dir, &agent, &spec),
+            };
+            if let Err(e) = result {
                 app.error = Some(e.to_string());
             }
             app.refresh();
         }
         Action::Kill {
             name,
-            remove_worktree: _,
+            remove_worktree,
         } => {
+            // Capture worktree info before the session disappears from the list.
+            let wt = if remove_worktree {
+                app.sessions
+                    .iter()
+                    .find(|s| s.name == name)
+                    .and_then(|s| s.worktree_repo.clone().map(|repo| (repo, s.dir.clone())))
+            } else {
+                None
+            };
             if let Err(e) = tmux::kill_session(&name) {
                 app.error = Some(e.to_string());
+            } else if let Some((repo, path)) = wt {
+                if let Err(e) = am::git::remove_worktree(&repo, &path) {
+                    app.error = Some(format!("session killed, worktree not removed: {e}"));
+                }
             }
             app.refresh();
         }
@@ -265,4 +282,23 @@ fn handle_action(terminal: &mut Term, app: &mut App, action: Action) -> io::Resu
         }
     }
     Ok(())
+}
+
+/// Creates a git worktree under `<repo>/.worktrees/<branch>` then starts a tmux
+/// session in it. Any git step failing aborts before the session is created.
+fn create_worktree_session(
+    name: &str,
+    dir: &str,
+    agent: &str,
+    spec: &am::app::WorktreeSpec,
+) -> io::Result<()> {
+    let repo = am::git::repo_root(dir)
+        .ok_or_else(|| io::Error::other(format!("not a git repo: {dir}")))?;
+    am::git::ensure_gitignore(&repo, ".worktrees/")?;
+    let wt_path = std::path::Path::new(&repo)
+        .join(".worktrees")
+        .join(&spec.new_branch);
+    let wt_str = wt_path.to_string_lossy().to_string();
+    am::git::add_worktree(&repo, &wt_str, &spec.new_branch, &spec.base)?;
+    tmux::new_worktree_session(name, &wt_str, agent, &repo)
 }
