@@ -194,7 +194,12 @@ fn handle_action(terminal: &mut Term, app: &mut App, action: Action) -> io::Resu
             terminal.clear()?;
             app.refresh();
         }
-        Action::Create { name, dir, agent } => {
+        Action::Create {
+            name,
+            dir,
+            agent,
+            worktree: _,
+        } => {
             if let Err(e) = tmux::new_session(&name, &dir, &agent) {
                 app.error = Some(e.to_string());
             }

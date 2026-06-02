@@ -392,6 +392,13 @@ pub struct ProjectRenameForm {
     pub buffer: String,
 }
 
+/// Worktree parameters carried by `Action::Create` when the worktree toggle is on.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorktreeSpec {
+    pub base: String,
+    pub new_branch: String,
+}
+
 /// Side effects the event loop must perform (kept out of `App` so it stays IO-free).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
@@ -400,6 +407,7 @@ pub enum Action {
         name: String,
         dir: String,
         agent: String,
+        worktree: Option<WorktreeSpec>,
     },
     Kill(String),
     Rename {
@@ -997,10 +1005,23 @@ impl App {
                     match validate_create(&form.name, &form.dir, &existing) {
                         Ok(()) => {
                             self.error = None;
+                            let worktree = if form.worktree {
+                                Some(WorktreeSpec {
+                                    base: form
+                                        .base_branches
+                                        .get(form.base_index)
+                                        .cloned()
+                                        .unwrap_or_default(),
+                                    new_branch: form.new_branch.trim().to_string(),
+                                })
+                            } else {
+                                None
+                            };
                             return Some(Action::Create {
                                 name: form.name.trim().to_string(),
                                 dir: expand_tilde(&form.dir),
                                 agent: form.agent.clone(),
+                                worktree,
                             });
                         }
                         Err(e) => {
@@ -2045,5 +2066,30 @@ mod tests {
         assert_eq!(form.total_steps(), 3);
         form.worktree = true;
         assert_eq!(form.total_steps(), 5);
+    }
+
+    #[test]
+    fn create_action_carries_worktree_spec() {
+        let mut app = App::new(Config::default());
+        let mut form = CreateForm::new("claude", &[]);
+        form.name = "iso".into();
+        form.dir = "/tmp".into(); // exists as a dir
+        form.worktree = true;
+        form.base_branches = vec!["main".into()];
+        form.base_index = 0;
+        form.new_branch = "iso-branch".into();
+        form.field = CreateField::Agent;
+        app.mode = Mode::Create(form);
+        let action = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        match action {
+            Some(Action::Create {
+                worktree: Some(spec),
+                ..
+            }) => {
+                assert_eq!(spec.base, "main");
+                assert_eq!(spec.new_branch, "iso-branch");
+            }
+            other => panic!("expected Create with worktree, got {other:?}"),
+        }
     }
 }
