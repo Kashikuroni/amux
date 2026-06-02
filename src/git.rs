@@ -69,6 +69,31 @@ pub fn read(dir: &str) -> Option<GitInfo> {
     })
 }
 
+/// Absolute path of the repository containing `dir`, or None if `dir` is not in a repo.
+pub fn repo_root(dir: &str) -> Option<String> {
+    git_out(dir, &["rev-parse", "--show-toplevel"])
+}
+
+/// Local branch names for `dir`, with the current branch first.
+/// Empty when `dir` is not a git repo.
+pub fn list_branches(dir: &str) -> Vec<String> {
+    let Some(out) = git_out(dir, &["branch", "--format=%(refname:short)"]) else {
+        return Vec::new();
+    };
+    let mut branches: Vec<String> = out
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+    if let Some(cur) = git_out(dir, &["symbolic-ref", "--short", "HEAD"]) {
+        if let Some(i) = branches.iter().position(|b| *b == cur) {
+            branches.remove(i);
+            branches.insert(0, cur);
+        }
+    }
+    branches
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -90,6 +115,65 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         assert!(read(dir.to_str().unwrap()).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Builds a temp git repo on branch `main` with one commit. Returns the dir path.
+    fn temp_repo(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("cm_wt_{}_{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let d = dir.to_str().unwrap();
+        let run = |args: &[&str]| {
+            Command::new("git")
+                .arg("-C")
+                .arg(d)
+                .args(args)
+                .output()
+                .unwrap();
+        };
+        run(&["init", "-q", "-b", "main"]);
+        run(&["config", "user.email", "t@t"]);
+        run(&["config", "user.name", "t"]);
+        std::fs::write(dir.join("f.txt"), "a\n").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-qm", "init"]);
+        dir
+    }
+
+    #[test]
+    fn repo_root_resolves_from_subdir() {
+        if Command::new("git").arg("--version").output().is_err() {
+            return;
+        }
+        let dir = temp_repo("root");
+        let sub = dir.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        let root = repo_root(sub.to_str().unwrap()).expect("root");
+        // macOS temp dir is symlinked (/var -> /private/var); compare canonicalized.
+        assert_eq!(
+            std::fs::canonicalize(&root).unwrap(),
+            std::fs::canonicalize(&dir).unwrap()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn list_branches_puts_current_first() {
+        if Command::new("git").arg("--version").output().is_err() {
+            return;
+        }
+        let dir = temp_repo("branches");
+        let d = dir.to_str().unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(d)
+            .args(["branch", "feature"])
+            .output()
+            .unwrap();
+        let branches = list_branches(d);
+        assert_eq!(branches.first().map(String::as_str), Some("main"));
+        assert!(branches.iter().any(|b| b == "feature"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
