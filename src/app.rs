@@ -840,6 +840,21 @@ impl App {
                     &self.config.agent_presets,
                 ));
             }
+            // Shift+N: new session pre-filled from the selected session's project
+            // (path + agent), streamlined to name + worktree. No-op if nothing
+            // is selected.
+            KeyCode::Char('N') => {
+                if let Some(s) = self.selected_session() {
+                    let dir = session_root(s).to_string();
+                    let agent = s.agent.clone();
+                    self.error = None;
+                    self.mode = Mode::Create(CreateForm::for_project(
+                        &dir,
+                        &agent,
+                        &self.config.agent_presets,
+                    ));
+                }
+            }
             KeyCode::Char('d') => {
                 if let Some(s) = self.selected_session() {
                     let worktree = s.worktree_repo.clone().map(|repo| (repo, s.dir.clone()));
@@ -1919,6 +1934,29 @@ mod tests {
             Mode::Create(form) => assert_eq!(form.agent, "claude"),
             _ => panic!("expected create mode"),
         }
+    }
+
+    #[test]
+    fn shift_n_opens_prefilled_form_for_project() {
+        let mut app = app_with(vec![at("s", "/home/u/proj")]);
+        app.selected = 0;
+        app.handle_key(key('N'));
+        match &app.mode {
+            Mode::Create(form) => {
+                assert!(form.prefilled);
+                assert_eq!(form.dir, "/home/u/proj");
+                assert_eq!(form.agent, "claude");
+                assert_eq!(form.field, CreateField::Name);
+            }
+            other => panic!("expected Create mode, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn shift_n_is_noop_without_sessions() {
+        let mut app = App::new(Config::default());
+        app.handle_key(key('N'));
+        assert!(matches!(app.mode, Mode::List));
     }
 
     #[test]

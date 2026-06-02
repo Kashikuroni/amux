@@ -444,4 +444,16 @@ mod tests {
         assert!(!s.contains("base"));
         assert!(s.contains("of 3"));
     }
+
+    #[test]
+    fn prefilled_modal_shows_two_steps_and_project_values() {
+        let form = CreateForm::for_project("/home/u/proj", "claude", &["claude".into()]);
+        let mut t = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        t.draw(|f| render(f, &form)).unwrap();
+        let s = buf_to_string(t.backend().buffer());
+        assert!(s.contains("of 2"), "streamlined step total:\n{s}");
+        assert!(s.contains("proj"), "project path on directory row:\n{s}");
+        assert!(s.contains("claude"), "project agent shown:\n{s}");
+        assert!(s.contains("name"), "name row present:\n{s}");
+    }
 }

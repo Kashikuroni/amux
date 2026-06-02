@@ -40,6 +40,7 @@ fn items_for(mode: &Mode) -> Vec<Item> {
         Mode::SelectSession => vec![("1-9", "select session", true), ("esc", "cancel", false)],
         Mode::List => vec![
             ("n", "new", true),
+            ("⇧N", "new in proj", false),
             ("↵", "attach", false),
             ("s", "select", false),
             ("⇧JK", "reorder", false),
