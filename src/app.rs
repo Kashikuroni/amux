@@ -972,7 +972,32 @@ impl App {
             return None;
         }
 
-        // Name / agent steps: plain text fields.
+        // Worktree toggle step.
+        if form.field == CreateField::Worktree {
+            match key.code {
+                KeyCode::Esc => return None,
+                KeyCode::Char(' ') => form.toggle_worktree(),
+                KeyCode::Tab | KeyCode::Enter => form.advance(),
+                _ => {}
+            }
+            self.mode = Mode::Create(form);
+            return None;
+        }
+
+        // Base-branch picker step.
+        if form.field == CreateField::Base {
+            match key.code {
+                KeyCode::Esc => return None,
+                KeyCode::Left => form.cycle_base(-1),
+                KeyCode::Right => form.cycle_base(1),
+                KeyCode::Tab | KeyCode::Enter => form.advance(),
+                _ => {}
+            }
+            self.mode = Mode::Create(form);
+            return None;
+        }
+
+        // Name / agent / branch steps: plain text fields.
         match key.code {
             KeyCode::Esc => return None,
             KeyCode::Left if form.field == CreateField::Agent => form.cycle_agent(-1),
@@ -992,12 +1017,7 @@ impl App {
                 }
                 form.current_mut().push(c);
             }
-            KeyCode::Tab => {
-                form.field = form.next_field();
-                if form.field == CreateField::Dir {
-                    form.refresh_dir_entries();
-                }
-            }
+            KeyCode::Tab => form.advance(),
             KeyCode::Enter => {
                 if form.field == CreateField::Agent {
                     let existing: Vec<String> =
@@ -1031,9 +1051,8 @@ impl App {
                         }
                     }
                 } else {
-                    // Name step → advance to dir and load its listing.
-                    form.field = form.next_field();
-                    form.refresh_dir_entries();
+                    // Non-Agent step → advance (handles Dir refresh when needed).
+                    form.advance();
                 }
             }
             _ => {}
@@ -2035,6 +2054,38 @@ mod tests {
         assert_eq!(abbreviate_path("~/work"), "~/work");
         assert_eq!(abbreviate_path("~/"), "~");
         assert_eq!(abbreviate_path("/a/b/c"), "/\u{2026}/c");
+    }
+
+    #[test]
+    fn space_toggles_worktree_on_worktree_step() {
+        let mut app = App::new(Config::default());
+        let mut form = CreateForm::new("claude", &[]);
+        form.name = "s".into();
+        form.field = CreateField::Worktree;
+        app.mode = Mode::Create(form);
+        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        match &app.mode {
+            Mode::Create(f) => {
+                assert!(f.worktree);
+                assert_eq!(f.new_branch, "s"); // prefilled from name
+            }
+            _ => panic!("still in create mode"),
+        }
+    }
+
+    #[test]
+    fn left_right_cycles_base_branch() {
+        let mut app = App::new(Config::default());
+        let mut form = CreateForm::new("claude", &[]);
+        form.worktree = true;
+        form.base_branches = vec!["main".into(), "dev".into()];
+        form.field = CreateField::Base;
+        app.mode = Mode::Create(form);
+        app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        match &app.mode {
+            Mode::Create(f) => assert_eq!(f.base_index, 1),
+            _ => panic!(),
+        }
     }
 
     #[test]
