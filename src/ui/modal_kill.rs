@@ -6,7 +6,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 use ratatui::Frame;
 
-pub fn render(f: &mut Frame, name: &str, session: Option<&Session>) {
+pub fn render(f: &mut Frame, form: &crate::app::KillForm, session: Option<&Session>) {
     let area = super::centered(56, 36, f.area());
     f.render_widget(Clear, area);
     let mut lines = vec![
@@ -26,7 +26,7 @@ pub fn render(f: &mut Frame, name: &str, session: Option<&Session>) {
     ];
     // session header line: name [· status]
     let mut head = vec![Span::styled(
-        name.to_string(),
+        form.name.to_string(),
         Style::default().fg(th::AMBER),
     )];
     if let Some(s) = session {
@@ -62,13 +62,22 @@ pub fn render(f: &mut Frame, name: &str, session: Option<&Session>) {
             Style::default().fg(th::DIM),
         )),
         Line::from(""),
-        Line::from(vec![
-            Span::styled(" y · yes, kill ", Style::default().bg(th::RED).fg(th::BG)),
-            Span::raw("  "),
-            Span::styled(" n · no ", Style::default().fg(th::TEXT)),
-            Span::styled("     esc to dismiss", Style::default().fg(th::DIM)),
-        ]),
     ]);
+    if form.worktree.is_some() {
+        let mark = if form.remove_worktree { "[x]" } else { "[ ]" };
+        lines.push(Line::from(vec![
+            Span::styled(format!("{mark} "), Style::default().fg(th::AMBER)),
+            Span::styled("also remove worktree", Style::default().fg(th::TEXT)),
+            Span::styled("   space to toggle", Style::default().fg(th::DIM)),
+        ]));
+        lines.push(Line::from(""));
+    }
+    lines.push(Line::from(vec![
+        Span::styled(" y · yes, kill ", Style::default().bg(th::RED).fg(th::BG)),
+        Span::raw("  "),
+        Span::styled(" n · no ", Style::default().fg(th::TEXT)),
+        Span::styled("     esc to dismiss", Style::default().fg(th::DIM)),
+    ]));
     f.render_widget(
         Paragraph::new(lines).block(
             th::panel()
@@ -101,10 +110,29 @@ mod tests {
         // Use a tall-enough terminal so the 36%-height modal (≥9 rows for 7 lines + 2 borders)
         // can display all content. 70×30 gives ~10 inner rows at 36%.
         let mut t = Terminal::new(TestBackend::new(70, 30)).unwrap();
-        t.draw(|f| render(f, "project-a", None)).unwrap();
+        let form = crate::app::KillForm {
+            name: "project-a".into(),
+            worktree: None,
+            remove_worktree: false,
+        };
+        t.draw(|f| render(f, &form, None)).unwrap();
         let s = buf_to_string(t.backend().buffer());
         assert!(s.contains("Kill session?"));
         assert!(s.contains("project-a"));
         assert!(s.contains("yes, kill"));
+    }
+    #[test]
+    fn kill_modal_shows_worktree_toggle_when_present() {
+        use crate::app::KillForm;
+        let form = KillForm {
+            name: "wt".into(),
+            worktree: Some(("/repo".into(), "/repo/.worktrees/wt".into())),
+            remove_worktree: true,
+        };
+        let mut t = Terminal::new(TestBackend::new(70, 30)).unwrap();
+        t.draw(|f| render(f, &form, None)).unwrap();
+        let s = buf_to_string(t.backend().buffer());
+        assert!(s.contains("remove worktree"));
+        assert!(s.contains("[x]"));
     }
 }

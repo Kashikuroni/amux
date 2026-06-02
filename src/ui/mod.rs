@@ -45,7 +45,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Mode::Rename(_) => draw_rename_modal(f, app),
         Mode::ConfirmDelete(form) => {
             let s = app.sessions.iter().find(|s| s.name == form.name);
-            modal_kill::render(f, &form.name, s);
+            modal_kill::render(f, form, s);
         }
         Mode::Help => modal_help::render(f),
         Mode::Reply(form) => draw_reply_modal(f, form),
