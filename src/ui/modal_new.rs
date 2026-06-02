@@ -54,8 +54,12 @@ fn input_box(f: &mut Frame, rect: Rect, value: &str, focused: bool) {
 
 /// Max subdir rows shown in the live picker before it windows.
 const PICKER_MAX: usize = 8;
-/// Fixed content rows (everything except the variable-height picker).
-const BASE_ROWS: u16 = 18;
+/// Fixed content rows (everything except the variable-height picker and worktree extras).
+/// Includes the always-visible WORKTREE label + toggle line (2 rows).
+const BASE_ROWS: u16 = 20;
+/// Extra rows when the worktree toggle is on (BASE label+row + BRANCH label+row).
+/// The WORKTREE label + toggle line are always visible and already counted in `BASE_ROWS`.
+const WORKTREE_ROWS: u16 = 4;
 
 pub fn render(f: &mut Frame, form: &CreateForm) {
     let full = f.area();
@@ -67,7 +71,8 @@ pub fn render(f: &mut Frame, form: &CreateForm) {
     };
     // Panel hugs its content: borders (2) + top/bottom inner padding (2) + rows.
     // Clamp to the terminal so a short window never produces a negative origin.
-    let h = (BASE_ROWS + want_picker + 4).min(full.height);
+    let wt_extra = if form.worktree { WORKTREE_ROWS } else { 0 };
+    let h = (BASE_ROWS + want_picker + wt_extra + 4).min(full.height);
     let w = ((full.width as u32 * 72 / 100) as u16).min(full.width);
     let area = Rect {
         x: full.x + (full.width.saturating_sub(w)) / 2,
@@ -101,7 +106,7 @@ pub fn render(f: &mut Frame, form: &CreateForm) {
             ),
         ]);
         let step = Line::from(Span::styled(
-            format!("{} of 3", form.step()),
+            format!("{} of {}", form.step(), form.total_steps()),
             Style::default().fg(th::DIM),
         ));
         f.render_widget(Paragraph::new(step).alignment(Alignment::Right), r);
@@ -204,6 +209,76 @@ pub fn render(f: &mut Frame, form: &CreateForm) {
             f.render_widget(Paragraph::new(Line::from(Span::styled(text, style))), r);
             y += 1;
         }
+    }
+    y += 1;
+
+    // WORKTREE (optional) — label + toggle line.
+    if let Some(r) = row(x, y, w, bottom) {
+        let lbl_color = if form.field == CreateField::Worktree {
+            th::AMBER
+        } else {
+            th::MUTED
+        };
+        f.render_widget(Paragraph::new(Line::from(label("WORKTREE", lbl_color))), r);
+    }
+    y += 1;
+    if let Some(r) = row(x, y, w, bottom) {
+        let mark = if form.worktree { "[x]" } else { "[ ]" };
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(format!("{mark} "), Style::default().fg(th::AMBER)),
+                Span::styled("Create worktree", Style::default().fg(th::TEXT_BOLD)),
+                Span::styled("   space to toggle", Style::default().fg(th::DIM)),
+            ])),
+            r,
+        );
+    }
+    y += 1;
+    if form.worktree {
+        // BASE picker (segmented, cycled with ← →).
+        if let Some(r) = row(x, y, w, bottom) {
+            f.render_widget(Paragraph::new(Line::from(label("BASE", th::MUTED))), r);
+        }
+        y += 1;
+        if let Some(r) = row(x, y, w, bottom) {
+            let mut seg: Vec<Span> = Vec::new();
+            if form.base_branches.is_empty() {
+                seg.push(Span::styled(
+                    " (no branches) ",
+                    Style::default().fg(th::DIM),
+                ));
+            } else {
+                for (i, b) in form.base_branches.iter().enumerate() {
+                    if i > 0 {
+                        seg.push(Span::raw("   "));
+                    }
+                    let sel = i == form.base_index;
+                    let st = if sel {
+                        Style::default()
+                            .bg(th::AMBER)
+                            .fg(th::BG)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(th::MUTED)
+                    };
+                    seg.push(Span::styled(format!(" {b} "), st));
+                }
+            }
+            f.render_widget(
+                Paragraph::new(Line::from(seg)).style(Style::default().bg(th::BG_SUNKEN)),
+                r,
+            );
+        }
+        y += 1;
+        // NEW BRANCH input.
+        if let Some(r) = row(x, y, w, bottom) {
+            f.render_widget(Paragraph::new(Line::from(label("BRANCH", th::MUTED))), r);
+        }
+        y += 1;
+        if let Some(r) = row(x, y, w, bottom) {
+            input_box(f, r, &form.new_branch, form.field == CreateField::Branch);
+        }
+        y += 1;
     }
     y += 1;
 
@@ -353,6 +428,31 @@ mod tests {
             s.push('\n');
         }
         s
+    }
+
+    #[test]
+    fn new_modal_shows_worktree_rows_when_enabled() {
+        let mut form = CreateForm::new("claude", &["claude".into()]);
+        form.worktree = true;
+        form.base_branches = vec!["main".into()];
+        form.new_branch = "feature-x".into();
+        let mut t = Terminal::new(TestBackend::new(90, 40)).unwrap();
+        t.draw(|f| render(f, &form)).unwrap();
+        let s = buf_to_string(t.backend().buffer());
+        assert!(s.contains("B A S E"), "BASE label");
+        assert!(s.contains("B R A N C H"), "BRANCH label");
+        assert!(s.contains("feature-x"));
+        assert!(s.contains("of 5"), "dynamic step total");
+    }
+
+    #[test]
+    fn new_modal_hides_worktree_rows_by_default() {
+        let form = CreateForm::new("claude", &["claude".into()]);
+        let mut t = Terminal::new(TestBackend::new(90, 40)).unwrap();
+        t.draw(|f| render(f, &form)).unwrap();
+        let s = buf_to_string(t.backend().buffer());
+        assert!(!s.contains("B A S E"));
+        assert!(s.contains("of 3"));
     }
 
     #[test]
