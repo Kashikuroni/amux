@@ -676,7 +676,8 @@ mod tests {
         let mut app = App::new(Config::default());
         app.sessions = vec![sess("proj", Status::Idle, None)];
         // A note with no tasks must not render a "0/0" counter.
-        app.notes.insert("proj".into(), "just a thought, no checkboxes".into());
+        app.notes
+            .insert("proj".into(), "just a thought, no checkboxes".into());
         let mut t = Terminal::new(TestBackend::new(60, 8)).unwrap();
         t.draw(|f| render(f, f.area(), &app)).unwrap();
         let s = buf_to_string(t.backend().buffer());

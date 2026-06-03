@@ -135,7 +135,11 @@ pub(crate) fn render_editor(f: &mut Frame, area: Rect, ta: &crate::editor::TextA
     let rows = wrap_rows(&chars, area.width as usize);
     let (crow, ccol) = cursor_rowcol(&rows, ta.cursor);
     let visible = area.height as usize;
-    let scroll = if crow >= visible { crow - visible + 1 } else { 0 };
+    let scroll = if crow >= visible {
+        crow - visible + 1
+    } else {
+        0
+    };
     let lines: Vec<Line> = rows
         .iter()
         .skip(scroll)

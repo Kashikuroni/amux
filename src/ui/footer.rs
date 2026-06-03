@@ -140,7 +140,10 @@ mod tests {
         // shift+letter collapses to the capital letter; named keys are words.
         assert!(s.contains("N new in proj"), "shift+N → N:\n{s}");
         assert!(s.contains("J/K reorder"), "shift+JK → J/K:\n{s}");
-        assert!(s.contains("shift+tab agent mode"), "shift+tab spelled:\n{s}");
+        assert!(
+            s.contains("shift+tab agent mode"),
+            "shift+tab spelled:\n{s}"
+        );
         assert!(s.contains("enter attach"), "enter spelled:\n{s}");
         // The shift/tab/enter glyphs must be gone (arrows are kept elsewhere).
         for glyph in ["⇧", "⇥", "↵"] {

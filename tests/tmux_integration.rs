@@ -104,7 +104,8 @@ fn worktree_session_reports_repo_and_cleans_up() {
     // add_worktree + new_worktree_session = the create_worktree_session flow.
     am::git::add_worktree(&repo_s, &wt_str, "feature-x", "main").expect("add_worktree");
     assert!(wt_path.join("f.txt").exists(), "worktree checked out base");
-    tmux::new_worktree_session(&name, &wt_str, "bash", "bash", &repo_s).expect("new_worktree_session");
+    tmux::new_worktree_session(&name, &wt_str, "bash", "bash", &repo_s)
+        .expect("new_worktree_session");
 
     // list_sessions must surface the @cm_repo tag as worktree_repo.
     let sessions = tmux::list_sessions().expect("list_sessions");

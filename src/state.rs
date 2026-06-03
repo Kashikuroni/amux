@@ -101,7 +101,10 @@ mod tests {
         let text = toml::to_string(&s).unwrap();
         let back: State = toml::from_str(&text).unwrap();
         assert_eq!(back.inbox, s.inbox);
-        assert_eq!(back.notes.get("proj").map(String::as_str), Some("- [x] done"));
+        assert_eq!(
+            back.notes.get("proj").map(String::as_str),
+            Some("- [x] done")
+        );
     }
 
     #[test]

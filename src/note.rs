@@ -54,7 +54,10 @@ fn parse_line(line: &str) -> NoteLine {
         let text = trimmed[level as usize..].trim_start().to_string();
         return NoteLine::Heading { level, text };
     }
-    if let Some(rest) = trimmed.strip_prefix("- ").or_else(|| trimmed.strip_prefix("* ")) {
+    if let Some(rest) = trimmed
+        .strip_prefix("- ")
+        .or_else(|| trimmed.strip_prefix("* "))
+    {
         return NoteLine::Bullet(rest.to_string());
     }
     NoteLine::Text(line.to_string())
@@ -142,9 +145,27 @@ mod tests {
     fn parses_each_line_kind() {
         let buf = "# Title\n- [ ] open\n- [x] done\n- bullet\nplain\n";
         let lines = parse(buf);
-        assert_eq!(lines[0], NoteLine::Heading { level: 1, text: "Title".into() });
-        assert_eq!(lines[1], NoteLine::Task { done: false, text: "open".into() });
-        assert_eq!(lines[2], NoteLine::Task { done: true, text: "done".into() });
+        assert_eq!(
+            lines[0],
+            NoteLine::Heading {
+                level: 1,
+                text: "Title".into()
+            }
+        );
+        assert_eq!(
+            lines[1],
+            NoteLine::Task {
+                done: false,
+                text: "open".into()
+            }
+        );
+        assert_eq!(
+            lines[2],
+            NoteLine::Task {
+                done: true,
+                text: "done".into()
+            }
+        );
         assert_eq!(lines[3], NoteLine::Bullet("bullet".into()));
         assert_eq!(lines[4], NoteLine::Text("plain".into()));
         assert_eq!(lines[5], NoteLine::Blank); // trailing newline => empty last line
@@ -152,7 +173,13 @@ mod tests {
 
     #[test]
     fn uppercase_x_is_done() {
-        assert_eq!(parse("- [X] hi")[0], NoteLine::Task { done: true, text: "hi".into() });
+        assert_eq!(
+            parse("- [X] hi")[0],
+            NoteLine::Task {
+                done: true,
+                text: "hi".into()
+            }
+        );
     }
 
     #[test]

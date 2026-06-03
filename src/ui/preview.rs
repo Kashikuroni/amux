@@ -179,11 +179,20 @@ mod tests {
         app.now_unix = 0;
         app.preview_scroll = 0;
         // Many lines: far more than the content area (height 8 - 3 chrome = 5 rows).
-        app.preview = (0..40).map(|i| format!("line{i:02}")).collect::<Vec<_>>().join("\n");
+        app.preview = (0..40)
+            .map(|i| format!("line{i:02}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let mut t = Terminal::new(TestBackend::new(20, 8)).unwrap();
         t.draw(|f| render(f, f.area(), &app)).unwrap();
         let s = buf_to_string(t.backend().buffer());
-        assert!(s.contains("line39"), "newest line must be anchored visible:\n{s}");
-        assert!(!s.contains("line00"), "oldest line must have scrolled off:\n{s}");
+        assert!(
+            s.contains("line39"),
+            "newest line must be anchored visible:\n{s}"
+        );
+        assert!(
+            !s.contains("line00"),
+            "oldest line must have scrolled off:\n{s}"
+        );
     }
 }

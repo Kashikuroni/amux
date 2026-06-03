@@ -175,7 +175,17 @@ pub fn new_session(name: &str, dir: &str, command: &str, label: &str) -> io::Res
     let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
     let (cols, rows) = (cols.max(1).to_string(), rows.max(1).to_string());
     run(&[
-        "new-session", "-d", "-s", name, "-x", &cols, "-y", &rows, "-c", dir, command,
+        "new-session",
+        "-d",
+        "-s",
+        name,
+        "-x",
+        &cols,
+        "-y",
+        &rows,
+        "-c",
+        dir,
+        command,
     ])?;
     apply_resize_options();
     // If tagging fails, the session would exist untagged (invisible to list_sessions);

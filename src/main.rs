@@ -99,7 +99,12 @@ fn spawn_usage_poller() -> mpsc::Receiver<am::usage::Account> {
 fn init_terminal() -> io::Result<Term> {
     enable_raw_mode()?;
     let mut out = stdout();
-    execute!(out, EnterAlternateScreen, EnableBracketedPaste, EnableMouseCapture)?;
+    execute!(
+        out,
+        EnterAlternateScreen,
+        EnableBracketedPaste,
+        EnableMouseCapture
+    )?;
     enable_key_disambiguation(&mut out);
     Terminal::new(CrosstermBackend::new(out))
 }

@@ -122,7 +122,10 @@ mod tests {
         assert!(s.contains("reply to agent"), "missing i:\n{s}");
         assert!(s.contains("answer prompt"), "missing 1-9:\n{s}");
         assert!(s.contains("resize split"), "missing split resize:\n{s}");
-        assert!(s.contains("quit (sessions stay)"), "bottom group clipped:\n{s}");
+        assert!(
+            s.contains("quit (sessions stay)"),
+            "bottom group clipped:\n{s}"
+        );
         // No modifier-key glyphs leak in (arrows are intentionally kept).
         for glyph in ["⇧", "⇥", "↵", "^"] {
             assert!(!s.contains(glyph), "stale key glyph {glyph}:\n{s}");

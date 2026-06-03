@@ -50,7 +50,10 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
                 format!("   {done}/{total}"),
                 Style::default().add_modifier(Modifier::DIM),
             ),
-            Span::styled(format!("   {hint}"), Style::default().add_modifier(Modifier::DIM)),
+            Span::styled(
+                format!("   {hint}"),
+                Style::default().add_modifier(Modifier::DIM),
+            ),
         ])),
         rows[0],
     );
@@ -108,7 +111,10 @@ fn render_line(
             }
             let bar = if on_cursor { "› " } else { "  " };
             Line::from(vec![
-                Span::styled(bar.to_string(), Style::default().add_modifier(Modifier::DIM)),
+                Span::styled(
+                    bar.to_string(),
+                    Style::default().add_modifier(Modifier::DIM),
+                ),
                 Span::styled(format!("{box_glyph} {text}"), style),
             ])
         }

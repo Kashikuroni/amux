@@ -1412,12 +1412,14 @@ impl App {
                     }
                     KeyCode::Char('y') => {
                         let ords: Vec<usize> = selection_range(&ns).collect();
-                        let text = crate::note::selected_as_numbered(self.note_text(&ns.target), &ords);
+                        let text =
+                            crate::note::selected_as_numbered(self.note_text(&ns.target), &ords);
                         crate::clip::copy(&text);
                         ns.anchor = None;
                     }
                     KeyCode::Char('e') => {
-                        ns.editor = crate::editor::TextArea::new(self.note_text(&ns.target).to_string());
+                        ns.editor =
+                            crate::editor::TextArea::new(self.note_text(&ns.target).to_string());
                         ns.sub = NoteSub::Edit;
                     }
                     KeyCode::Char('c') => {
@@ -2482,7 +2484,13 @@ mod tests {
         app.mode = Mode::Create(form);
         let act = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         match act {
-            Some(Action::Create { name, dir: d, agent, worktree, terminal: _ }) => {
+            Some(Action::Create {
+                name,
+                dir: d,
+                agent,
+                worktree,
+                terminal: _,
+            }) => {
                 assert_eq!(name, "sess");
                 assert_eq!(d, dir);
                 assert_eq!(agent, "claude");
@@ -2506,7 +2514,10 @@ mod tests {
         app.mode = Mode::Create(form);
         let act = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         match act {
-            Some(Action::Create { worktree: Some(spec), .. }) => {
+            Some(Action::Create {
+                worktree: Some(spec),
+                ..
+            }) => {
                 assert_eq!(spec.base, "main");
                 assert_eq!(spec.new_branch, "feat");
             }
@@ -2983,7 +2994,10 @@ mod tests {
         app
     }
     fn note_state(app: &App) -> &NoteState {
-        match &app.mode { Mode::Note(ns) => ns, _ => panic!("not in note mode") }
+        match &app.mode {
+            Mode::Note(ns) => ns,
+            _ => panic!("not in note mode"),
+        }
     }
 
     #[test]
@@ -3001,7 +3015,7 @@ mod tests {
     #[test]
     fn space_toggles_task_under_cursor() {
         let mut app = note_app_with("- [ ] a\n- [ ] b");
-        app.handle_key(key('j'));            // cursor on task 1
+        app.handle_key(key('j')); // cursor on task 1
         app.handle_key(key(' '));
         assert_eq!(app.inbox, "- [ ] a\n- [x] b");
     }
@@ -3009,11 +3023,14 @@ mod tests {
     #[test]
     fn visual_select_then_space_toggles_range() {
         let mut app = note_app_with("- [ ] a\n- [ ] b\n- [ ] c");
-        app.handle_key(key('V'));            // anchor at 0
-        app.handle_key(key('j'));            // extend to 1
-        app.handle_key(key(' '));            // toggle 0..=1
+        app.handle_key(key('V')); // anchor at 0
+        app.handle_key(key('j')); // extend to 1
+        app.handle_key(key(' ')); // toggle 0..=1
         assert_eq!(app.inbox, "- [x] a\n- [x] b\n- [ ] c");
-        assert!(note_state(&app).anchor.is_none(), "selection cleared after toggle");
+        assert!(
+            note_state(&app).anchor.is_none(),
+            "selection cleared after toggle"
+        );
     }
 
     #[test]
@@ -3040,7 +3057,11 @@ mod tests {
         app.right_pane = RightPane::Inbox;
         app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert!(matches!(app.mode, Mode::List), "focus dropped");
-        assert_eq!(app.right_pane, RightPane::Inbox, "note still shown after defocus");
+        assert_eq!(
+            app.right_pane,
+            RightPane::Inbox,
+            "note still shown after defocus"
+        );
     }
 
     #[test]
@@ -3133,7 +3154,7 @@ mod tests {
     #[test]
     fn typing_in_edit_writes_back_to_note() {
         let mut app = note_app_editing("- [ ] a");
-        app.handle_key(key('!'));            // appended at end (cursor at end)
+        app.handle_key(key('!')); // appended at end (cursor at end)
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)); // esc commits
         assert_eq!(app.inbox, "- [ ] a!");
         assert_eq!(note_state(&app).sub, NoteSub::Render);
