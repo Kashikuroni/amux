@@ -1393,7 +1393,30 @@ impl App {
                 None
             }
             NoteSub::Edit => {
-                // Implemented in the next task.
+                let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+                match key.code {
+                    KeyCode::Esc => {
+                        // Commit the edited buffer back to the note, re-parse on render.
+                        *self.note_text_mut(&ns.target) = ns.editor.buffer.clone();
+                        self.dirty = true;
+                        ns.cursor = 0;
+                        ns.anchor = None;
+                        ns.sub = NoteSub::Render;
+                    }
+                    KeyCode::Enter => ns.editor.insert_char('\n'),
+                    KeyCode::Char('w') if ctrl => ns.editor.delete_word(),
+                    KeyCode::Char('u') if ctrl => ns.editor.delete_to_line_start(),
+                    KeyCode::Char(c) if !ctrl => ns.editor.insert_char(c),
+                    KeyCode::Backspace => ns.editor.backspace(),
+                    KeyCode::Delete => ns.editor.delete(),
+                    KeyCode::Left => ns.editor.left(),
+                    KeyCode::Right => ns.editor.right(),
+                    KeyCode::Up => ns.editor.up(),
+                    KeyCode::Down => ns.editor.down(),
+                    KeyCode::Home => ns.editor.home(),
+                    KeyCode::End => ns.editor.end(),
+                    _ => {}
+                }
                 self.mode = Mode::Note(ns);
                 None
             }
@@ -2953,5 +2976,38 @@ mod tests {
         let mut app = note_app_with("- [ ] a");
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(matches!(app.mode, Mode::List));
+    }
+
+    fn note_app_editing(text: &str) -> App {
+        let mut app = App::new(Config::default());
+        app.inbox = text.into();
+        app.mode = Mode::Note(NoteState {
+            target: NoteTarget::Inbox,
+            sub: NoteSub::Edit,
+            cursor: 0,
+            anchor: None,
+            editor: crate::editor::TextArea::new(text.to_string()),
+        });
+        app
+    }
+
+    #[test]
+    fn typing_in_edit_writes_back_to_note() {
+        let mut app = note_app_editing("- [ ] a");
+        app.handle_key(key('!'));            // appended at end (cursor at end)
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)); // esc commits
+        assert_eq!(app.inbox, "- [ ] a!");
+        assert_eq!(note_state(&app).sub, NoteSub::Render);
+    }
+
+    #[test]
+    fn enter_inserts_newline_not_submit() {
+        let mut app = note_app_editing("a");
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.handle_key(key('b'));
+        match &app.mode {
+            Mode::Note(ns) => assert_eq!(ns.editor.buffer, "a\nb"),
+            _ => panic!("still editing"),
+        }
     }
 }
