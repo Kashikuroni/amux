@@ -11,6 +11,7 @@ pub const CUSTOM_AGENT_SLOT: &str = "custom\u{2026}"; // "custom…"
 pub enum CreateField {
     Name,
     Dir,
+    Terminal,
     Worktree,
     Base,
     Branch,
@@ -34,6 +35,9 @@ pub struct CreateForm {
     /// True when opened pre-filled for an existing project (`N`): `dir` and
     /// `agent` are fixed and the flow only walks Name → Worktree → [Base → Branch].
     pub prefilled: bool,
+    /// True when the session should run a plain shell instead of an agent.
+    /// When set, the Agent step is skipped and `$SHELL` is launched.
+    pub terminal: bool,
 }
 
 impl CreateForm {
@@ -60,6 +64,7 @@ impl CreateForm {
             base_index: 0,
             new_branch: String::new(),
             prefilled: false,
+            terminal: false,
         }
     }
 
@@ -81,30 +86,41 @@ impl CreateForm {
             CreateField::Dir => &mut self.dir,
             CreateField::Branch => &mut self.new_branch,
             CreateField::Agent => &mut self.agent,
-            CreateField::Worktree | CreateField::Base => &mut self.agent,
+            CreateField::Worktree | CreateField::Base | CreateField::Terminal => &mut self.agent,
         }
     }
 
+    /// The ordered steps for the current configuration — the single source of
+    /// truth for next_field / step / total_steps / is_last_step. Dir is dropped
+    /// when prefilled (`N`); Agent is dropped when prefilled or terminal.
+    fn field_sequence(&self) -> Vec<CreateField> {
+        let mut v = vec![CreateField::Name];
+        if !self.prefilled {
+            v.push(CreateField::Dir);
+        }
+        v.push(CreateField::Terminal);
+        v.push(CreateField::Worktree);
+        if self.worktree {
+            v.push(CreateField::Base);
+            v.push(CreateField::Branch);
+        }
+        if !self.prefilled && !self.terminal {
+            v.push(CreateField::Agent);
+        }
+        v
+    }
+
     fn next_field(&self) -> CreateField {
-        if self.prefilled {
-            return match self.field {
-                CreateField::Name => CreateField::Worktree,
-                CreateField::Worktree if self.worktree => CreateField::Base,
-                CreateField::Worktree => CreateField::Name,
-                CreateField::Base => CreateField::Branch,
-                CreateField::Branch => CreateField::Name,
-                CreateField::Dir | CreateField::Agent => CreateField::Name,
-            };
+        let seq = self.field_sequence();
+        match seq.iter().position(|&f| f == self.field) {
+            Some(i) => seq[(i + 1) % seq.len()],
+            None => seq[0],
         }
-        match self.field {
-            CreateField::Name => CreateField::Dir,
-            CreateField::Dir => CreateField::Worktree,
-            CreateField::Worktree if self.worktree => CreateField::Base,
-            CreateField::Worktree => CreateField::Agent,
-            CreateField::Base => CreateField::Branch,
-            CreateField::Branch => CreateField::Agent,
-            CreateField::Agent => CreateField::Name,
-        }
+    }
+
+    /// True when the focused field is the final step (Enter here submits).
+    pub fn is_last_step(&self) -> bool {
+        self.field_sequence().last() == Some(&self.field)
     }
 
     /// Advance focus to the next field (used by Tab/Enter and tests).
@@ -138,6 +154,12 @@ impl CreateForm {
         }
     }
 
+    /// Flip the plain-shell toggle. No branch/disk work needed (unlike worktree);
+    /// the Agent step simply disappears from `field_sequence` when on.
+    pub fn toggle_terminal(&mut self) {
+        self.terminal = !self.terminal;
+    }
+
     /// Move the base-branch selection by `delta` (wraps). No-op if no branches.
     pub fn cycle_base(&mut self, delta: isize) {
         let n = self.base_branches.len() as isize;
@@ -149,14 +171,7 @@ impl CreateForm {
 
     /// Total number of steps shown in the `N of M` indicator.
     pub fn total_steps(&self) -> usize {
-        if self.prefilled {
-            return if self.worktree { 4 } else { 2 };
-        }
-        if self.worktree {
-            5
-        } else {
-            3
-        }
+        self.field_sequence().len()
     }
 
     /// Recompute the subdir listing for the current `dir` text and reset highlight.
@@ -217,23 +232,11 @@ impl CreateForm {
 
     /// 1-based position of the focused field, for the `N of M` step indicator.
     pub fn step(&self) -> usize {
-        if self.prefilled {
-            return match self.field {
-                CreateField::Name => 1,
-                CreateField::Worktree => 2,
-                CreateField::Base => 3,
-                CreateField::Branch => 4,
-                _ => 1,
-            };
-        }
-        match self.field {
-            CreateField::Name => 1,
-            CreateField::Dir => 2,
-            CreateField::Worktree => 3,
-            CreateField::Base => 3,
-            CreateField::Branch => 4,
-            CreateField::Agent => self.total_steps(),
-        }
+        let seq = self.field_sequence();
+        seq.iter()
+            .position(|&f| f == self.field)
+            .map(|i| i + 1)
+            .unwrap_or(1)
     }
 
     /// Append the highlighted subdir to the path (preserving `~`) and reload entries.
@@ -1084,6 +1087,25 @@ impl App {
             return None;
         }
 
+        // Terminal toggle step.
+        if form.field == CreateField::Terminal {
+            match key.code {
+                KeyCode::Esc => return None,
+                KeyCode::Char(' ') => form.toggle_terminal(),
+                KeyCode::Tab => form.advance(),
+                KeyCode::Enter => {
+                    if form.is_last_step() {
+                        return self.submit_create(form);
+                    } else {
+                        form.advance();
+                    }
+                }
+                _ => {}
+            }
+            self.mode = Mode::Create(form);
+            return None;
+        }
+
         // Worktree toggle step.
         if form.field == CreateField::Worktree {
             match key.code {
@@ -1091,7 +1113,7 @@ impl App {
                 KeyCode::Char(' ') => form.toggle_worktree(),
                 KeyCode::Tab => form.advance(),
                 KeyCode::Enter => {
-                    if form.prefilled && !form.worktree {
+                    if form.is_last_step() {
                         return self.submit_create(form);
                     } else {
                         form.advance();
@@ -1138,8 +1160,7 @@ impl App {
             }
             KeyCode::Tab => form.advance(),
             KeyCode::Enter => {
-                let submit = form.field == CreateField::Agent
-                    || (form.prefilled && form.field == CreateField::Branch);
+                let submit = form.is_last_step();
                 if submit {
                     return self.submit_create(form);
                 } else {
@@ -2069,6 +2090,9 @@ mod tests {
     #[test]
     fn prefilled_flow_skips_dir_and_agent() {
         let mut form = CreateForm::for_project("/home/u/proj", "claude", &[]);
+        // Name → Terminal → Worktree → wrap to Name (Dir and Agent skipped).
+        form.advance();
+        assert_eq!(form.field, CreateField::Terminal);
         form.advance();
         assert_eq!(form.field, CreateField::Worktree);
         form.advance();
@@ -2086,6 +2110,68 @@ mod tests {
         assert_eq!(form.field, CreateField::Branch);
         form.advance();
         assert_eq!(form.field, CreateField::Name);
+    }
+
+    #[test]
+    fn default_flow_counts_after_refactor() {
+        let mut form = CreateForm::new("claude", &[]);
+        assert_eq!(form.total_steps(), 5); // Name, Dir, Terminal, Worktree, Agent
+        assert_eq!(form.step(), 1);
+        form.field = CreateField::Agent;
+        assert_eq!(form.step(), 5);
+        assert!(form.is_last_step());
+    }
+
+    #[test]
+    fn terminal_flow_skips_agent_step() {
+        let mut form = CreateForm::new("claude", &[]);
+        form.terminal = true;
+        assert_eq!(form.field, CreateField::Name);
+        form.advance();
+        assert_eq!(form.field, CreateField::Dir);
+        form.advance();
+        assert_eq!(form.field, CreateField::Terminal);
+        form.advance();
+        assert_eq!(form.field, CreateField::Worktree);
+        form.advance();
+        assert_eq!(form.field, CreateField::Name);
+    }
+
+    #[test]
+    fn terminal_step_counts_and_last_step() {
+        let mut form = CreateForm::new("claude", &[]);
+        form.terminal = true;
+        assert_eq!(form.total_steps(), 4); // Name, Dir, Terminal, Worktree
+        form.field = CreateField::Worktree;
+        assert!(form.is_last_step());
+        form.field = CreateField::Terminal;
+        assert!(!form.is_last_step());
+    }
+
+    #[test]
+    fn toggle_terminal_flips_flag() {
+        let mut form = CreateForm::new("claude", &[]);
+        assert!(!form.terminal);
+        form.toggle_terminal();
+        assert!(form.terminal);
+        form.toggle_terminal();
+        assert!(!form.terminal);
+    }
+
+    #[test]
+    fn terminal_toggle_via_space_in_create() {
+        let dir = std::env::temp_dir().to_string_lossy().to_string();
+        let mut app = app_with(vec![at("s", "/p")]);
+        let mut form = CreateForm::new("claude", &[]);
+        form.name = "sh".into();
+        form.dir = dir;
+        form.field = CreateField::Terminal;
+        app.mode = Mode::Create(form);
+        app.handle_key(key(' '));
+        match &app.mode {
+            Mode::Create(f) => assert!(f.terminal),
+            other => panic!("expected Create, got {other:?}"),
+        }
     }
 
     #[test]
@@ -2152,14 +2238,14 @@ mod tests {
     #[test]
     fn prefilled_step_indicator_counts() {
         let mut form = CreateForm::for_project("/home/u/proj", "claude", &[]);
-        assert_eq!(form.total_steps(), 2);
+        assert_eq!(form.total_steps(), 3); // name, terminal, worktree
         assert_eq!(form.step(), 1);
         form.field = CreateField::Worktree;
-        assert_eq!(form.step(), 2);
+        assert_eq!(form.step(), 3);
         form.worktree = true;
-        assert_eq!(form.total_steps(), 4);
+        assert_eq!(form.total_steps(), 5); // name, terminal, worktree, base, branch
         form.field = CreateField::Branch;
-        assert_eq!(form.step(), 4);
+        assert_eq!(form.step(), 5);
     }
 
     #[test]
@@ -2266,7 +2352,7 @@ mod tests {
         form.field = CreateField::Dir;
         assert_eq!(form.step(), 2);
         form.field = CreateField::Agent;
-        assert_eq!(form.step(), 3);
+        assert_eq!(form.step(), 5);
     }
 
     #[test]
@@ -2446,9 +2532,9 @@ mod tests {
     #[test]
     fn step_count_grows_with_worktree() {
         let mut form = CreateForm::new("claude", &[]);
-        assert_eq!(form.total_steps(), 3);
-        form.worktree = true;
         assert_eq!(form.total_steps(), 5);
+        form.worktree = true;
+        assert_eq!(form.total_steps(), 7);
     }
 
     #[test]
@@ -2464,7 +2550,7 @@ mod tests {
             Mode::Create(f) => assert_eq!(f.field, CreateField::Dir),
             _ => panic!("expected Dir step"),
         }
-        // Dir step: set an existing dir, Enter -> Worktree (NOT Agent).
+        // Dir step: set an existing dir, Enter -> Terminal (NOT Agent).
         if let Mode::Create(f) = &mut app.mode {
             f.dir = "/tmp".into();
         }
@@ -2472,10 +2558,10 @@ mod tests {
         match &app.mode {
             Mode::Create(f) => assert_eq!(
                 f.field,
-                CreateField::Worktree,
-                "Dir Enter must advance to the Worktree step, not skip it"
+                CreateField::Terminal,
+                "Dir Enter must advance to the Terminal step, not skip it"
             ),
-            _ => panic!("expected Worktree step"),
+            _ => panic!("expected Terminal step"),
         }
     }
 

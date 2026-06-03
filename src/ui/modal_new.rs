@@ -407,7 +407,7 @@ mod tests {
         t.draw(|f| render(f, &form)).unwrap();
         let s = buf_to_string(t.backend().buffer());
         assert!(s.contains("New session"), "header title");
-        assert!(s.contains("of 3"), "step indicator");
+        assert!(s.contains("of 5"), "step indicator");
         // Inline lowercase labels (no letter-spacing).
         assert!(s.contains("name"));
         assert!(s.contains("directory"));
@@ -432,7 +432,7 @@ mod tests {
         assert!(s.contains("base"), "base label");
         assert!(s.contains("branch"), "branch label");
         assert!(s.contains("feature-x"));
-        assert!(s.contains("of 5"), "dynamic step total");
+        assert!(s.contains("of 7"), "dynamic step total");
     }
 
     #[test]
@@ -442,18 +442,18 @@ mod tests {
         t.draw(|f| render(f, &form)).unwrap();
         let s = buf_to_string(t.backend().buffer());
         assert!(!s.contains("base"));
-        assert!(s.contains("of 3"));
+        assert!(s.contains("of 5"));
     }
 
     #[test]
-    fn prefilled_modal_shows_two_steps_and_project_values() {
+    fn prefilled_modal_shows_streamlined_steps_and_project_values() {
         // Use a non-default agent so the agent assertion proves it came from the
         // project (not a generic default), and a recognizable project dir.
         let form = CreateForm::for_project("/home/u/proj", "codex", &["codex".into()]);
         let mut t = Terminal::new(TestBackend::new(80, 30)).unwrap();
         t.draw(|f| render(f, &form)).unwrap();
         let s = buf_to_string(t.backend().buffer());
-        assert!(s.contains("of 2"), "streamlined step total:\n{s}");
+        assert!(s.contains("of 3"), "streamlined step total:\n{s}");
         assert!(s.contains("proj"), "project path on directory row:\n{s}");
         assert!(s.contains("codex"), "project agent shown:\n{s}");
     }
