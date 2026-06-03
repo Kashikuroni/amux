@@ -1,14 +1,24 @@
 [package]
-name = "am"
+name = "amux"
 version = "0.1.0"
 edition = "2021"
+description = "A terminal cockpit for AI coding agents: manage parallel tmux sessions running Claude Code, Codex, Gemini, Aider and more — with live previews, git worktrees, and per-session markdown notes."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/OWNER/amux"
+homepage = "https://github.com/OWNER/amux"
+readme = "README.md"
+keywords = ["tui", "tmux", "ai", "agent", "claude"]
+categories = ["command-line-utilities", "development-tools"]
+rust-version = "1.82"
 
+# The library keeps the short internal name `am` so existing `am::` paths in the
+# binary and tests are unchanged; the installed binary is `amux`.
 [lib]
 name = "am"
 path = "src/lib.rs"
 
 [[bin]]
-name = "am"
+name = "amux"
 path = "src/main.rs"
 
 [dependencies]
