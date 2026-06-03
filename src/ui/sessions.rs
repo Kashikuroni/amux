@@ -259,7 +259,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         vec![
             Span::styled("SESSIONS", Style::default().fg(Color::Reset)),
             Span::styled(
-                "   Выберите сессию 1-9",
+                "   select a session 1-9",
                 Style::default().fg(INDIGO).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
