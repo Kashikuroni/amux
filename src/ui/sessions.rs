@@ -33,6 +33,7 @@ fn agent_accent(agent: &str) -> Color {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn card(
     s: &Session,
     spinner_frame: usize,
@@ -40,6 +41,8 @@ fn card(
     prompt: Option<&[String]>,
     width: u16,
     num: usize,
+    done: u32,
+    total: u32,
 ) -> ListItem<'static> {
     // Line 1: badge name ........... status. The status is pushed to the far
     // right so it sits in the card's top-right corner and catches the eye.
@@ -121,6 +124,18 @@ fn card(
                 .fg(Color::Reset)
                 .add_modifier(Modifier::DIM),
         ));
+        // Task counter sits in the left run (so the diff still right-aligns).
+        let counter = if total > 0 {
+            format!("   {done}/{total}")
+        } else {
+            String::new()
+        };
+        if !counter.is_empty() {
+            l2.push(Span::styled(
+                counter.clone(),
+                Style::default().add_modifier(Modifier::DIM),
+            ));
+        }
         // Right-align the diff stat to the card's right edge so it lands directly
         // under the status on line 1 (same width-based padding as line 1).
         let added = format!("+{}", g.added);
@@ -129,7 +144,8 @@ fn card(
             + 1                            // ✻ agent mark
             + 1 + s.agent.chars().count()  // " {agent}"
             + 5                            // "   {glyph} " (3 spaces + glyph + space)
-            + g.branch.chars().count();
+            + g.branch.chars().count()
+            + counter.chars().count();
         let diff_width = added.chars().count() + 1 + removed.chars().count();
         let pad2 = (width as usize).saturating_sub(left2 + diff_width).max(1);
         l2.push(Span::raw(" ".repeat(pad2)));
@@ -137,6 +153,13 @@ fn card(
         l2.push(Span::styled(
             format!(" {removed}"),
             Style::default().fg(Color::Red),
+        ));
+    }
+    // No git info: append the counter to the agent line if the note has tasks.
+    if s.git.is_none() && total > 0 {
+        l2.push(Span::styled(
+            format!("   {done}/{total}"),
+            Style::default().add_modifier(Modifier::DIM),
         ));
     }
     let line2 = Line::from(l2);
@@ -327,6 +350,12 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             selected_item = Some(items.len());
         }
         let prompt = app.prompts.get(&s.name).map(|v| v.as_slice());
+        // Task progress from the session's note (0/0 when it has no tasks).
+        let (done, total) = app
+            .notes
+            .get(&s.name)
+            .map(|t| crate::note::counts(t))
+            .unwrap_or((0, 0));
         items.push(card(
             s,
             app.spinner_frame,
@@ -334,6 +363,8 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             prompt,
             content_width,
             pos + 1,
+            done,
+            total,
         ));
     }
 
@@ -627,6 +658,29 @@ mod tests {
             last_col(buf, status_y),
             "diff's right edge must align under the status's right edge"
         );
+    }
+
+    #[test]
+    fn card_shows_task_counter_when_note_has_tasks() {
+        let mut app = App::new(Config::default());
+        app.sessions = vec![sess("proj", Status::Idle, None)];
+        app.notes.insert("proj".into(), "- [ ] a\n- [x] b".into());
+        let mut t = Terminal::new(TestBackend::new(60, 8)).unwrap();
+        t.draw(|f| render(f, f.area(), &app)).unwrap();
+        let s = buf_to_string(t.backend().buffer());
+        assert!(s.contains("1/2"), "counter missing:\n{s}");
+    }
+
+    #[test]
+    fn card_has_no_counter_without_tasks() {
+        let mut app = App::new(Config::default());
+        app.sessions = vec![sess("proj", Status::Idle, None)];
+        // A note with no tasks must not render a "0/0" counter.
+        app.notes.insert("proj".into(), "just a thought, no checkboxes".into());
+        let mut t = Terminal::new(TestBackend::new(60, 8)).unwrap();
+        t.draw(|f| render(f, f.area(), &app)).unwrap();
+        let s = buf_to_string(t.backend().buffer());
+        assert!(!s.contains("0/0"), "should not show a zero counter:\n{s}");
     }
 
     #[test]
