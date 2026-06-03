@@ -327,6 +327,6 @@ fn create_worktree_session(
         .join(".worktrees")
         .join(&spec.new_branch);
     let wt_str = wt_path.to_string_lossy().to_string();
-    am::git::add_worktree(&repo, &wt_str, &spec.new_branch, &spec.base)?;
+    am::git::prepare_worktree(&repo, &wt_str, &spec.new_branch, &spec.base)?;
     tmux::new_worktree_session(name, &wt_str, command, label, &repo)
 }
