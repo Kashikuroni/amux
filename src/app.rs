@@ -1785,13 +1785,15 @@ pub fn abbreviate_path(path: &str) -> String {
 pub fn build_create_action(form: &CreateForm, existing: &[String]) -> Result<Action, String> {
     validate_create(&form.name, &form.dir, existing)?;
     let worktree = if form.worktree {
+        let new_branch = form.new_branch.trim().to_string();
+        validate_branch(&new_branch)?;
         Some(WorktreeSpec {
             base: form
                 .base_branches
                 .get(form.base_index)
                 .cloned()
                 .unwrap_or_default(),
-            new_branch: form.new_branch.trim().to_string(),
+            new_branch,
         })
     } else {
         None
@@ -1820,6 +1822,27 @@ pub fn validate_create(name: &str, dir: &str, existing: &[String]) -> Result<(),
     let expanded = expand_tilde(dir);
     if !std::path::Path::new(&expanded).is_dir() {
         return Err(format!("directory not found: {expanded}"));
+    }
+    Ok(())
+}
+
+/// Validates a new worktree branch name before it is used to build a filesystem
+/// path (`<repo>/.worktrees/<branch>`). Normal git names — including nested ones
+/// like `feature/x` — are allowed, but values that could escape the worktrees
+/// directory or be misread as a CLI flag are rejected.
+pub fn validate_branch(branch: &str) -> Result<(), String> {
+    let b = branch.trim();
+    if b.is_empty() {
+        return Err("branch name is empty".into());
+    }
+    if b.starts_with('-') {
+        return Err("branch name cannot start with '-'".into());
+    }
+    if b.starts_with('/') {
+        return Err("branch name cannot be an absolute path".into());
+    }
+    if b.split('/').any(|seg| seg == ".." || seg == ".") {
+        return Err("branch name cannot contain '.' or '..' path segments".into());
     }
     Ok(())
 }
@@ -2262,6 +2285,29 @@ mod tests {
         let existing: Vec<String> = vec![];
         assert!(validate_create("ok", "/no/such/dir/xyz", &existing).is_err());
         assert!(validate_create("ok", "/tmp", &existing).is_ok());
+    }
+
+    #[test]
+    fn validate_branch_blocks_traversal_and_flags() {
+        // Allowed: normal and nested git branch names.
+        assert!(validate_branch("feature-x").is_ok());
+        assert!(validate_branch("feature/x").is_ok());
+        // Rejected: escapes, absolute paths, flag-like, empty.
+        assert!(validate_branch("../escape").is_err());
+        assert!(validate_branch("a/../../etc").is_err());
+        assert!(validate_branch("/abs/path").is_err());
+        assert!(validate_branch("-rf").is_err());
+        assert!(validate_branch("   ").is_err());
+    }
+
+    #[test]
+    fn build_create_rejects_unsafe_branch() {
+        let mut form = CreateForm::new("claude", &[]);
+        form.name = "ok".into();
+        form.dir = "/tmp".into();
+        form.worktree = true;
+        form.new_branch = "../escape".into();
+        assert!(build_create_action(&form, &[]).is_err());
     }
 
     #[test]

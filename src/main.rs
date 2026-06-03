@@ -99,14 +99,38 @@ fn spawn_usage_poller() -> mpsc::Receiver<am::usage::Account> {
 fn init_terminal() -> io::Result<Term> {
     enable_raw_mode()?;
     let mut out = stdout();
-    execute!(
+    // If any setup step fails after raw mode is on, undo everything so the user's
+    // shell isn't left in raw mode / the alternate screen. The panic hook only
+    // covers panics; this is the error path.
+    if let Err(e) = execute!(
         out,
         EnterAlternateScreen,
         EnableBracketedPaste,
         EnableMouseCapture
-    )?;
+    ) {
+        let _ = disable_raw_mode();
+        let _ = execute!(
+            stdout(),
+            DisableMouseCapture,
+            DisableBracketedPaste,
+            LeaveAlternateScreen
+        );
+        return Err(e);
+    }
     enable_key_disambiguation(&mut out);
-    Terminal::new(CrosstermBackend::new(out))
+    match Terminal::new(CrosstermBackend::new(out)) {
+        Ok(term) => Ok(term),
+        Err(e) => {
+            let _ = disable_raw_mode();
+            let _ = execute!(
+                stdout(),
+                DisableMouseCapture,
+                DisableBracketedPaste,
+                LeaveAlternateScreen
+            );
+            Err(e)
+        }
+    }
 }
 
 /// Asks the terminal (where supported) to report modified keys distinctly via
