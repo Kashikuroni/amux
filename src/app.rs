@@ -131,6 +131,23 @@ impl CreateForm {
         }
     }
 
+    fn prev_field(&self) -> CreateField {
+        let seq = self.field_sequence();
+        match seq.iter().position(|&f| f == self.field) {
+            // Wrap to the last step from the first, mirroring `next_field`.
+            Some(i) => seq[(i + seq.len() - 1) % seq.len()],
+            None => seq[0],
+        }
+    }
+
+    /// Move focus to the previous field (Shift+Tab). Mirror of `advance`.
+    pub fn retreat(&mut self) {
+        self.field = self.prev_field();
+        if self.field == CreateField::Dir {
+            self.refresh_dir_entries();
+        }
+    }
+
     /// True when the current `dir` resolves inside a git repository.
     pub fn dir_is_repo(&self) -> bool {
         crate::git::repo_root(&expand_tilde(&self.dir)).is_some()
@@ -507,6 +524,15 @@ enum ModeKind {
     RenameProject,
 }
 
+/// What the right pane renders: the live session preview, the selected session's
+/// note, or the global Inbox note.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RightPane {
+    Preview,
+    SessionNote,
+    Inbox,
+}
+
 pub struct App {
     pub config: Config,
     pub sessions: Vec<Session>,
@@ -551,6 +577,12 @@ pub struct App {
     /// Set when persisted state (split width / order / names) changed and needs
     /// saving. The event loop saves and clears it; keeps `App` itself IO-free.
     pub dirty: bool,
+    /// Global Inbox note (markdown).
+    pub inbox: String,
+    /// Per-session notes (markdown), keyed by tmux session name.
+    pub notes: std::collections::BTreeMap<String, String>,
+    /// Which content the right pane shows.
+    pub right_pane: RightPane,
 }
 
 impl App {
@@ -581,6 +613,9 @@ impl App {
             project_order: Vec::new(),
             project_names: std::collections::BTreeMap::new(),
             dirty: false,
+            inbox: String::new(),
+            notes: std::collections::BTreeMap::new(),
+            right_pane: RightPane::Preview,
         }
     }
 
@@ -592,6 +627,8 @@ impl App {
         self.order = state.order;
         self.project_order = state.project_order;
         self.project_names = state.project_names;
+        self.inbox = state.inbox;
+        self.notes = state.notes;
     }
 
     /// Snapshots the persistable UI state for saving to disk.
@@ -601,6 +638,8 @@ impl App {
             order: self.order.clone(),
             project_order: self.project_order.clone(),
             project_names: self.project_names.clone(),
+            inbox: self.inbox.clone(),
+            notes: self.notes.clone(),
         }
     }
 
@@ -1085,6 +1124,13 @@ impl App {
         // key's submit still fails, so the banner always reflects the last action.
         self.error = None;
 
+        // Shift+Tab walks focus backwards from any step (mirror of Tab).
+        if key.code == KeyCode::BackTab {
+            form.retreat();
+            self.mode = Mode::Create(form);
+            return None;
+        }
+
         // Dir step: interactive picker (live subdir list).
         if form.field == CreateField::Dir {
             match key.code {
@@ -1155,12 +1201,13 @@ impl App {
             return None;
         }
 
-        // Base-branch picker step.
+        // Base-branch picker step. h/l mirror ←/→ (vim-style) — it's a pure
+        // selection step with no free text, so the letters are unambiguous.
         if form.field == CreateField::Base {
             match key.code {
                 KeyCode::Esc => return None,
-                KeyCode::Left => form.cycle_base(-1),
-                KeyCode::Right => form.cycle_base(1),
+                KeyCode::Left | KeyCode::Char('h') => form.cycle_base(-1),
+                KeyCode::Right | KeyCode::Char('l') => form.cycle_base(1),
                 KeyCode::Tab | KeyCode::Enter => form.advance(),
                 _ => {}
             }
@@ -1173,6 +1220,14 @@ impl App {
             KeyCode::Esc => return None,
             KeyCode::Left if form.field == CreateField::Agent => form.cycle_agent(-1),
             KeyCode::Right if form.field == CreateField::Agent => form.cycle_agent(1),
+            // h/l cycle agents vim-style, but only while a preset is selected —
+            // once on the custom slot they're typed so a command can contain them.
+            KeyCode::Char('h') if form.field == CreateField::Agent && !form.agent_is_custom() => {
+                form.cycle_agent(-1)
+            }
+            KeyCode::Char('l') if form.field == CreateField::Agent && !form.agent_is_custom() => {
+                form.cycle_agent(1)
+            }
             KeyCode::Backspace => {
                 if form.field == CreateField::Agent && !form.agent_is_custom() {
                     // Backspace off a preset: jump to custom and start fresh (matches Char).
@@ -2111,6 +2166,76 @@ mod tests {
     fn create_form_starts_in_home_dir() {
         let form = CreateForm::new("claude", &[]);
         assert_eq!(form.dir, "~/");
+    }
+
+    fn cform(app: &App) -> &CreateForm {
+        match &app.mode {
+            Mode::Create(f) => f,
+            other => panic!("expected Create mode, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn retreat_mirrors_advance_and_wraps_to_last() {
+        let mut form = CreateForm::new("claude", &["claude".into()]);
+        let last = *form.field_sequence().last().unwrap();
+        // advance then retreat returns to the start.
+        form.advance();
+        assert_ne!(form.field, CreateField::Name);
+        form.retreat();
+        assert_eq!(form.field, CreateField::Name);
+        // retreat from the first field wraps to the final step.
+        form.retreat();
+        assert_eq!(form.field, last);
+    }
+
+    #[test]
+    fn shift_tab_walks_focus_backwards() {
+        let mut app = App::new(Config::default());
+        let mut form = CreateForm::new("claude", &["claude".into()]);
+        form.field = CreateField::Terminal; // a mid-flow step
+        app.mode = Mode::Create(form);
+        app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE));
+        assert_eq!(cform(&app).field, CreateField::Dir); // step before Terminal
+    }
+
+    #[test]
+    fn base_picker_cycles_with_h_and_l() {
+        let mut app = App::new(Config::default());
+        let mut form = CreateForm::new("claude", &["claude".into()]);
+        form.field = CreateField::Base;
+        form.base_branches = vec!["main".into(), "dev".into(), "feat".into()];
+        form.base_index = 0;
+        app.mode = Mode::Create(form);
+        app.handle_key(key('l'));
+        assert_eq!(cform(&app).base_index, 1);
+        app.handle_key(key('l'));
+        assert_eq!(cform(&app).base_index, 2);
+        app.handle_key(key('h'));
+        assert_eq!(cform(&app).base_index, 1);
+    }
+
+    #[test]
+    fn agent_h_l_cycles_preset_but_types_on_custom_slot() {
+        let mut app = App::new(Config::default());
+        // On a preset, l moves to the next choice.
+        let mut form = CreateForm::new("claude", &["codex".into()]);
+        form.field = CreateField::Agent;
+        form.agent_index = 0;
+        app.mode = Mode::Create(form);
+        app.handle_key(key('l'));
+        assert_eq!(cform(&app).agent_index, 1);
+
+        // On the custom slot, h/l are literal text so a command can contain them.
+        let mut custom = CreateForm::new("claude", &["codex".into()]);
+        custom.field = CreateField::Agent;
+        custom.agent_index = custom.agent_choices.len() - 1; // the custom slot
+        custom.agent.clear();
+        assert!(custom.agent_is_custom());
+        app.mode = Mode::Create(custom);
+        app.handle_key(key('h'));
+        app.handle_key(key('l'));
+        assert_eq!(cform(&app).agent, "hl");
     }
 
     #[test]
