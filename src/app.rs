@@ -1433,11 +1433,9 @@ impl App {
                             crate::editor::TextArea::new(self.note_text(&ns.target).to_string());
                         ns.sub = NoteSub::Edit;
                     }
-                    KeyCode::Char('c') => {
-                        // Arm the clear confirmation only if there's something to wipe.
-                        if !self.note_text(&ns.target).is_empty() {
-                            ns.confirm_clear = true;
-                        }
+                    // Arm the clear confirmation only if there's something to wipe.
+                    KeyCode::Char('c') if !self.note_text(&ns.target).is_empty() => {
+                        ns.confirm_clear = true;
                     }
                     _ => {}
                 }
