@@ -33,7 +33,7 @@ pub struct CreateForm {
     pub base_index: usize,
     pub new_branch: String,
     /// True when opened pre-filled for an existing project (`N`): `dir` and
-    /// `agent` are fixed and the flow only walks Name → Worktree → [Base → Branch].
+    /// `agent` are fixed and the flow only walks Name → Terminal → Worktree → [Base → Branch].
     pub prefilled: bool,
     /// True when the session should run a plain shell instead of an agent.
     /// When set, the Agent step is skipped and `$SHELL` is launched.
@@ -69,7 +69,7 @@ impl CreateForm {
     }
 
     /// New-session form pre-filled for an existing project: `dir` and `agent`
-    /// are fixed, so the streamlined flow only walks Name → Worktree → [Base →
+    /// are fixed, so the streamlined flow only walks Name → Terminal → Worktree → [Base →
     /// Branch]. `new(project_agent, ...)` already puts `project_agent` first in
     /// `agent_choices` and selects it (index 0), so the agent is pre-chosen.
     pub fn for_project(project_dir: &str, project_agent: &str, presets: &[String]) -> Self {
