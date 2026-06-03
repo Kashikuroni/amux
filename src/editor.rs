@@ -175,4 +175,40 @@ mod tests {
         a.down();
         assert_eq!(a.buffer, "abc\nde");
     }
+
+    #[test]
+    fn left_right_step_over_multibyte_chars() {
+        // Cyrillic letters are 2 bytes each; the cursor is a CHAR index, so
+        // motion + editing must never split a UTF-8 boundary.
+        let mut a = TextArea::new("абв"); // cursor at end (3 chars)
+        assert_eq!(a.cursor, 3);
+        a.left();
+        a.left();
+        assert_eq!(a.cursor, 1); // before 'б'
+        a.insert_char('Я');
+        assert_eq!(a.buffer, "аЯбв");
+        assert_eq!(a.cursor, 2);
+    }
+
+    #[test]
+    fn backspace_and_delete_remove_whole_multibyte_chars() {
+        let mut a = TextArea::new("аб");
+        a.backspace(); // removes 'б'
+        assert_eq!(a.buffer, "а");
+        assert_eq!(a.cursor, 1);
+        a.home();
+        a.delete(); // removes 'а' (forward)
+        assert_eq!(a.buffer, "");
+        assert_eq!(a.cursor, 0);
+    }
+
+    #[test]
+    fn delete_word_and_to_line_start_are_char_indexed() {
+        let mut a = TextArea::new("привет мир"); // cursor at end
+        a.delete_word(); // removes "мир"
+        assert_eq!(a.buffer, "привет ");
+        a.delete_to_line_start(); // clears the whole (single) line up to cursor
+        assert_eq!(a.buffer, "");
+        assert_eq!(a.cursor, 0);
+    }
 }
