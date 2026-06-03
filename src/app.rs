@@ -378,6 +378,35 @@ pub enum Mode {
     /// Editing a project's display name (entered with Shift+R). Display-only —
     /// never renames the directory.
     RenameProject(ProjectRenameForm),
+    /// Focused-note mode: the user is reading/editing the right-pane note.
+    Note(NoteState),
+}
+
+/// Which note `Mode::Note` is editing.
+#[derive(Debug, Clone, PartialEq)]
+pub enum NoteTarget {
+    Inbox,
+    Session(String),
+}
+
+/// Render vs raw-edit sub-mode inside a focused note.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoteSub {
+    Render,
+    Edit,
+}
+
+/// Focused-note state (the user pressed Tab into the note pane).
+#[derive(Debug, Clone)]
+pub struct NoteState {
+    pub target: NoteTarget,
+    pub sub: NoteSub,
+    /// Task ordinal the render cursor is on.
+    pub cursor: usize,
+    /// Visual-selection anchor (task ordinal), or None when not selecting.
+    pub anchor: Option<usize>,
+    /// Edit buffer; only meaningful in `Edit` sub-mode.
+    pub editor: crate::editor::TextArea,
 }
 
 /// Display-name editor for a project, keyed by its root path.
@@ -440,6 +469,7 @@ enum ModeKind {
     Reply,
     SelectSession,
     RenameProject,
+    Note,
 }
 
 /// What the right pane renders: the live session preview, the selected session's
@@ -741,6 +771,7 @@ impl App {
             Mode::Reply(_) => ModeKind::Reply,
             Mode::SelectSession => ModeKind::SelectSession,
             Mode::RenameProject(_) => ModeKind::RenameProject,
+            Mode::Note(_) => ModeKind::Note,
         }
     }
 
@@ -761,6 +792,7 @@ impl App {
             ModeKind::Reply => self.handle_reply_key(key),
             ModeKind::SelectSession => self.handle_select_session_key(key),
             ModeKind::RenameProject => self.handle_rename_project_key(key),
+            ModeKind::Note => self.handle_note_key(key),
         }
     }
 
@@ -1263,6 +1295,27 @@ impl App {
             }
             _ => {}
         }
+        None
+    }
+
+    /// The markdown text for a note target (read-only). Missing session = "".
+    pub fn note_text(&self, target: &NoteTarget) -> &str {
+        match target {
+            NoteTarget::Inbox => &self.inbox,
+            NoteTarget::Session(name) => self.notes.get(name).map(String::as_str).unwrap_or(""),
+        }
+    }
+
+    /// Mutable handle to a note target, creating an empty session entry if needed.
+    pub fn note_text_mut(&mut self, target: &NoteTarget) -> &mut String {
+        match target {
+            NoteTarget::Inbox => &mut self.inbox,
+            NoteTarget::Session(name) => self.notes.entry(name.clone()).or_default(),
+        }
+    }
+
+    fn handle_note_key(&mut self, _key: KeyEvent) -> Option<Action> {
+        // Filled in by later tasks.
         None
     }
 

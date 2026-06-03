@@ -52,7 +52,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Mode::RenameProject(form) => draw_project_rename_modal(f, form),
         // No modal: these render over the plain list (the SESSIONS label shows
         // the select-mode prompt).
-        Mode::List | Mode::Filter | Mode::SelectSession => {}
+        Mode::List | Mode::Filter | Mode::SelectSession | Mode::Note(_) => {}
     }
 }
 

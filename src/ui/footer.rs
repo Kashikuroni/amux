@@ -54,6 +54,7 @@ fn items_for(mode: &Mode) -> Vec<Item> {
             ("?", "help", false),
             ("q", "quit", false),
         ],
+        Mode::Note(_) => vec![("esc", "back", true), ("tab", "edit", false)],
     }
 }
 
