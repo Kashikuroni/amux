@@ -115,20 +115,9 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
 mod tests {
     use super::*;
     use crate::config::Config;
+    use crate::ui::testutil::buf_to_string;
     use ratatui::backend::TestBackend;
-    use ratatui::buffer::Buffer;
     use ratatui::Terminal;
-
-    fn buf_to_string(buf: &Buffer) -> String {
-        let mut s = String::new();
-        for y in 0..buf.area.height {
-            for x in 0..buf.area.width {
-                s.push_str(buf[(x, y)].symbol());
-            }
-            s.push('\n');
-        }
-        s
-    }
 
     #[test]
     fn list_footer_spells_keys_without_modifier_glyphs() {

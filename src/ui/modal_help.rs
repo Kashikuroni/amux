@@ -94,19 +94,9 @@ pub fn render(f: &mut Frame) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::testutil::buf_to_string;
     use ratatui::backend::TestBackend;
-    use ratatui::buffer::Buffer;
     use ratatui::Terminal;
-    fn buf_to_string(buf: &Buffer) -> String {
-        let mut s = String::new();
-        for y in 0..buf.area.height {
-            for x in 0..buf.area.width {
-                s.push_str(buf[(x, y)].symbol());
-            }
-            s.push('\n');
-        }
-        s
-    }
     #[test]
     fn help_lists_groups_and_keys() {
         // Tall enough that the content-sized panel renders every group.

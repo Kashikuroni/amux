@@ -161,19 +161,9 @@ mod tests {
     use crate::config::Config;
     use crate::usage::{Usage, Window};
     use ratatui::backend::TestBackend;
-    use ratatui::buffer::Buffer;
     use ratatui::Terminal;
 
-    fn buf_to_string(buf: &Buffer) -> String {
-        let mut s = String::new();
-        for y in 0..buf.area.height {
-            for x in 0..buf.area.width {
-                s.push_str(buf[(x, y)].symbol());
-            }
-            s.push('\n');
-        }
-        s
-    }
+    use crate::ui::testutil::buf_to_string;
 
     #[test]
     fn header_shows_usage_limits_when_present() {

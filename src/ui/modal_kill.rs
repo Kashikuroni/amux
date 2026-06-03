@@ -92,19 +92,9 @@ pub fn render(f: &mut Frame, form: &crate::app::KillForm, session: Option<&Sessi
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::testutil::buf_to_string;
     use ratatui::backend::TestBackend;
-    use ratatui::buffer::Buffer;
     use ratatui::Terminal;
-    fn buf_to_string(buf: &Buffer) -> String {
-        let mut s = String::new();
-        for y in 0..buf.area.height {
-            for x in 0..buf.area.width {
-                s.push_str(buf[(x, y)].symbol());
-            }
-            s.push('\n');
-        }
-        s
-    }
     #[test]
     fn kill_modal_shows_name_and_warning() {
         // Use a tall-enough terminal so the 36%-height modal (≥9 rows for 7 lines + 2 borders)

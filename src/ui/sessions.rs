@@ -399,16 +399,7 @@ mod tests {
     use ratatui::buffer::Buffer;
     use ratatui::Terminal;
 
-    fn buf_to_string(buf: &Buffer) -> String {
-        let mut s = String::new();
-        for y in 0..buf.area.height {
-            for x in 0..buf.area.width {
-                s.push_str(buf[(x, y)].symbol());
-            }
-            s.push('\n');
-        }
-        s
-    }
+    use crate::ui::testutil::buf_to_string;
 
     /// Buffer text from row `start_y` down — used to exclude the SESSIONS header
     /// (row 0), whose legend now contains both branch glyphs, when asserting on

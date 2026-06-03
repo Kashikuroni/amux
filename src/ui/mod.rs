@@ -8,6 +8,8 @@ mod modal_new;
 mod note;
 mod preview;
 mod sessions;
+#[cfg(test)]
+mod testutil;
 
 use crate::app::{App, Mode, ReplyForm};
 use crate::theme as th;
@@ -312,19 +314,9 @@ mod tests {
     use crate::config::Config;
     use crate::tmux::{Session, Status};
     use ratatui::backend::TestBackend;
-    use ratatui::buffer::Buffer;
     use ratatui::Terminal;
 
-    fn buf_to_string(buf: &Buffer) -> String {
-        let mut s = String::new();
-        for y in 0..buf.area.height {
-            for x in 0..buf.area.width {
-                s.push_str(buf[(x, y)].symbol());
-            }
-            s.push('\n');
-        }
-        s
-    }
+    use crate::ui::testutil::buf_to_string;
 
     #[test]
     fn wrap_rows_breaks_on_words_and_newlines() {

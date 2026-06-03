@@ -132,20 +132,9 @@ fn render_line(
 mod tests {
     use super::*;
     use crate::config::Config;
+    use crate::ui::testutil::buf_to_string;
     use ratatui::backend::TestBackend;
-    use ratatui::buffer::Buffer;
     use ratatui::Terminal;
-
-    fn dump(buf: &Buffer) -> String {
-        let mut s = String::new();
-        for y in 0..buf.area.height {
-            for x in 0..buf.area.width {
-                s.push_str(buf[(x, y)].symbol());
-            }
-            s.push('\n');
-        }
-        s
-    }
 
     #[test]
     fn renders_checkboxes_and_counter() {
@@ -154,7 +143,7 @@ mod tests {
         app.right_pane = RightPane::Inbox;
         let mut t = Terminal::new(TestBackend::new(40, 10)).unwrap();
         t.draw(|f| render(f, f.area(), &app)).unwrap();
-        let s = dump(t.backend().buffer());
+        let s = buf_to_string(t.backend().buffer());
         assert!(s.contains("Inbox"), "title:\n{s}");
         assert!(s.contains("1/2"), "counter:\n{s}");
         assert!(s.contains("☐ open"), "open box:\n{s}");

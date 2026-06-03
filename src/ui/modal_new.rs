@@ -432,19 +432,9 @@ pub fn render(f: &mut Frame, form: &CreateForm, error: Option<&str>) {
 mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
-    use ratatui::buffer::Buffer;
     use ratatui::Terminal;
 
-    fn buf_to_string(buf: &Buffer) -> String {
-        let mut s = String::new();
-        for y in 0..buf.area.height {
-            for x in 0..buf.area.width {
-                s.push_str(buf[(x, y)].symbol());
-            }
-            s.push('\n');
-        }
-        s
-    }
+    use crate::ui::testutil::buf_to_string;
 
     #[test]
     fn new_modal_shows_inline_labels_and_agent_segments() {
