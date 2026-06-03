@@ -989,6 +989,11 @@ impl App {
                     confirm_clear: false,
                 });
             }
+            // esc means "exit notes" everywhere: when the pane shows a note but
+            // isn't focused (after a Tab defocus, or t/T browse), close to preview.
+            KeyCode::Esc if self.right_pane != RightPane::Preview => {
+                self.right_pane = RightPane::Preview;
+            }
             _ => {}
         }
         None
@@ -1372,10 +1377,19 @@ impl App {
                 match latin_code(key.code) {
                     KeyCode::Esc => {
                         if ns.anchor.is_some() {
-                            ns.anchor = None; // first esc clears selection
+                            ns.anchor = None; // first esc clears the selection
                             self.mode = Mode::Note(ns);
+                        } else {
+                            // Fully exit: drop focus AND the note pane, back to the
+                            // live preview (mode is already List from the replace).
+                            self.right_pane = RightPane::Preview;
                         }
-                        // else: leave Mode::List (exits focus)
+                        return None;
+                    }
+                    KeyCode::Tab => {
+                        // Defocus back to the list but keep the note shown, so the
+                        // user can move the selection (or t/T) and Tab back in to a
+                        // different note. Mode is already List from the replace.
                         return None;
                     }
                     KeyCode::Char('j') | KeyCode::Down => {
@@ -3012,10 +3026,29 @@ mod tests {
     }
 
     #[test]
-    fn esc_exits_to_list() {
+    fn esc_from_render_exits_to_preview() {
         let mut app = note_app_with("- [ ] a");
+        app.right_pane = RightPane::Inbox;
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        assert!(matches!(app.mode, Mode::List));
+        assert!(matches!(app.mode, Mode::List), "focus dropped");
+        assert_eq!(app.right_pane, RightPane::Preview, "pane closed to preview");
+    }
+
+    #[test]
+    fn tab_defocuses_but_keeps_note_pane() {
+        let mut app = note_app_with("- [ ] a");
+        app.right_pane = RightPane::Inbox;
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert!(matches!(app.mode, Mode::List), "focus dropped");
+        assert_eq!(app.right_pane, RightPane::Inbox, "note still shown after defocus");
+    }
+
+    #[test]
+    fn esc_in_browse_closes_pane_to_preview() {
+        let mut app = app_with(vec![at("s", "/p")]);
+        app.right_pane = RightPane::SessionNote; // unfocused browse
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.right_pane, RightPane::Preview);
     }
 
     #[test]

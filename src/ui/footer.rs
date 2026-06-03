@@ -67,7 +67,8 @@ fn items_for(mode: &Mode) -> Vec<Item> {
                 ("y", "copy", false),
                 ("e", "edit", false),
                 ("c", "clear", false),
-                ("esc", "back", false),
+                ("tab", "defocus", false),
+                ("esc", "exit", false),
             ],
         },
     }
