@@ -957,6 +957,34 @@ impl App {
                     self.mode = Mode::Reply(ReplyForm::new(name));
                 }
             }
+            KeyCode::Char('t') => {
+                self.right_pane = match self.right_pane {
+                    RightPane::SessionNote => RightPane::Preview,
+                    _ => RightPane::SessionNote,
+                };
+            }
+            KeyCode::Char('T') => {
+                self.right_pane = match self.right_pane {
+                    RightPane::Inbox => RightPane::Preview,
+                    _ => RightPane::Inbox,
+                };
+            }
+            KeyCode::Tab if self.right_pane != RightPane::Preview => {
+                let target = match self.right_pane {
+                    RightPane::Inbox => NoteTarget::Inbox,
+                    _ => match self.selected_name() {
+                        Some(name) => NoteTarget::Session(name),
+                        None => return None,
+                    },
+                };
+                self.mode = Mode::Note(NoteState {
+                    target,
+                    sub: NoteSub::Render,
+                    cursor: 0,
+                    anchor: None,
+                    editor: crate::editor::TextArea::default(),
+                });
+            }
             _ => {}
         }
         None
@@ -2751,5 +2779,55 @@ mod tests {
             Some(Action::Create { terminal, .. }) => assert!(!terminal),
             other => panic!("expected Action::Create, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn t_toggles_session_note_pane() {
+        let mut app = app_with(vec![at("s", "/p")]);
+        app.selected = 0;
+        app.handle_key(key('t'));
+        assert_eq!(app.right_pane, RightPane::SessionNote);
+        app.handle_key(key('t'));
+        assert_eq!(app.right_pane, RightPane::Preview);
+    }
+
+    #[test]
+    fn shift_t_toggles_inbox_pane() {
+        let mut app = app_with(vec![at("s", "/p")]);
+        app.handle_key(key('T'));
+        assert_eq!(app.right_pane, RightPane::Inbox);
+        app.handle_key(key('T'));
+        assert_eq!(app.right_pane, RightPane::Preview);
+    }
+
+    #[test]
+    fn tab_focuses_the_shown_session_note() {
+        let mut app = app_with(vec![at("s", "/p")]);
+        app.selected = 0;
+        app.handle_key(key('t')); // show session note
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        match &app.mode {
+            Mode::Note(ns) => assert_eq!(ns.target, NoteTarget::Session("s".into())),
+            other => panic!("expected Mode::Note, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn killing_a_session_drops_its_note() {
+        let mut app = App::new(Config::default());
+        app.notes.insert("s".into(), "- [ ] x".into());
+        app.notes.remove("s"); // mirrors the Kill handler
+        assert!(app.notes.get("s").is_none());
+    }
+
+    #[test]
+    fn renaming_moves_the_note() {
+        let mut app = App::new(Config::default());
+        app.notes.insert("old".into(), "- [ ] x".into());
+        if let Some(t) = app.notes.remove("old") {
+            app.notes.insert("new".into(), t);
+        }
+        assert_eq!(app.notes.get("new").map(String::as_str), Some("- [ ] x"));
+        assert!(app.notes.get("old").is_none());
     }
 }

@@ -267,16 +267,25 @@ fn handle_action(terminal: &mut Term, app: &mut App, action: Action) -> io::Resu
             };
             if let Err(e) = tmux::kill_session(&name) {
                 app.error = Some(e.to_string());
-            } else if let Some((repo, path)) = wt {
-                if let Err(e) = am::git::remove_worktree(&repo, &path) {
-                    app.error = Some(format!("session killed, worktree not removed: {e}"));
+            } else {
+                if let Some((repo, path)) = wt {
+                    if let Err(e) = am::git::remove_worktree(&repo, &path) {
+                        app.error = Some(format!("session killed, worktree not removed: {e}"));
+                    }
                 }
+                app.notes.remove(&name);
+                app.dirty = true;
             }
             app.refresh();
         }
         Action::Rename { old, new } => {
             if let Err(e) = tmux::rename_session(&old, &new) {
                 app.error = Some(e.to_string());
+            } else {
+                if let Some(text) = app.notes.remove(&old) {
+                    app.notes.insert(new.clone(), text);
+                    app.dirty = true;
+                }
             }
             app.refresh();
         }
