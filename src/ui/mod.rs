@@ -84,7 +84,7 @@ fn draw_reply_modal(f: &mut Frame, form: &ReplyForm) {
     };
 
     let width = text_area.width as usize;
-    let chars: Vec<char> = form.buffer.chars().collect();
+    let chars: Vec<char> = form.area.buffer.chars().collect();
 
     if chars.is_empty() {
         f.render_widget(
@@ -96,7 +96,7 @@ fn draw_reply_modal(f: &mut Frame, form: &ReplyForm) {
         );
     } else {
         let rows = wrap_rows(&chars, width);
-        let (crow, _) = cursor_rowcol(&rows, form.cursor);
+        let (crow, _) = cursor_rowcol(&rows, form.area.cursor);
         // Scroll vertically so the cursor row stays on screen.
         let visible = text_h as usize;
         let scroll = if crow >= visible {
@@ -115,7 +115,7 @@ fn draw_reply_modal(f: &mut Frame, form: &ReplyForm) {
 
     // Place the hardware cursor (works for the empty buffer too: row 0, col 0).
     let rows = wrap_rows(&chars, width);
-    let (crow, ccol) = cursor_rowcol(&rows, form.cursor);
+    let (crow, ccol) = cursor_rowcol(&rows, form.area.cursor);
     let visible = text_h as usize;
     let scroll = if crow >= visible {
         crow - visible + 1
@@ -130,9 +130,9 @@ fn draw_reply_modal(f: &mut Frame, form: &ReplyForm) {
 
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            hint_key("↵"),
+            hint_key("enter"),
             hint_label(" send   "),
-            hint_key("⇧↵"),
+            hint_key("shift+enter"),
             hint_label(" newline   "),
             hint_key("esc"),
             hint_label(" cancel"),

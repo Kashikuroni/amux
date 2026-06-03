@@ -293,156 +293,74 @@ pub struct KillForm {
 
 /// Free-text reply being composed for a specific session.
 ///
-/// `cursor` is a *character* index into `buffer` (0..=char_count), so editing
-/// stays correct with multi-byte input (e.g. Cyrillic). All byte offsets are
-/// derived from it on demand.
+/// Editing is delegated to [`crate::editor::TextArea`] which holds the buffer
+/// and character-indexed cursor.
 #[derive(Debug, Clone)]
 pub struct ReplyForm {
     pub name: String,
-    pub buffer: String,
-    pub cursor: usize,
+    pub area: crate::editor::TextArea,
 }
 
 impl ReplyForm {
     fn new(name: String) -> Self {
         Self {
             name,
-            buffer: String::new(),
-            cursor: 0,
+            area: crate::editor::TextArea::default(),
         }
     }
 
-    fn char_count(&self) -> usize {
-        self.buffer.chars().count()
+    pub fn insert_char(&mut self, c: char) {
+        self.area.insert_char(c)
     }
 
-    /// Byte offset of character `idx` (or end of buffer if out of range).
-    fn byte_at(&self, idx: usize) -> usize {
-        self.buffer
-            .char_indices()
-            .nth(idx)
-            .map(|(b, _)| b)
-            .unwrap_or(self.buffer.len())
+    pub fn insert_str(&mut self, s: &str) {
+        self.area.insert_str(s)
     }
 
-    fn insert_char(&mut self, c: char) {
-        let b = self.byte_at(self.cursor);
-        self.buffer.insert(b, c);
-        self.cursor += 1;
+    pub fn backspace(&mut self) {
+        self.area.backspace()
     }
 
-    fn insert_str(&mut self, s: &str) {
-        let b = self.byte_at(self.cursor);
-        self.buffer.insert_str(b, s);
-        self.cursor += s.chars().count();
+    pub fn delete(&mut self) {
+        self.area.delete()
     }
 
-    fn backspace(&mut self) {
-        if self.cursor == 0 {
-            return;
-        }
-        let b = self.byte_at(self.cursor - 1);
-        self.buffer.remove(b);
-        self.cursor -= 1;
+    pub fn left(&mut self) {
+        self.area.left()
     }
 
-    fn delete(&mut self) {
-        if self.cursor >= self.char_count() {
-            return;
-        }
-        let b = self.byte_at(self.cursor);
-        self.buffer.remove(b);
+    pub fn right(&mut self) {
+        self.area.right()
     }
 
-    fn left(&mut self) {
-        self.cursor = self.cursor.saturating_sub(1);
+    pub fn home(&mut self) {
+        self.area.home()
     }
 
-    fn right(&mut self) {
-        if self.cursor < self.char_count() {
-            self.cursor += 1;
-        }
+    pub fn end(&mut self) {
+        self.area.end()
     }
 
-    /// Start/end character index of the logical line the cursor sits on.
+    pub fn up(&mut self) {
+        self.area.up()
+    }
+
+    pub fn down(&mut self) {
+        self.area.down()
+    }
+
+    pub fn delete_word(&mut self) {
+        self.area.delete_word()
+    }
+
+    pub fn delete_to_line_start(&mut self) {
+        self.area.delete_to_line_start()
+    }
+
+    /// Delegates to `TextArea::line_bounds` for tests within this module.
+    #[cfg(test)]
     fn line_bounds(&self) -> (usize, usize) {
-        let chars: Vec<char> = self.buffer.chars().collect();
-        let mut start = self.cursor.min(chars.len());
-        while start > 0 && chars[start - 1] != '\n' {
-            start -= 1;
-        }
-        let mut end = self.cursor.min(chars.len());
-        while end < chars.len() && chars[end] != '\n' {
-            end += 1;
-        }
-        (start, end)
-    }
-
-    fn home(&mut self) {
-        self.cursor = self.line_bounds().0;
-    }
-
-    fn end(&mut self) {
-        self.cursor = self.line_bounds().1;
-    }
-
-    /// Move up one logical line, preserving the column where possible.
-    fn up(&mut self) {
-        let chars: Vec<char> = self.buffer.chars().collect();
-        let (start, _) = self.line_bounds();
-        if start == 0 {
-            self.cursor = 0;
-            return;
-        }
-        let col = self.cursor - start;
-        let prev_end = start - 1; // the '\n'
-        let mut prev_start = prev_end;
-        while prev_start > 0 && chars[prev_start - 1] != '\n' {
-            prev_start -= 1;
-        }
-        let prev_len = prev_end - prev_start;
-        self.cursor = prev_start + col.min(prev_len);
-    }
-
-    /// Move down one logical line, preserving the column where possible.
-    fn down(&mut self) {
-        let chars: Vec<char> = self.buffer.chars().collect();
-        let (start, end) = self.line_bounds();
-        if end >= chars.len() {
-            self.cursor = chars.len();
-            return;
-        }
-        let col = self.cursor - start;
-        let next_start = end + 1;
-        let mut next_end = next_start;
-        while next_end < chars.len() && chars[next_end] != '\n' {
-            next_end += 1;
-        }
-        let next_len = next_end - next_start;
-        self.cursor = next_start + col.min(next_len);
-    }
-
-    /// Delete the word (and any trailing spaces) before the cursor (Ctrl+W).
-    fn delete_word(&mut self) {
-        let chars: Vec<char> = self.buffer.chars().collect();
-        let mut i = self.cursor;
-        while i > 0 && chars[i - 1] == ' ' {
-            i -= 1;
-        }
-        while i > 0 && chars[i - 1] != ' ' && chars[i - 1] != '\n' {
-            i -= 1;
-        }
-        let (sb, eb) = (self.byte_at(i), self.byte_at(self.cursor));
-        self.buffer.replace_range(sb..eb, "");
-        self.cursor = i;
-    }
-
-    /// Delete from the start of the current line to the cursor (Ctrl+U).
-    fn delete_to_line_start(&mut self) {
-        let (start, _) = self.line_bounds();
-        let (sb, eb) = (self.byte_at(start), self.byte_at(self.cursor));
-        self.buffer.replace_range(sb..eb, "");
-        self.cursor = start;
+        self.area.line_bounds()
     }
 }
 
@@ -1052,7 +970,7 @@ impl App {
             KeyCode::Char(c) if !ctrl => form.insert_char(c),
             // Plain Enter sends the composed message.
             KeyCode::Enter => {
-                let text = form.buffer.trim().to_string();
+                let text = form.area.buffer.trim().to_string();
                 if text.is_empty() {
                     return None;
                 }
@@ -2533,19 +2451,19 @@ mod tests {
         for c in "привет".chars() {
             f.insert_char(c);
         }
-        assert_eq!(f.buffer, "привет");
-        assert_eq!(f.cursor, 6);
+        assert_eq!(f.area.buffer, "привет");
+        assert_eq!(f.area.cursor, 6);
         // Move into the middle and insert (cursor lands before "е").
         f.left();
         f.left();
         f.insert_char('Х');
-        assert_eq!(f.buffer, "привХет");
+        assert_eq!(f.area.buffer, "привХет");
         // Backspace removes the char we just inserted.
         f.backspace();
-        assert_eq!(f.buffer, "привет");
+        assert_eq!(f.area.buffer, "привет");
         // Delete (forward) removes "е".
         f.delete();
-        assert_eq!(f.buffer, "привт");
+        assert_eq!(f.area.buffer, "привт");
     }
 
     #[test]
@@ -2553,10 +2471,10 @@ mod tests {
         let mut f = ReplyForm::new("s".into());
         f.insert_str("hello world foo");
         f.delete_word();
-        assert_eq!(f.buffer, "hello world ");
+        assert_eq!(f.area.buffer, "hello world ");
         f.delete_to_line_start();
-        assert_eq!(f.buffer, "");
-        assert_eq!(f.cursor, 0);
+        assert_eq!(f.area.buffer, "");
+        assert_eq!(f.area.cursor, 0);
     }
 
     #[test]
@@ -2564,17 +2482,17 @@ mod tests {
         let mut f = ReplyForm::new("s".into());
         f.insert_str("abcd\nef\nghij");
         // cursor at end (line "ghij", col 4)
-        assert_eq!(f.cursor, 12);
+        assert_eq!(f.area.cursor, 12);
         f.up(); // onto "ef" (len 2) → column clamps to 2
         let (start, _) = f.line_bounds();
-        assert_eq!(f.cursor - start, 2);
+        assert_eq!(f.area.cursor - start, 2);
         f.up(); // onto "abcd", same column 2
         let (start, _) = f.line_bounds();
-        assert_eq!(f.cursor - start, 2);
+        assert_eq!(f.area.cursor - start, 2);
         f.home();
-        assert_eq!(f.cursor, 0);
+        assert_eq!(f.area.cursor, 0);
         f.end();
-        assert_eq!(f.cursor, 4); // end of first logical line, before '\n'
+        assert_eq!(f.area.cursor, 4); // end of first logical line, before '\n'
     }
 
     #[test]
