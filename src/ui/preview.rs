@@ -8,7 +8,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::Frame;
 
-fn is_claude(agent: &str) -> bool {
+pub(crate) fn is_claude(agent: &str) -> bool {
     agent.split_whitespace().next() == Some("claude")
 }
 
@@ -45,6 +45,8 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         Vec::new()
     };
     if !right.is_empty() {
+        // chars().count() assumes every character occupies one terminal column —
+        // valid here because all span content is ASCII / single-glyph.
         let left_width: usize = title_spans
             .iter()
             .map(|s| s.content.chars().count())
