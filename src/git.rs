@@ -144,6 +144,69 @@ pub fn add_worktree(
     )
 }
 
+/// True if a *local* branch named `branch` already exists in the repo.
+pub fn branch_exists(dir: &str, branch: &str) -> bool {
+    git_out(
+        dir,
+        &["show-ref", "--verify", "--quiet", &format!("refs/heads/{branch}")],
+    )
+    .is_some()
+}
+
+/// True if `wt_path` is currently registered as a worktree of this repo.
+/// Paths are compared canonicalized so symlinked temp dirs (e.g. macOS
+/// `/var` → `/private/var`) and trailing-slash differences don't cause misses.
+pub fn is_registered_worktree(repo_root: &str, wt_path: &str) -> bool {
+    let canon = |p: &str| {
+        std::fs::canonicalize(p)
+            .map(|c| c.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| p.trim_end_matches('/').to_string())
+    };
+    let Some(out) = git_out(repo_root, &["worktree", "list", "--porcelain"]) else {
+        return false;
+    };
+    let target = canon(wt_path);
+    out.lines()
+        .filter_map(|l| l.strip_prefix("worktree "))
+        .any(|p| canon(p) == target)
+}
+
+/// Prepares a worktree at `wt_path` on a *new* branch `new_branch` forked from
+/// `base`, then leaves a checked-out worktree there. Unlike the bare
+/// [`add_worktree`], this resolves the two states that otherwise make
+/// `git worktree add` fail with a cryptic error and silently abort session
+/// creation:
+///
+/// - **Branch already taken** → returns a clear, user-facing error asking for a
+///   different name (we never silently reuse or mutate an existing branch).
+/// - **Leftover directory from a dead worktree** → prunes stale metadata and, if
+///   the path is no longer a registered worktree, removes the orphaned directory
+///   so creation can proceed. (An empty leftover dir is reused by git as-is.)
+pub fn prepare_worktree(
+    repo_root: &str,
+    wt_path: &str,
+    new_branch: &str,
+    base: &str,
+) -> std::io::Result<()> {
+    if branch_exists(repo_root, new_branch) {
+        return Err(std::io::Error::other(format!(
+            "branch '{new_branch}' already exists — pick another name"
+        )));
+    }
+    // Drop admin entries for worktrees whose directories are gone (best-effort).
+    let _ = git_run(repo_root, &["worktree", "prune"]);
+    // A non-empty directory at the target path blocks `git worktree add`. If git
+    // no longer tracks it as a worktree, it's an orphan we can safely clear.
+    let path = std::path::Path::new(wt_path);
+    let non_empty = std::fs::read_dir(path)
+        .map(|mut it| it.next().is_some())
+        .unwrap_or(false);
+    if non_empty && !is_registered_worktree(repo_root, wt_path) {
+        std::fs::remove_dir_all(path)?;
+    }
+    add_worktree(repo_root, wt_path, new_branch, base)
+}
+
 /// Removes the worktree at `wt_path`. No `--force`: a dirty worktree errors
 /// instead of silently discarding work. The branch itself is left intact.
 pub fn remove_worktree(repo_root: &str, wt_path: &str) -> std::io::Result<()> {
@@ -298,6 +361,101 @@ mod tests {
 
         remove_worktree(root, wt_s).expect("remove");
         assert!(!wt.exists(), "worktree dir gone after remove");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn branch_exists_detects_local_branch() {
+        if Command::new("git").arg("--version").output().is_err() {
+            return;
+        }
+        let dir = temp_repo("branchexists");
+        let root = dir.to_str().unwrap();
+        assert!(branch_exists(root, "main"), "main must exist");
+        assert!(!branch_exists(root, "nope"), "missing branch is false");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn is_registered_worktree_tracks_live_worktree() {
+        if Command::new("git").arg("--version").output().is_err() {
+            return;
+        }
+        let dir = temp_repo("wtreg");
+        let root = dir.to_str().unwrap();
+        let wt = dir.join(".worktrees").join("live");
+        let wt_s = wt.to_str().unwrap();
+        add_worktree(root, wt_s, "live", "main").expect("add");
+        assert!(
+            is_registered_worktree(root, wt_s),
+            "a checked-out worktree must be recognized"
+        );
+        let ghost = dir.join(".worktrees").join("ghost");
+        assert!(
+            !is_registered_worktree(root, ghost.to_str().unwrap()),
+            "an unknown path is not a registered worktree"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prepare_worktree_rejects_existing_branch_clearly() {
+        if Command::new("git").arg("--version").output().is_err() {
+            return;
+        }
+        let dir = temp_repo("prepdup");
+        let root = dir.to_str().unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["branch", "dup"])
+            .output()
+            .unwrap();
+        let wt = dir.join(".worktrees").join("dup");
+        let err = prepare_worktree(root, wt.to_str().unwrap(), "dup", "main")
+            .expect_err("existing branch must error");
+        assert!(
+            err.to_string().contains("already exists"),
+            "message must mention the branch already exists, got: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prepare_worktree_clears_orphan_dir_and_creates() {
+        if Command::new("git").arg("--version").output().is_err() {
+            return;
+        }
+        let dir = temp_repo("preporphan");
+        let root = dir.to_str().unwrap();
+        // Leftover NON-EMPTY directory from a dead worktree, branch does NOT exist.
+        let wt = dir.join(".worktrees").join("feat");
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::write(wt.join("stale.txt"), "junk").unwrap();
+
+        prepare_worktree(root, wt.to_str().unwrap(), "feat", "main")
+            .expect("orphan dir must be cleared and worktree created");
+
+        assert!(wt.join("f.txt").exists(), "base content checked out");
+        assert!(!wt.join("stale.txt").exists(), "stale leftover removed");
+        assert!(branch_exists(root, "feat"), "new branch created");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prepare_worktree_reuses_empty_leftover_dir() {
+        if Command::new("git").arg("--version").output().is_err() {
+            return;
+        }
+        let dir = temp_repo("prepempty");
+        let root = dir.to_str().unwrap();
+        // Empty leftover dir (the exact real-world state we observed).
+        let wt = dir.join(".worktrees").join("feat");
+        std::fs::create_dir_all(&wt).unwrap();
+
+        prepare_worktree(root, wt.to_str().unwrap(), "feat", "main")
+            .expect("empty leftover dir must not block creation");
+        assert!(wt.join("f.txt").exists(), "base content checked out");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
