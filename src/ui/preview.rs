@@ -8,6 +8,10 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::Frame;
 
+fn is_claude(agent: &str) -> bool {
+    agent.split_whitespace().next() == Some("claude")
+}
+
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let rows = Layout::vertical([
         Constraint::Length(1), // ▸ title          age
@@ -23,17 +27,36 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         .map(|s| timeutil::humanize_age(app.now_unix - s.created))
         .unwrap_or_default();
 
-    f.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                format!("{} ", th::PREVIEW_MARK),
-                Style::default().fg(th::AMBER),
-            ),
-            Span::styled(title.to_string(), Style::default().fg(th::TEXT_BOLD)),
-            Span::styled(format!("    {age}"), Style::default().fg(th::DIM)),
-        ])),
-        rows[0],
-    );
+    let mut title_spans = vec![
+        Span::styled(
+            format!("{} ", th::PREVIEW_MARK),
+            Style::default().fg(th::AMBER),
+        ),
+        Span::styled(title.to_string(), Style::default().fg(th::TEXT_BOLD)),
+        Span::styled(format!("    {age}"), Style::default().fg(th::DIM)),
+    ];
+    let right = if sel.is_some_and(|s| is_claude(&s.agent)) {
+        crate::usage::account_right_spans(
+            app.usage.as_ref(),
+            app.plan.as_deref(),
+            app.usage_error.as_deref(),
+        )
+    } else {
+        Vec::new()
+    };
+    if !right.is_empty() {
+        let left_width: usize = title_spans
+            .iter()
+            .map(|s| s.content.chars().count())
+            .sum();
+        let right_width: usize = right.iter().map(|s| s.content.chars().count()).sum();
+        let pad = (rows[0].width as usize)
+            .saturating_sub(left_width + right_width)
+            .max(1);
+        title_spans.push(Span::raw(" ".repeat(pad)));
+        title_spans.extend(right);
+    }
+    f.render_widget(Paragraph::new(Line::from(title_spans)), rows[0]);
 
     let mut sub = vec![Span::styled(
         sel.map(|s| collapse_home(&s.dir)).unwrap_or_default(),
@@ -151,6 +174,120 @@ mod tests {
         t.draw(|f| render(f, f.area(), &app)).unwrap();
         let s = buf_to_string(t.backend().buffer());
         assert!(s.contains("zzz"), "wrapped tail must be visible:\n{s}");
+    }
+
+    #[test]
+    fn preview_shows_limits_for_claude_session() {
+        use crate::usage::{Usage, Window};
+        let mut app = App::new(Config::default());
+        app.sessions = vec![Session {
+            name: "work".into(),
+            dir: "~/work".into(),
+            created: 0,
+            agent: "claude".into(),
+            status: crate::tmux::Status::Idle,
+            attached: false,
+            git: None,
+            worktree_repo: None,
+        }];
+        app.usage = Some(Usage {
+            five_hour: Some(Window {
+                utilization: 77.0,
+                reset_unix: None,
+                reset_hhmm: None,
+            }),
+            seven_day: None,
+            seven_day_sonnet: None,
+        });
+        let mut t = Terminal::new(TestBackend::new(80, 10)).unwrap();
+        t.draw(|f| render(f, f.area(), &app)).unwrap();
+        // Only the title row (row 0) should contain the percentage.
+        let row0 = buf_to_string(t.backend().buffer())
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_string();
+        assert!(row0.contains("77%"), "limits must appear in title row:\n{row0}");
+    }
+
+    #[test]
+    fn preview_shows_limits_for_claude_with_flags() {
+        // "claude --dangerously-skip-permissions" must still match is_claude().
+        use crate::usage::{Usage, Window};
+        let mut app = App::new(Config::default());
+        app.sessions = vec![Session {
+            name: "work".into(),
+            dir: "~/work".into(),
+            created: 0,
+            agent: "claude --dangerously-skip-permissions".into(),
+            status: crate::tmux::Status::Idle,
+            attached: false,
+            git: None,
+            worktree_repo: None,
+        }];
+        app.usage = Some(Usage {
+            five_hour: Some(Window { utilization: 50.0, reset_unix: None, reset_hhmm: None }),
+            seven_day: None,
+            seven_day_sonnet: None,
+        });
+        let mut t = Terminal::new(TestBackend::new(80, 10)).unwrap();
+        t.draw(|f| render(f, f.area(), &app)).unwrap();
+        let row0 = buf_to_string(t.backend().buffer())
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_string();
+        assert!(row0.contains("50%"), "claude with flags must show limits:\n{row0}");
+    }
+
+    #[test]
+    fn preview_hides_limits_for_non_claude_session() {
+        use crate::usage::{Usage, Window};
+        let mut app = App::new(Config::default());
+        app.sessions = vec![Session {
+            name: "work".into(),
+            dir: "~/work".into(),
+            created: 0,
+            agent: "codex".into(),
+            status: crate::tmux::Status::Idle,
+            attached: false,
+            git: None,
+            worktree_repo: None,
+        }];
+        app.usage = Some(Usage {
+            five_hour: Some(Window { utilization: 77.0, reset_unix: None, reset_hhmm: None }),
+            seven_day: None,
+            seven_day_sonnet: None,
+        });
+        let mut t = Terminal::new(TestBackend::new(80, 10)).unwrap();
+        t.draw(|f| render(f, f.area(), &app)).unwrap();
+        let s = buf_to_string(t.backend().buffer());
+        assert!(!s.contains('%'), "non-claude session must not show limits:\n{s}");
+    }
+
+    #[test]
+    fn preview_hides_limits_for_terminal_session() {
+        use crate::usage::{Usage, Window};
+        let mut app = App::new(Config::default());
+        app.sessions = vec![Session {
+            name: "shell".into(),
+            dir: "~/work".into(),
+            created: 0,
+            agent: "$SHELL".into(),
+            status: crate::tmux::Status::Idle,
+            attached: false,
+            git: None,
+            worktree_repo: None,
+        }];
+        app.usage = Some(Usage {
+            five_hour: Some(Window { utilization: 50.0, reset_unix: None, reset_hhmm: None }),
+            seven_day: None,
+            seven_day_sonnet: None,
+        });
+        let mut t = Terminal::new(TestBackend::new(80, 10)).unwrap();
+        t.draw(|f| render(f, f.area(), &app)).unwrap();
+        let s = buf_to_string(t.backend().buffer());
+        assert!(!s.contains('%'), "terminal session must not show limits:\n{s}");
     }
 
     #[test]
