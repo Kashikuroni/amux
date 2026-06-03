@@ -29,6 +29,7 @@ pub fn render(f: &mut Frame) {
                 ("R", "rename project"),
                 ("shift+tab", "agent mode"),
                 ("J/K", "reorder (project on edge)"),
+                ("u", "restart all Claude sessions"),
             ],
         ),
         (
@@ -116,6 +117,7 @@ mod tests {
             s.contains("quit (sessions stay)"),
             "bottom group clipped:\n{s}"
         );
+        assert!(s.contains("restart"), "missing u/restart entry:\n{s}");
         // No modifier-key glyphs leak in (arrows are intentionally kept).
         for glyph in ["⇧", "⇥", "↵", "^"] {
             assert!(!s.contains(glyph), "stale key glyph {glyph}:\n{s}");
