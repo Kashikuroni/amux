@@ -62,7 +62,6 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     );
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -92,6 +91,9 @@ mod tests {
         t.draw(|f| render(f, f.area(), &app)).unwrap();
         let s = buf_to_string(t.backend().buffer());
         assert!(!s.contains('%'), "header must not show a percentage:\n{s}");
-        assert!(!s.contains("Max 5×"), "plan badge must not appear in header:\n{s}");
+        assert!(
+            !s.contains("Max 5×"),
+            "plan badge must not appear in header:\n{s}"
+        );
     }
 }

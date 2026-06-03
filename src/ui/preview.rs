@@ -47,10 +47,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     if !right.is_empty() {
         // chars().count() assumes every character occupies one terminal column —
         // valid here because all span content is ASCII / single-glyph.
-        let left_width: usize = title_spans
-            .iter()
-            .map(|s| s.content.chars().count())
-            .sum();
+        let left_width: usize = title_spans.iter().map(|s| s.content.chars().count()).sum();
         let right_width: usize = right.iter().map(|s| s.content.chars().count()).sum();
         let pad = (rows[0].width as usize)
             .saturating_sub(left_width + right_width)
@@ -209,7 +206,10 @@ mod tests {
             .next()
             .unwrap_or_default()
             .to_string();
-        assert!(row0.contains("77%"), "limits must appear in title row:\n{row0}");
+        assert!(
+            row0.contains("77%"),
+            "limits must appear in title row:\n{row0}"
+        );
     }
 
     #[test]
@@ -228,7 +228,11 @@ mod tests {
             worktree_repo: None,
         }];
         app.usage = Some(Usage {
-            five_hour: Some(Window { utilization: 50.0, reset_unix: None, reset_hhmm: None }),
+            five_hour: Some(Window {
+                utilization: 50.0,
+                reset_unix: None,
+                reset_hhmm: None,
+            }),
             seven_day: None,
             seven_day_sonnet: None,
         });
@@ -239,7 +243,10 @@ mod tests {
             .next()
             .unwrap_or_default()
             .to_string();
-        assert!(row0.contains("50%"), "claude with flags must show limits:\n{row0}");
+        assert!(
+            row0.contains("50%"),
+            "claude with flags must show limits:\n{row0}"
+        );
     }
 
     #[test]
@@ -257,14 +264,21 @@ mod tests {
             worktree_repo: None,
         }];
         app.usage = Some(Usage {
-            five_hour: Some(Window { utilization: 77.0, reset_unix: None, reset_hhmm: None }),
+            five_hour: Some(Window {
+                utilization: 77.0,
+                reset_unix: None,
+                reset_hhmm: None,
+            }),
             seven_day: None,
             seven_day_sonnet: None,
         });
         let mut t = Terminal::new(TestBackend::new(80, 10)).unwrap();
         t.draw(|f| render(f, f.area(), &app)).unwrap();
         let s = buf_to_string(t.backend().buffer());
-        assert!(!s.contains('%'), "non-claude session must not show limits:\n{s}");
+        assert!(
+            !s.contains('%'),
+            "non-claude session must not show limits:\n{s}"
+        );
     }
 
     #[test]
@@ -282,14 +296,21 @@ mod tests {
             worktree_repo: None,
         }];
         app.usage = Some(Usage {
-            five_hour: Some(Window { utilization: 50.0, reset_unix: None, reset_hhmm: None }),
+            five_hour: Some(Window {
+                utilization: 50.0,
+                reset_unix: None,
+                reset_hhmm: None,
+            }),
             seven_day: None,
             seven_day_sonnet: None,
         });
         let mut t = Terminal::new(TestBackend::new(80, 10)).unwrap();
         t.draw(|f| render(f, f.area(), &app)).unwrap();
         let s = buf_to_string(t.backend().buffer());
-        assert!(!s.contains('%'), "terminal session must not show limits:\n{s}");
+        assert!(
+            !s.contains('%'),
+            "terminal session must not show limits:\n{s}"
+        );
     }
 
     #[test]

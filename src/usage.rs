@@ -64,7 +64,11 @@ fn pct_color(p: i64) -> Color {
     }
 }
 
-pub(crate) fn limit_spans(label: &str, window: Option<&Window>, show_reset: bool) -> Vec<Span<'static>> {
+pub(crate) fn limit_spans(
+    label: &str,
+    window: Option<&Window>,
+    show_reset: bool,
+) -> Vec<Span<'static>> {
     let Some(w) = window else {
         return Vec::new();
     };

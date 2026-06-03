@@ -830,9 +830,15 @@ mod tests {
         t.draw(|f| render(f, f.area(), &app)).unwrap();
         let buf = t.backend().buffer();
         let s = buf_to_string(buf);
-        assert!(s.contains("restarting"), "expected 'restarting' label:\n{s}");
+        assert!(
+            s.contains("restarting"),
+            "expected 'restarting' label:\n{s}"
+        );
         // Must NOT show the normal Running status label.
-        assert!(!s.contains(" running"), "must not show 'running' while restarting:\n{s}");
+        assert!(
+            !s.contains(" running"),
+            "must not show 'running' while restarting:\n{s}"
+        );
         assert_eq!(
             glyph_fg(buf, crate::spinner::glyph(0), 1),
             Some(Color::Yellow),
@@ -848,7 +854,13 @@ mod tests {
         let mut t = Terminal::new(TestBackend::new(60, 8)).unwrap();
         t.draw(|f| render(f, f.area(), &app)).unwrap();
         let s = buf_to_string(t.backend().buffer());
-        assert!(s.contains("running"), "expected normal 'running' label:\n{s}");
-        assert!(!s.contains("restarting"), "must not show 'restarting':\n{s}");
+        assert!(
+            s.contains("running"),
+            "expected normal 'running' label:\n{s}"
+        );
+        assert!(
+            !s.contains("restarting"),
+            "must not show 'restarting':\n{s}"
+        );
     }
 }

@@ -63,7 +63,11 @@ mod tests {
         assert_eq!(cfg.default_agent, "claude");
         assert_eq!(
             cfg.agent_presets,
-            vec!["claude".to_string(), "codex".to_string(), "opencode".to_string()]
+            vec![
+                "claude".to_string(),
+                "codex".to_string(),
+                "opencode".to_string()
+            ]
         );
     }
 
