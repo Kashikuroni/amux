@@ -44,18 +44,30 @@ fn card(
     num: usize,
     done: u32,
     total: u32,
+    restarting: bool,
 ) -> ListItem<'static> {
     // Line 1: badge name ........... status. The status is pushed to the far
     // right so it sits in the card's top-right corner and catches the eye.
     // running/idle/waiting are told apart by glyph (spinner / pause / dot) + color.
-    let (status_glyph, status_label, status_color) = match s.status {
-        Status::Running => (
+    // A restarting session overrides its tmux-derived status: the card shows a
+    // yellow spinner + "restarting" until the resume command is sent (or the
+    // 30 s timeout clears it).
+    let (status_glyph, status_label, status_color) = if restarting {
+        (
             spinner::glyph(spinner_frame).to_string(),
-            "running",
-            Color::Blue,
-        ),
-        Status::Idle => (th::IDLE_MARK.to_string(), "idle", Color::Red),
-        Status::Waiting => (th::WAIT_MARK.to_string(), "waiting", INDIGO),
+            "restarting",
+            Color::Yellow,
+        )
+    } else {
+        match s.status {
+            Status::Running => (
+                spinner::glyph(spinner_frame).to_string(),
+                "running",
+                Color::Blue,
+            ),
+            Status::Idle => (th::IDLE_MARK.to_string(), "idle", Color::Red),
+            Status::Waiting => (th::WAIT_MARK.to_string(), "waiting", INDIGO),
+        }
     };
     // Always solid bold (no DIM): the status should read at full strength whether
     // or not the row is selected.
@@ -357,6 +369,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             .get(&s.name)
             .map(|t| crate::note::counts(t))
             .unwrap_or((0, 0));
+        let restarting = app.restarting.contains_key(&s.name);
         items.push(card(
             s,
             app.spinner_frame,
@@ -366,6 +379,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             pos + 1,
             done,
             total,
+            restarting,
         ));
     }
 
@@ -805,5 +819,31 @@ mod tests {
             .expect("status 'idle' not found");
         let col = row.find("idle").unwrap();
         assert!(col > 20, "status not right-aligned (col {col}):\n{row}");
+    }
+
+    #[test]
+    fn restarting_card_shows_yellow_restarting_label() {
+        let mut app = App::new(Config::default());
+        app.sessions = vec![sess("proj", Status::Running, None)];
+        app.restarting.insert("proj".into(), 0);
+        let mut t = Terminal::new(TestBackend::new(60, 8)).unwrap();
+        t.draw(|f| render(f, f.area(), &app)).unwrap();
+        let buf = t.backend().buffer();
+        let s = buf_to_string(buf);
+        assert!(s.contains("restarting"), "expected 'restarting' label:\n{s}");
+        // Must NOT show the normal Running status label.
+        assert!(!s.contains(" running"), "must not show 'running' while restarting:\n{s}");
+    }
+
+    #[test]
+    fn non_restarting_card_shows_normal_status() {
+        let mut app = App::new(Config::default());
+        app.sessions = vec![sess("proj", Status::Running, None)];
+        // restarting is empty — normal status shown
+        let mut t = Terminal::new(TestBackend::new(60, 8)).unwrap();
+        t.draw(|f| render(f, f.area(), &app)).unwrap();
+        let s = buf_to_string(t.backend().buffer());
+        assert!(s.contains("running"), "expected normal 'running' label:\n{s}");
+        assert!(!s.contains("restarting"), "must not show 'restarting':\n{s}");
     }
 }
