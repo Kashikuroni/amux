@@ -170,7 +170,9 @@ Windows is not supported (POSIX shell + tmux required).
 
 ## Contributing
 
-Issues and PRs welcome. Before submitting:
+Issues and PRs welcome. See [ARCHITECTURE.md](ARCHITECTURE.md) for how the code
+is organized (pure `App` + `Action` effects + a private tmux socket). Before
+submitting:
 
 ```sh
 cargo fmt
