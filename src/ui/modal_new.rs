@@ -116,9 +116,9 @@ fn segment_row(
 
 /// Max subdir rows shown in the live picker before it windows.
 const PICKER_MAX: usize = 8;
-/// Fixed content rows (header, rule, name, dir + validation, worktree, agent,
-/// rule, command, and the blanks between groups) when the worktree is off.
-const BASE_ROWS: u16 = 13;
+/// Fixed content rows (header, rule, name, dir + validation, terminal, worktree,
+/// agent, rule, command, and the blanks between groups) when the worktree is off.
+const BASE_ROWS: u16 = 14;
 /// Extra rows when the worktree toggle is on (base picker + branch input).
 const WORKTREE_ROWS: u16 = 2;
 
@@ -131,7 +131,8 @@ pub fn render(f: &mut Frame, form: &CreateForm) {
         0
     };
     // The agent-not-found warning takes one extra row only when it's shown.
-    let agent_warn = !form.agent.is_empty() && resolve_agent_path(&form.agent).is_none();
+    let agent_warn =
+        !form.terminal && !form.agent.is_empty() && resolve_agent_path(&form.agent).is_none();
     let warn_extra = u16::from(agent_warn);
     // Panel hugs its content: border (2) + top/bottom inner padding (2) + rows.
     let wt_extra = if form.worktree { WORKTREE_ROWS } else { 0 };
@@ -267,6 +268,19 @@ pub fn render(f: &mut Frame, form: &CreateForm) {
     }
     y += 1;
 
+    // terminal toggle.
+    if let Some(r) = row(x, y, w, bottom) {
+        let focused = form.field == CreateField::Terminal;
+        let mark = if form.terminal { "[x]" } else { "[ ]" };
+        let line = Line::from(vec![
+            lbl("terminal"),
+            Span::styled(format!("{mark} plain shell"), Style::default()),
+            Span::styled("   space", Style::default().add_modifier(Modifier::DIM)),
+        ]);
+        f.render_widget(band(Paragraph::new(line), focused), r);
+    }
+    y += 1;
+
     // worktree toggle.
     if let Some(r) = row(x, y, w, bottom) {
         let focused = form.field == CreateField::Worktree;
@@ -317,17 +331,30 @@ pub fn render(f: &mut Frame, form: &CreateForm) {
     }
     y += 1;
 
-    // agent picker (+ a quiet warning sub-line when the command isn't in PATH).
+    // agent picker — or a disabled hint when this is a terminal session.
     if let Some(r) = row(x, y, w, bottom) {
-        segment_row(
-            f,
-            r,
-            "agent",
-            &form.agent_choices,
-            form.agent_index,
-            form.field == CreateField::Agent,
-            "",
-        );
+        if form.terminal {
+            f.render_widget(
+                Paragraph::new(Line::from(vec![
+                    lbl("agent"),
+                    Span::styled(
+                        "(terminal session)",
+                        Style::default().add_modifier(Modifier::DIM),
+                    ),
+                ])),
+                r,
+            );
+        } else {
+            segment_row(
+                f,
+                r,
+                "agent",
+                &form.agent_choices,
+                form.agent_index,
+                form.field == CreateField::Agent,
+                "",
+            );
+        }
     }
     y += 1;
     if agent_warn {
@@ -356,7 +383,9 @@ pub fn render(f: &mut Frame, form: &CreateForm) {
     }
     y += 1;
     if let Some(r) = row(x, y, w, bottom) {
-        let agent = if form.agent.is_empty() {
+        let agent = if form.terminal {
+            "$SHELL"
+        } else if form.agent.is_empty() {
             CUSTOM_AGENT_SLOT
         } else {
             form.agent.as_str()
@@ -443,6 +472,20 @@ mod tests {
         let s = buf_to_string(t.backend().buffer());
         assert!(!s.contains("base"));
         assert!(s.contains("of 5"));
+    }
+
+    #[test]
+    fn terminal_modal_shows_toggle_and_disables_agent() {
+        let mut form = CreateForm::new("claude", &["claude".into()]);
+        form.terminal = true;
+        let mut t = Terminal::new(TestBackend::new(80, 32)).unwrap();
+        t.draw(|f| render(f, &form)).unwrap();
+        let s = buf_to_string(t.backend().buffer());
+        assert!(s.contains("terminal"), "terminal toggle row:\n{s}");
+        assert!(s.contains("[x] plain shell"), "toggle checked:\n{s}");
+        assert!(s.contains("(terminal session)"), "agent row disabled:\n{s}");
+        assert!(s.contains("$SHELL"), "command preview shows shell:\n{s}");
+        assert!(s.contains("of 4"), "terminal flow step total:\n{s}");
     }
 
     #[test]
