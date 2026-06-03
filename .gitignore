@@ -1,3 +1,26 @@
+# Rust build artifacts
 /target
 *.rlib
+# (Cargo.lock is intentionally committed — this is a binary crate.)
+
+# Worktrees created by the app
 .worktrees/
+
+# Superpowers internal design/plan artifacts — never publish these. The leading
+# `**/` matches from any directory in the repo, not just the root.
+**/docs/superpowers/
+**/specs/
+**/plans/
+
+# macOS
+.DS_Store
+
+# Editors / IDEs
+.idea/
+.vscode/
+*.swp
+*~
+
+# Environment / secrets
+.env
+*.local
