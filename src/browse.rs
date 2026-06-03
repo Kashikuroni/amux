@@ -36,9 +36,44 @@ pub fn read_subdirs(base: &Path) -> Vec<String> {
         .collect()
 }
 
-/// Convenience: subdirectories of `base` filtered by `filter`.
+/// Upper bound on entries returned by [`list`], so the picker stays responsive
+/// in a directory with tens of thousands of children (it re-runs per keystroke).
+pub const MAX_LIST: usize = 200;
+
+/// Subdirectories of `base` matching `filter`, capped at [`MAX_LIST`].
+///
+/// Unlike `read_subdirs` + `filter_subdirs`, this checks each entry's *name*
+/// (cheap) before its type (`is_dir` stats the entry), and stops once `MAX_LIST`
+/// matches are collected — so a giant directory doesn't stat every child or sort
+/// a huge vector on every keystroke. Same hidden/prefix/sort rules as
+/// `filter_subdirs`.
 pub fn list(base: &str, filter: &str) -> Vec<String> {
-    filter_subdirs(&read_subdirs(Path::new(base)), filter)
+    let lower = filter.to_lowercase();
+    let show_hidden = filter.starts_with('.');
+    let Ok(entries) = std::fs::read_dir(Path::new(base)) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = Vec::new();
+    for e in entries.flatten() {
+        let Ok(name) = e.file_name().into_string() else {
+            continue;
+        };
+        if !show_hidden && name.starts_with('.') {
+            continue;
+        }
+        if !name.to_lowercase().starts_with(&lower) {
+            continue;
+        }
+        if !e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        out.push(name);
+        if out.len() >= MAX_LIST {
+            break;
+        }
+    }
+    out.sort_by_key(|n| n.to_lowercase());
+    out
 }
 
 #[cfg(test)]
@@ -97,5 +132,28 @@ mod tests {
     #[test]
     fn read_subdirs_missing_path_is_empty() {
         assert!(read_subdirs(Path::new("/no/such/path/xyz123")).is_empty());
+    }
+
+    #[test]
+    fn list_filters_like_filter_subdirs() {
+        let base = std::env::temp_dir().join(format!("cm_list_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        for d in ["alpha", "Apps", "beta", ".git"] {
+            std::fs::create_dir_all(base.join(d)).unwrap();
+        }
+        let got = list(base.to_str().unwrap(), "a");
+        assert_eq!(got, vec!["alpha".to_string(), "Apps".to_string()]); // hides .git, sorted
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn list_caps_huge_directories() {
+        let base = std::env::temp_dir().join(format!("cm_listcap_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        for i in 0..(MAX_LIST + 10) {
+            std::fs::create_dir_all(base.join(format!("d{i:04}"))).unwrap();
+        }
+        assert_eq!(list(base.to_str().unwrap(), "d").len(), MAX_LIST);
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

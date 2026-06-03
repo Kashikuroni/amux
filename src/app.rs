@@ -491,6 +491,11 @@ pub struct App {
     pub mode: Mode,
     pub preview: String,
     pub snapshots: HashMap<String, u64>,
+    /// Latest `dir → GitInfo` from the background git reader (see `git_worker`).
+    /// Empty when no worker is attached (the refresh then reads git inline).
+    pub git_cache: HashMap<String, crate::git::GitInfo>,
+    /// Background git reader; `None` in tests (git is read synchronously then).
+    pub git_worker: Option<crate::git::GitReader>,
     pub error: Option<String>,
     pub should_quit: bool,
     pub filter: Option<String>,
@@ -498,6 +503,9 @@ pub struct App {
     pub now_unix: i64,
     pub tmux_missing: bool,
     pub clock: String,
+    /// UTC minute (`now_unix / 60`) the cached `clock` was computed for, so the
+    /// `date` fork only happens once per minute instead of every refresh.
+    last_clock_minute: i64,
     /// Detected numbered prompt per session: option labels for digits 1..N.
     pub prompts: HashMap<String, Vec<String>>,
     /// Lines the preview is scrolled up from the bottom (0 = latest/bottom).
@@ -545,6 +553,8 @@ impl App {
             mode: Mode::List,
             preview: String::new(),
             snapshots: HashMap::new(),
+            git_cache: HashMap::new(),
+            git_worker: None,
             error: None,
             should_quit: false,
             filter: None,
@@ -552,6 +562,7 @@ impl App {
             now_unix: crate::timeutil::now_unix(),
             tmux_missing: false,
             clock: crate::timeutil::clock_hhmm(),
+            last_clock_minute: crate::timeutil::now_unix() / 60,
             prompts: HashMap::new(),
             preview_scroll: 0,
             preview_dims: std::cell::Cell::new((0, 0)),
@@ -1469,6 +1480,12 @@ impl App {
         }
     }
 
+    /// Spawn the background git reader so `refresh` reads git off the UI thread.
+    /// Call once at startup. Without it, `refresh` reads git synchronously.
+    pub fn attach_git_worker(&mut self) {
+        self.git_worker = Some(crate::git::spawn_reader());
+    }
+
     /// Re-derives sessions from tmux and recomputes statuses + preview.
     pub fn refresh(&mut self) {
         match crate::tmux::list_sessions() {
@@ -1480,7 +1497,12 @@ impl App {
                     self.fit_preview_window(name);
                 }
                 self.now_unix = crate::timeutil::now_unix();
-                self.clock = crate::timeutil::clock_hhmm();
+                // Re-fork `date` only when the minute actually changes.
+                let minute = self.now_unix / 60;
+                if minute != self.last_clock_minute {
+                    self.clock = crate::timeutil::clock_hhmm();
+                    self.last_clock_minute = minute;
+                }
                 let mut new_snaps = HashMap::new();
                 let mut new_prompts = HashMap::new();
                 let mut new_preview = None;
@@ -1503,11 +1525,32 @@ impl App {
                             );
                         }
                     }
-                    // TODO(perf): git::read shells out to `git` per session per
-                    // tick on the main thread. Fine for local repos / few
-                    // sessions; move to a background thread if it ever stalls
-                    // the UI on slow filesystems.
-                    s.git = crate::git::read(&s.dir);
+                }
+                // Git info: served from the background reader's cache when a
+                // worker is attached (never blocks the UI), else read inline.
+                if self.git_worker.is_some() {
+                    // Apply the most recently received `dir → GitInfo` results.
+                    let mut latest = None;
+                    if let Some(w) = &self.git_worker {
+                        while let Ok(map) = w.rx.try_recv() {
+                            latest = Some(map);
+                        }
+                    }
+                    if let Some(map) = latest {
+                        self.git_cache = map;
+                    }
+                    for s in &mut sessions {
+                        s.git = self.git_cache.get(&s.dir).cloned();
+                    }
+                    // Ask the worker to refresh git for the current directories.
+                    if let Some(w) = &self.git_worker {
+                        let dirs: Vec<String> = sessions.iter().map(|s| s.dir.clone()).collect();
+                        let _ = w.tx.send(dirs);
+                    }
+                } else {
+                    for s in &mut sessions {
+                        s.git = crate::git::read(&s.dir);
+                    }
                 }
                 self.snapshots = new_snaps;
                 self.prompts = new_prompts;

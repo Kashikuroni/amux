@@ -70,6 +70,48 @@ pub fn read(dir: &str) -> Option<GitInfo> {
     })
 }
 
+/// A background git reader. The UI sends the current session directories; the
+/// worker shells out to `git` off the render thread and returns a `dir → GitInfo`
+/// map, so a slow/large repo never stalls the UI loop.
+pub struct GitReader {
+    /// Send the current set of session directories to (re)read.
+    pub tx: std::sync::mpsc::Sender<Vec<String>>,
+    /// Receive the latest `dir → GitInfo` results.
+    pub rx: std::sync::mpsc::Receiver<std::collections::HashMap<String, GitInfo>>,
+}
+
+/// Spawns the background git reader thread. It blocks on requests, coalesces to
+/// the newest pending one (so a backlog can't build up behind a slow read),
+/// dedups the directories, and reads each. Exits when the request sender drops.
+pub fn spawn_reader() -> GitReader {
+    use std::collections::HashMap;
+    use std::sync::mpsc;
+    let (req_tx, req_rx) = mpsc::channel::<Vec<String>>();
+    let (res_tx, res_rx) = mpsc::channel::<HashMap<String, GitInfo>>();
+    std::thread::spawn(move || {
+        while let Ok(mut dirs) = req_rx.recv() {
+            while let Ok(newer) = req_rx.try_recv() {
+                dirs = newer; // only the most recent request matters
+            }
+            dirs.sort();
+            dirs.dedup();
+            let mut map = HashMap::new();
+            for dir in dirs {
+                if let Some(info) = read(&dir) {
+                    map.insert(dir, info);
+                }
+            }
+            if res_tx.send(map).is_err() {
+                break; // UI gone
+            }
+        }
+    });
+    GitReader {
+        tx: req_tx,
+        rx: res_rx,
+    }
+}
+
 /// Runs a *mutating* git command in `dir`. Unlike `git_out`, returns the
 /// stderr-bearing error on failure so the UI can show why it failed.
 fn git_run(dir: &str, args: &[&str]) -> std::io::Result<()> {

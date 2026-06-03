@@ -37,6 +37,8 @@ fn main() -> io::Result<()> {
     let refresh = Duration::from_millis(config.refresh_interval_ms.max(100));
     let mut app = App::new(config);
     app.apply_state(State::load());
+    // Read git off the UI thread so large/slow repos never stall rendering.
+    app.attach_git_worker();
     if !tmux::is_available() {
         app.tmux_missing = true;
     } else {
