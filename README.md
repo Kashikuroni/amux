@@ -9,7 +9,7 @@ git worktrees, and keep per‑session markdown to‑do notes.
 > Think of it as `tmux` + a session list + live previews + notes, purpose‑built
 > for juggling several coding agents at once.
 
-<!-- Replace OWNER with your GitHub user/org, and add a real screenshot/gif. -->
+<!-- Add a real screenshot / gif here. -->
 <!-- ![amux screenshot](docs/screenshot.png) -->
 
 ---
@@ -50,18 +50,16 @@ git worktrees, and keep per‑session markdown to‑do notes.
 
 ## Install
 
-> Replace `OWNER` with the GitHub owner once the repo is published.
-
 ### Homebrew (recommended on macOS)
 
 ```sh
-brew install OWNER/tap/amux
+brew install kashikuroni/tap/amux
 ```
 
 ### Prebuilt binary
 
 Download the archive for your arch from the
-[Releases](https://github.com/OWNER/amux/releases) page, then:
+[Releases](https://github.com/kashikuroni/amux/releases) page, then:
 
 ```sh
 tar xzf amux-*-apple-darwin.tar.gz
@@ -72,13 +70,13 @@ sudo mv amux /usr/local/bin/
 ### From source (`cargo install`)
 
 ```sh
-cargo install --git https://github.com/OWNER/amux
+cargo install --git https://github.com/kashikuroni/amux
 ```
 
 ### Build locally
 
 ```sh
-git clone https://github.com/OWNER/amux
+git clone https://github.com/kashikuroni/amux
 cd amux
 cargo build --release   # binary at target/release/amux
 ```

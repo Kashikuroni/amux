@@ -26,5 +26,5 @@ Initial public release.
 - Configuration via `~/.agent-multiplexer/config.toml`; persisted UI state and
   notes in `~/.agent-multiplexer/state.toml`.
 
-[Unreleased]: https://github.com/OWNER/amux/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/OWNER/amux/releases/tag/v0.1.0
+[Unreleased]: https://github.com/kashikuroni/amux/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/kashikuroni/amux/releases/tag/v0.1.0
