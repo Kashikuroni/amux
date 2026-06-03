@@ -13,7 +13,7 @@ impl Default for Config {
         Self {
             default_agent: "claude".to_string(),
             refresh_interval_ms: 1500,
-            agent_presets: vec!["claude".into(), "aider".into(), "codex".into()],
+            agent_presets: vec!["claude".into(), "codex".into(), "opencode".into()],
         }
     }
 }
@@ -55,6 +55,16 @@ mod tests {
         assert_eq!(cfg.default_agent, "aider");
         assert_eq!(cfg.refresh_interval_ms, 500);
         assert_eq!(cfg.agent_presets, vec!["aider".to_string()]);
+    }
+
+    #[test]
+    fn defaults() {
+        let cfg = Config::default();
+        assert_eq!(cfg.default_agent, "claude");
+        assert_eq!(
+            cfg.agent_presets,
+            vec!["claude".to_string(), "codex".to_string(), "opencode".to_string()]
+        );
     }
 
     #[test]

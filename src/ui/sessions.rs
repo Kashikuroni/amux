@@ -27,6 +27,7 @@ fn agent_accent(agent: &str) -> Color {
     match agent.split_whitespace().next().unwrap_or("") {
         "claude" => Color::Yellow,
         "codex" => Color::White,
+        "opencode" => Color::Green,
         "gemini" => Color::Blue,
         "aider" => Color::Magenta,
         _ => Color::Cyan,
@@ -445,6 +446,7 @@ mod tests {
     fn agent_accent_maps_presets() {
         assert_eq!(agent_accent("claude"), Color::Yellow);
         assert_eq!(agent_accent("codex --yolo"), Color::White);
+        assert_eq!(agent_accent("opencode"), Color::Green);
         assert_eq!(agent_accent("gemini"), Color::Blue);
         assert_eq!(agent_accent("other"), Color::Cyan);
     }
