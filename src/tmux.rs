@@ -287,6 +287,43 @@ pub fn capture_scrollback(name: &str, history: u32) -> io::Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+fn is_resume_uuid(s: &str) -> bool {
+    let b = s.as_bytes();
+    if b.len() != 36 {
+        return false;
+    }
+    for (i, &c) in b.iter().enumerate() {
+        if matches!(i, 8 | 13 | 18 | 23) {
+            if c != b'-' {
+                return false;
+            }
+        } else if !matches!(c, b'0'..=b'9' | b'a'..=b'f') {
+            return false;
+        }
+    }
+    true
+}
+
+/// Scans pane output for the last `claude --resume <uuid>` command and returns
+/// it as a ready-to-run string. Returns `None` if no valid UUID-shaped token is
+/// found. Extra text after the UUID on the same line is ignored.
+pub fn parse_resume_command(pane: &str) -> Option<String> {
+    pane.lines().rev().find_map(|line| {
+        let trimmed = line.trim();
+        let rest = trimmed.strip_prefix("claude --resume ")?;
+        let token = rest.split_whitespace().next()?;
+        is_resume_uuid(token).then(|| format!("claude --resume {token}"))
+    })
+}
+
+/// Sends two Ctrl+C keypresses to a session in sequence.
+/// Claude Code requires the first to interrupt the current operation and
+/// the second to exit the process.
+pub fn send_ctrl_c(name: &str) -> io::Result<()> {
+    run(&["send-keys", "-t", name, "C-c"])?;
+    run(&["send-keys", "-t", name, "C-c"])
+}
+
 /// Attaches in the foreground (inherits stdio) and returns when the user detaches.
 pub fn attach_session(name: &str) -> io::Result<()> {
     // Ensure chrome/sizing options are applied for sessions created before they
@@ -373,5 +410,58 @@ mod tests {
         let sessions = parse_sessions(out);
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].name, "solo");
+    }
+
+    #[test]
+    fn parse_resume_command_returns_none_for_empty() {
+        assert!(parse_resume_command("").is_none());
+        assert!(parse_resume_command("   \n   ").is_none());
+    }
+
+    #[test]
+    fn parse_resume_command_finds_command_in_output() {
+        let pane = "some output\nclaude --resume f612324d-83b6-407a-9d74-d89ef7b91f70\n";
+        assert_eq!(
+            parse_resume_command(pane),
+            Some("claude --resume f612324d-83b6-407a-9d74-d89ef7b91f70".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_resume_command_returns_last_occurrence() {
+        let pane = "claude --resume aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\nother stuff\nclaude --resume f612324d-83b6-407a-9d74-d89ef7b91f70\n";
+        assert_eq!(
+            parse_resume_command(pane),
+            Some("claude --resume f612324d-83b6-407a-9d74-d89ef7b91f70".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_resume_command_rejects_non_uuid_token() {
+        assert!(parse_resume_command("claude --resume not-a-uuid").is_none());
+        assert!(parse_resume_command("claude --resume 1234").is_none());
+    }
+
+    #[test]
+    fn parse_resume_command_strips_extra_text_after_uuid() {
+        let pane = "claude --resume f612324d-83b6-407a-9d74-d89ef7b91f70 extra stuff";
+        assert_eq!(
+            parse_resume_command(pane),
+            Some("claude --resume f612324d-83b6-407a-9d74-d89ef7b91f70".to_string())
+        );
+    }
+
+    #[test]
+    fn is_resume_uuid_validates_format() {
+        assert!(is_resume_uuid("f612324d-83b6-407a-9d74-d89ef7b91f70"));
+        assert!(is_resume_uuid("00000000-0000-0000-0000-000000000000"));
+        // wrong length
+        assert!(!is_resume_uuid("f612324d-83b6-407a-9d74-d89ef7b91f7"));
+        // uppercase
+        assert!(!is_resume_uuid("F612324D-83B6-407A-9D74-D89EF7B91F70"));
+        // hyphen in wrong place
+        assert!(!is_resume_uuid("f612324-d83b6-407a-9d74-d89ef7b91f70"));
+        // non-hex char
+        assert!(!is_resume_uuid("f612324d-83b6-407a-9d74-d89ef7b91f7g"));
     }
 }
