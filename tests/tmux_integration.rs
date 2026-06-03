@@ -50,6 +50,68 @@ fn new_list_rename_capture_kill_roundtrip() {
     assert!(!sessions.iter().any(|s| s.name == renamed));
 }
 
+/// Restart lifecycle against a real tmux server: `remain-on-exit` must keep the
+/// pane (and the session) alive after the agent process exits, the dead pane's
+/// content must yield the `claude --resume <uuid>` hint, and `respawn_pane`
+/// must bring the pane back to life — replicating what `u` does end to end.
+/// Skipped if tmux is unavailable.
+#[test]
+fn restart_lifecycle_remain_on_exit_capture_respawn() {
+    if !tmux::is_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+
+    let name = format!("cm_it_restart_{}", std::process::id());
+    let _ = tmux::kill_session(&name);
+    struct Guard(String);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            let _ = tmux::kill_session(&self.0);
+        }
+    }
+    let _guard = Guard(name.clone());
+
+    let dir = std::env::temp_dir();
+    let dir = dir.to_str().unwrap();
+    // A fake agent: prints the resume hint and exits on the first Ctrl+C —
+    // mirroring claude's behavior without needing claude installed.
+    let agent = "bash -c 'trap \"echo claude --resume f612324d-83b6-407a-9d74-d89ef7b91f70; exit 0\" INT; echo working; while true; do sleep 1; done'";
+    tmux::new_session(&name, dir, agent, "claude").expect("new_session");
+
+    // The restart flow: safety net on, then the double Ctrl+C.
+    tmux::set_remain_on_exit(&name, true).expect("remain-on-exit on");
+    tmux::send_ctrl_c(&name).expect("send_ctrl_c");
+
+    // Wait for the process to die; the pane must survive as a dead pane.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !tmux::pane_dead(&name).unwrap_or(false) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "pane never died after Ctrl+C"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let sessions = tmux::list_sessions().expect("list_sessions");
+    assert!(
+        sessions.iter().any(|s| s.name == name),
+        "session must survive the agent exiting"
+    );
+
+    // The dead pane keeps the hint; parse it exactly like the poll tick does.
+    let pane = tmux::capture_pane(&name).expect("capture dead pane");
+    let cmd = tmux::parse_resume_command(&pane).expect("resume hint must parse");
+    assert_eq!(cmd, "claude --resume f612324d-83b6-407a-9d74-d89ef7b91f70");
+
+    // Respawn relaunches the pane (a sleeping placeholder stands in for claude).
+    tmux::respawn_pane(&name, dir, "sleep 30").expect("respawn_pane");
+    assert!(
+        !tmux::pane_dead(&name).unwrap_or(true),
+        "pane must be alive after respawn"
+    );
+    tmux::set_remain_on_exit(&name, false).expect("remain-on-exit off");
+}
+
 /// End-to-end worktree path against real git + tmux: replicates what
 /// `main::create_worktree_session` does (add_worktree → new_worktree_session),
 /// confirms `list_sessions` surfaces `worktree_repo`, then removes the worktree.

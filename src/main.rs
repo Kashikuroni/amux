@@ -225,21 +225,37 @@ fn run(
             app.refresh();
             last_refresh = Instant::now();
 
-            // For sessions awaiting resume: scan their pane for the
-            // `claude --resume <uuid>` command and send it when found.
-            // Time out after 30 s (something went wrong — user can retry).
+            // For sessions awaiting resume: once claude exits, the pane goes
+            // dead (kept by remain-on-exit) with the `claude --resume <uuid>`
+            // hint in its content — parse it and respawn the pane with that
+            // command. Time out after 30 s (something went wrong — the dead
+            // pane is left for inspection; kill with `d` or retry `u`).
             if !app.restarting.is_empty() {
                 let mut to_clear: Vec<String> = Vec::new();
                 for (name, &started) in &app.restarting {
                     if app.now_unix - started > 30 {
+                        let _ = tmux::set_remain_on_exit(name, false);
                         to_clear.push(name.clone());
+                        continue;
+                    }
+                    // The hint is printed by claude on exit; wait until the
+                    // pane is actually dead (also guards against respawning —
+                    // and killing — a still-live claude).
+                    if !tmux::pane_dead(name).unwrap_or(false) {
                         continue;
                     }
                     if let Ok(pane) = tmux::capture_pane(name) {
                         if let Some(cmd) = tmux::parse_resume_command(&pane) {
-                            if let Err(e) = tmux::send_text(name, &cmd) {
+                            let dir = app
+                                .sessions
+                                .iter()
+                                .find(|s| s.name == *name)
+                                .map(|s| s.dir.clone())
+                                .unwrap_or_default();
+                            if let Err(e) = tmux::respawn_pane(name, &dir, &cmd) {
                                 app.error = Some(format!("resume: {e}"));
                             }
+                            let _ = tmux::set_remain_on_exit(name, false);
                             to_clear.push(name.clone());
                         }
                     }
@@ -372,8 +388,17 @@ fn handle_action(terminal: &mut Term, app: &mut App, action: Action) -> io::Resu
                 .map(|s| s.name.clone())
                 .collect();
             for name in names {
+                // Safety net FIRST: sessions run the agent as the pane command,
+                // so the session dies with the process. remain-on-exit keeps the
+                // dead pane (and the session) alive with the --resume hint
+                // readable. Never send Ctrl+C without it.
+                if let Err(e) = tmux::set_remain_on_exit(&name, true) {
+                    app.error = Some(format!("restart: {e}"));
+                    continue;
+                }
                 if let Err(e) = tmux::send_ctrl_c(&name) {
                     app.error = Some(format!("restart: {e}"));
+                    let _ = tmux::set_remain_on_exit(&name, false);
                 } else {
                     app.restarting.insert(name, now);
                 }

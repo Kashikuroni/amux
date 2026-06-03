@@ -306,15 +306,16 @@ fn is_resume_uuid(s: &str) -> bool {
 
 /// Scans pane output for the last `claude --resume <uuid>` command and returns
 /// it as a ready-to-run string. Returns `None` if no valid UUID-shaped token is
-/// found. ANSI escapes are stripped first (capture-pane runs with `-e`), and
-/// extra text after the UUID on the same line is ignored.
+/// found. ANSI escapes are stripped first (capture-pane runs with `-e`). The
+/// command is matched anywhere in the line — the tty echoes `^C` onto the hint
+/// line and Claude may wrap it in prose — and text after the UUID is ignored.
 pub fn parse_resume_command(pane: &str) -> Option<String> {
+    const HINT: &str = "claude --resume ";
     let clean = crate::app::strip_ansi(pane);
     clean.lines().rev().find_map(|line| {
-        let trimmed = line.trim();
-        let rest = trimmed.strip_prefix("claude --resume ")?;
+        let rest = &line[line.rfind(HINT)? + HINT.len()..];
         let token = rest.split_whitespace().next()?;
-        is_resume_uuid(token).then(|| format!("claude --resume {token}"))
+        is_resume_uuid(token).then(|| format!("{HINT}{token}"))
     })
 }
 
@@ -324,6 +325,36 @@ pub fn parse_resume_command(pane: &str) -> Option<String> {
 pub fn send_ctrl_c(name: &str) -> io::Result<()> {
     run(&["send-keys", "-t", name, "C-c"])?;
     run(&["send-keys", "-t", name, "C-c"])
+}
+
+/// Toggles `remain-on-exit` on a session's window. Sessions run their agent as
+/// the pane command, so by default the whole session dies the moment the agent
+/// exits. The restart flow turns this on *before* sending Ctrl+C — keeping the
+/// dead pane (and the session) around with Claude's `--resume` hint readable —
+/// and back off once the session is respawned.
+pub fn set_remain_on_exit(name: &str, on: bool) -> io::Result<()> {
+    let value = if on { "on" } else { "off" };
+    run(&["set-option", "-w", "-t", name, "remain-on-exit", value])
+}
+
+/// True when the session's active pane process has exited (a "dead" pane kept
+/// around by `remain-on-exit on`).
+pub fn pane_dead(name: &str) -> io::Result<bool> {
+    let out = tmux()
+        .args(["display-message", "-p", "-t", name, "#{pane_dead}"])
+        .output()?;
+    if !out.status.success() {
+        return Err(io::Error::other(
+            String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim() == "1")
+}
+
+/// Relaunches a dead pane with `command`, running in `dir` — used to restart a
+/// session with `claude --resume <uuid>` after the restart flow killed claude.
+pub fn respawn_pane(name: &str, dir: &str, command: &str) -> io::Result<()> {
+    run(&["respawn-pane", "-k", "-t", name, "-c", dir, command])
 }
 
 /// Attaches in the foreground (inherits stdio) and returns when the user detaches.
@@ -457,6 +488,28 @@ mod tests {
     #[test]
     fn parse_resume_command_strips_extra_text_after_uuid() {
         let pane = "claude --resume f612324d-83b6-407a-9d74-d89ef7b91f70 extra stuff";
+        assert_eq!(
+            parse_resume_command(pane),
+            Some("claude --resume f612324d-83b6-407a-9d74-d89ef7b91f70".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_resume_command_handles_ctrl_c_echo_prefix() {
+        // The tty echoes ^C into the same line the hint lands on, so the line
+        // does not *start* with the command (seen in real capture output).
+        let pane = "^Cclaude --resume f612324d-83b6-407a-9d74-d89ef7b91f70\n";
+        assert_eq!(
+            parse_resume_command(pane),
+            Some("claude --resume f612324d-83b6-407a-9d74-d89ef7b91f70".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_resume_command_finds_command_mid_line() {
+        // Claude may wrap the hint in prose ("Resume this session with: …").
+        let pane =
+            "Resume this session with: claude --resume f612324d-83b6-407a-9d74-d89ef7b91f70\n";
         assert_eq!(
             parse_resume_command(pane),
             Some("claude --resume f612324d-83b6-407a-9d74-d89ef7b91f70".to_string())
