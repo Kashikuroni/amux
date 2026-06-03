@@ -1342,9 +1342,62 @@ impl App {
         }
     }
 
-    fn handle_note_key(&mut self, _key: KeyEvent) -> Option<Action> {
-        // Filled in by later tasks.
-        None
+    fn handle_note_key(&mut self, key: KeyEvent) -> Option<Action> {
+        let Mode::Note(mut ns) = std::mem::replace(&mut self.mode, Mode::List) else {
+            return None;
+        };
+        match ns.sub {
+            NoteSub::Render => {
+                let task_count = crate::note::task_line_indices(self.note_text(&ns.target)).len();
+                let last = task_count.saturating_sub(1);
+                match key.code {
+                    KeyCode::Esc => {
+                        if ns.anchor.is_some() {
+                            ns.anchor = None; // first esc clears selection
+                            self.mode = Mode::Note(ns);
+                        }
+                        // else: leave Mode::List (exits focus)
+                        return None;
+                    }
+                    KeyCode::Char('j') | KeyCode::Down => {
+                        ns.cursor = (ns.cursor + 1).min(last);
+                    }
+                    KeyCode::Char('k') | KeyCode::Up => {
+                        ns.cursor = ns.cursor.saturating_sub(1);
+                    }
+                    KeyCode::Char('V') => {
+                        ns.anchor = Some(ns.cursor);
+                    }
+                    KeyCode::Char(' ') => {
+                        let range = selection_range(&ns);
+                        let buf = self.note_text_mut(&ns.target);
+                        for ord in range {
+                            crate::note::toggle(buf, ord);
+                        }
+                        ns.anchor = None;
+                        self.dirty = true;
+                    }
+                    KeyCode::Char('y') => {
+                        let ords: Vec<usize> = selection_range(&ns).collect();
+                        let text = crate::note::selected_as_numbered(self.note_text(&ns.target), &ords);
+                        crate::clip::copy(&text);
+                        ns.anchor = None;
+                    }
+                    KeyCode::Char('e') => {
+                        ns.editor = crate::editor::TextArea::new(self.note_text(&ns.target).to_string());
+                        ns.sub = NoteSub::Edit;
+                    }
+                    _ => {}
+                }
+                self.mode = Mode::Note(ns);
+                None
+            }
+            NoteSub::Edit => {
+                // Implemented in the next task.
+                self.mode = Mode::Note(ns);
+                None
+            }
+        }
     }
 
     /// Re-derives sessions from tmux and recomputes statuses + preview.
@@ -1700,6 +1753,15 @@ pub fn validate_create(name: &str, dir: &str, existing: &[String]) -> Result<(),
         return Err(format!("directory not found: {expanded}"));
     }
     Ok(())
+}
+
+/// The task ordinals covered by the current selection (anchor..=cursor), or just
+/// the cursor when nothing is selected.
+fn selection_range(ns: &NoteState) -> std::ops::RangeInclusive<usize> {
+    match ns.anchor {
+        Some(a) => a.min(ns.cursor)..=a.max(ns.cursor),
+        None => ns.cursor..=ns.cursor,
+    }
 }
 
 #[cfg(test)]
@@ -2829,5 +2891,67 @@ mod tests {
         }
         assert_eq!(app.notes.get("new").map(String::as_str), Some("- [ ] x"));
         assert!(app.notes.get("old").is_none());
+    }
+
+    fn note_app_with(text: &str) -> App {
+        let mut app = App::new(Config::default());
+        app.inbox = text.into();
+        app.mode = Mode::Note(NoteState {
+            target: NoteTarget::Inbox,
+            sub: NoteSub::Render,
+            cursor: 0,
+            anchor: None,
+            editor: crate::editor::TextArea::default(),
+        });
+        app
+    }
+    fn note_state(app: &App) -> &NoteState {
+        match &app.mode { Mode::Note(ns) => ns, _ => panic!("not in note mode") }
+    }
+
+    #[test]
+    fn j_k_move_task_cursor_within_bounds() {
+        let mut app = note_app_with("- [ ] a\n- [ ] b\n- [ ] c");
+        app.handle_key(key('j'));
+        assert_eq!(note_state(&app).cursor, 1);
+        app.handle_key(key('j'));
+        app.handle_key(key('j')); // clamp at last task (index 2)
+        assert_eq!(note_state(&app).cursor, 2);
+        app.handle_key(key('k'));
+        assert_eq!(note_state(&app).cursor, 1);
+    }
+
+    #[test]
+    fn space_toggles_task_under_cursor() {
+        let mut app = note_app_with("- [ ] a\n- [ ] b");
+        app.handle_key(key('j'));            // cursor on task 1
+        app.handle_key(key(' '));
+        assert_eq!(app.inbox, "- [ ] a\n- [x] b");
+    }
+
+    #[test]
+    fn visual_select_then_space_toggles_range() {
+        let mut app = note_app_with("- [ ] a\n- [ ] b\n- [ ] c");
+        app.handle_key(key('V'));            // anchor at 0
+        app.handle_key(key('j'));            // extend to 1
+        app.handle_key(key(' '));            // toggle 0..=1
+        assert_eq!(app.inbox, "- [x] a\n- [x] b\n- [ ] c");
+        assert!(note_state(&app).anchor.is_none(), "selection cleared after toggle");
+    }
+
+    #[test]
+    fn e_enters_edit_seeded_from_note() {
+        let mut app = note_app_with("- [ ] a");
+        app.handle_key(key('e'));
+        let ns = note_state(&app);
+        assert_eq!(ns.sub, NoteSub::Edit);
+        assert_eq!(ns.editor.buffer, "- [ ] a");
+    }
+
+    #[test]
+    fn esc_exits_to_list() {
+        let mut app = note_app_with("- [ ] a");
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(matches!(app.mode, Mode::List));
     }
 }
