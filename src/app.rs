@@ -521,6 +521,13 @@ pub struct App {
     pub prompts: HashMap<String, Vec<String>>,
     /// Lines the preview is scrolled up from the bottom (0 = latest/bottom).
     pub preview_scroll: u16,
+    /// Preview content area (cols, rows), written by the renderer each frame so
+    /// the capture logic can size the tmux window to match. `Cell` because render
+    /// only holds `&App`. (0, 0) until the first frame.
+    pub preview_dims: std::cell::Cell<(u16, u16)>,
+    /// Last (session, cols, rows) we resized a window to, to skip redundant
+    /// `resize-window` calls (which would needlessly reflow the agent).
+    pub preview_sized: Option<(String, u16, u16)>,
     /// Left (sessions) pane width as a percentage of the body.
     pub split_pct: u16,
     /// Latest Claude Code subscription usage (5h / 7d), shown in the header.
@@ -560,6 +567,8 @@ impl App {
             clock: crate::timeutil::clock_hhmm(),
             prompts: HashMap::new(),
             preview_scroll: 0,
+            preview_dims: std::cell::Cell::new((0, 0)),
+            preview_sized: None,
             split_pct: 40,
             usage: None,
             plan: None,
@@ -802,12 +811,29 @@ impl App {
         self.preview_scroll = 0;
         match self.selected_name() {
             Some(name) => {
+                self.fit_preview_window(&name);
                 self.preview = crate::tmux::capture_scrollback(&name, 500)
                     .or_else(|_| crate::tmux::capture_pane(&name))
                     .unwrap_or_default();
             }
             None => self.preview.clear(),
         }
+    }
+
+    /// Size `name`'s tmux window to the preview content area so its capture
+    /// reflows to the preview width (no wrapped, doubled input box). Skips the
+    /// call when the window is already at that size for this session.
+    fn fit_preview_window(&mut self, name: &str) {
+        let (cols, rows) = self.preview_dims.get();
+        if cols == 0 || rows == 0 {
+            return; // No frame rendered yet — nothing to match.
+        }
+        let target = (name.to_string(), cols, rows);
+        if self.preview_sized.as_ref() == Some(&target) {
+            return;
+        }
+        crate::tmux::resize_window(name, cols, rows);
+        self.preview_sized = Some(target);
     }
 
     fn handle_list_key(&mut self, key: KeyEvent) -> Option<Action> {
@@ -1051,6 +1077,9 @@ impl App {
         let Mode::Create(mut form) = std::mem::replace(&mut self.mode, Mode::List) else {
             return None;
         };
+        // Clear any prior validation error; the handlers below re-set it if this
+        // key's submit still fails, so the banner always reflects the last action.
+        self.error = None;
 
         // Dir step: interactive picker (live subdir list).
         if form.field == CreateField::Dir {
@@ -1247,6 +1276,11 @@ impl App {
         match crate::tmux::list_sessions() {
             Ok(mut sessions) => {
                 let selected_name = self.selected_name();
+                // Size the previewed window to the preview area before capturing,
+                // so its scrollback reflows to the preview width (no doubled box).
+                if let Some(name) = &selected_name {
+                    self.fit_preview_window(name);
+                }
                 self.now_unix = crate::timeutil::now_unix();
                 self.clock = crate::timeutil::clock_hhmm();
                 let mut new_snaps = HashMap::new();

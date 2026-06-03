@@ -87,8 +87,9 @@ fn card(
         Span::styled(format!(" {status_label}"), status_style),
     ]);
 
-    // Line 2: ✻ agent · ⎇ branch · +a −d. (The path lives on the project header
-    // now — every session in a project shares it.)
+    // Line 2: ✻ agent · ⎇/⧉ branch · +a −d. The branch glyph is ⧉ for worktree
+    // sessions, ⎇ for the repo root. (The path lives on the project header now —
+    // every session in a project shares it.)
     let accent = agent_accent(&s.agent);
     let mut l2 = vec![
         lead(),
@@ -96,8 +97,16 @@ fn card(
         Span::styled(format!(" {}", s.agent), Style::default().fg(accent)),
     ];
     if let Some(g) = &s.git {
+        // Worktree sessions swap the branch glyph (⧉) for the repo-root one (⎇),
+        // so "running in a linked worktree" reads from the marker itself with no
+        // extra width or trailing tag.
+        let glyph = if crate::app::is_worktree(s) {
+            th::WORKTREE
+        } else {
+            th::BRANCH
+        };
         l2.push(Span::styled(
-            format!("   {} {}", th::BRANCH, g.branch),
+            format!("   {} {}", glyph, g.branch),
             Style::default()
                 .fg(Color::Reset)
                 .add_modifier(Modifier::DIM),
@@ -109,15 +118,6 @@ fn card(
         l2.push(Span::styled(
             format!(" −{}", g.removed),
             Style::default().fg(Color::Red),
-        ));
-    }
-    // Mark worktree sessions (vs the one running in the repo root) with a quiet tag.
-    if crate::app::is_worktree(s) {
-        l2.push(Span::styled(
-            "   worktree",
-            Style::default()
-                .fg(Color::Reset)
-                .add_modifier(Modifier::DIM),
         ));
     }
     let line2 = Line::from(l2);
@@ -384,6 +384,55 @@ mod tests {
         assert!(s.contains("main"), "missing branch:\n{s}");
         assert!(s.contains("+12"), "missing +12:\n{s}");
         assert!(s.contains("idle"), "missing 'idle':\n{s}");
+    }
+
+    #[test]
+    fn worktree_row_uses_worktree_branch_glyph() {
+        let mut app = App::new(Config::default());
+        let mut s = sess(
+            "feature-x",
+            Status::Idle,
+            Some(GitInfo {
+                branch: "feature-x".into(),
+                added: 3,
+                removed: 1,
+            }),
+        );
+        // Make is_worktree(s) true: dir differs from the worktree's repo root.
+        s.dir = "~/work/x/.worktrees/feature-x".into();
+        s.worktree_repo = Some("~/work/x".into());
+        app.sessions = vec![s];
+        let mut t = Terminal::new(TestBackend::new(80, 8)).unwrap();
+        t.draw(|f| render(f, f.area(), &app)).unwrap();
+        let out = buf_to_string(t.backend().buffer());
+        // Worktree sessions carry the ⧉ marker (not the repo-root ⎇) plus the
+        // branch name and diff; the old "worktree" word tag is gone.
+        assert!(out.contains(th::WORKTREE), "missing ⧉ worktree glyph:\n{out}");
+        assert!(out.contains("feature-x"), "missing branch name:\n{out}");
+        assert!(out.contains("+3"), "missing diff stat:\n{out}");
+        assert!(!out.contains(th::BRANCH), "worktree must not use ⎇:\n{out}");
+        assert!(!out.contains("worktree"), "stale word tag present:\n{out}");
+    }
+
+    #[test]
+    fn repo_root_row_uses_plain_branch_glyph() {
+        let mut app = App::new(Config::default());
+        // Default sess() has worktree_repo None and dir == its own root → not a
+        // worktree, so it keeps the ⎇ marker.
+        app.sessions = vec![sess(
+            "main-sess",
+            Status::Idle,
+            Some(GitInfo {
+                branch: "main".into(),
+                added: 0,
+                removed: 0,
+            }),
+        )];
+        let mut t = Terminal::new(TestBackend::new(80, 8)).unwrap();
+        t.draw(|f| render(f, f.area(), &app)).unwrap();
+        let out = buf_to_string(t.backend().buffer());
+        assert!(out.contains(th::BRANCH), "repo root must use ⎇:\n{out}");
+        assert!(!out.contains(th::WORKTREE), "repo root must not use ⧉:\n{out}");
     }
 
     #[test]

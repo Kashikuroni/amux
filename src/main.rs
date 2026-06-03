@@ -224,6 +224,9 @@ fn handle_action(terminal: &mut Term, app: &mut App, action: Action) -> io::Resu
             )?;
             enable_key_disambiguation(terminal.backend_mut());
             terminal.clear()?;
+            // Attaching reset the window to the full client size; force the next
+            // refresh to re-fit it to the preview width.
+            app.preview_sized = None;
             app.refresh();
         }
         Action::Create {

@@ -233,6 +233,18 @@ pub fn rename_session(old: &str, new: &str) -> io::Result<()> {
     run(&["rename-session", "-t", old, new])
 }
 
+/// Resizes a session's window to `cols`×`rows` so a detached capture reflows to
+/// the preview's width instead of the (wider) creation size — otherwise the
+/// agent's full-width input box wraps to a second row in the narrow preview.
+///
+/// `resize-window` flips the window to `window-size manual`, so `attach_session`
+/// resets it to `latest` to restore fill-the-client sizing on attach.
+/// Best-effort: a failure just leaves the previous (possibly wrapping) capture.
+pub fn resize_window(name: &str, cols: u16, rows: u16) {
+    let (cols, rows) = (cols.max(1).to_string(), rows.max(1).to_string());
+    let _ = run(&["resize-window", "-t", name, "-x", &cols, "-y", &rows]);
+}
+
 /// Captures the visible pane content of a session as plain text.
 pub fn capture_pane(name: &str) -> io::Result<String> {
     let out = tmux()
@@ -268,6 +280,9 @@ pub fn attach_session(name: &str) -> io::Result<()> {
     let _ = run(&["set-option", "-g", "status", "off"]);
     apply_key_bindings();
     apply_resize_options();
+    // The preview shrinks the window via `resize_window`, which sets a per-window
+    // `window-size manual`. Reset it to `latest` so attaching fills the client.
+    let _ = run(&["set-window-option", "-t", name, "window-size", "latest"]);
     tmux().args(["attach-session", "-t", name]).status()?;
     Ok(())
 }

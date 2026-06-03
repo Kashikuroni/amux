@@ -38,6 +38,9 @@ pub const SEL_BAR: &str = "▍";
 pub const IDLE_MARK: &str = "⏸"; // pause — agent is idle
 pub const WAIT_MARK: &str = "●"; // solid dot — agent is waiting on the user
 pub const BRANCH: &str = "⎇";
+/// Branch marker for sessions running in a linked git worktree (vs the repo
+/// root, which uses `BRANCH`). The two joined frames read as "linked checkout".
+pub const WORKTREE: &str = "⧉";
 pub const SEP: &str = "│";
 pub const RULE_CHAR: &str = "━";
 

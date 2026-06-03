@@ -52,6 +52,10 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         rows[2],
     );
 
+    // Record the content area so the capture logic can size the tmux window to
+    // match — otherwise the agent's full-width input box wraps to two rows here.
+    app.preview_dims.set((rows[3].width, rows[3].height));
+
     // Content: parse ANSI from capture-pane into styled Text; fall back to plain.
     // Drop trailing blank lines (tmux pads the pane), then scroll to the bottom so
     // the agent's latest output — and any pending prompt — is always visible.
@@ -113,6 +117,27 @@ mod tests {
         assert!(s.contains("hello"), "missing 'hello':\n{s}");
         assert!(s.contains("world"), "missing 'world':\n{s}");
         assert!(!s.contains('\u{1b}'), "raw escape leaked into buffer:\n{s}");
+    }
+
+    #[test]
+    fn records_content_dims_for_window_sizing() {
+        let mut app = App::new(Config::default());
+        app.sessions = vec![Session {
+            name: "proj".into(),
+            dir: "~/work/proj".into(),
+            created: 0,
+            agent: "claude".into(),
+            status: Status::Idle,
+            attached: false,
+            git: None,
+            worktree_repo: None,
+        }];
+        let mut t = Terminal::new(TestBackend::new(50, 10)).unwrap();
+        t.draw(|f| render(f, f.area(), &app)).unwrap();
+        // Three chrome rows (title, path, rule) sit above the content area, so the
+        // recorded size is the full width × (height - 3) — what the tmux window
+        // must reflow to for the capture to fit without wrapping.
+        assert_eq!(app.preview_dims.get(), (50, 7));
     }
 
     #[test]

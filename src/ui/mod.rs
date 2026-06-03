@@ -41,7 +41,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     footer::render(f, root[2], app);
 
     match &app.mode {
-        Mode::Create(form) => modal_new::render(f, form),
+        Mode::Create(form) => modal_new::render(f, form, app.error.as_deref()),
         Mode::Rename(_) => draw_rename_modal(f, app),
         Mode::ConfirmDelete(form) => {
             let s = app.sessions.iter().find(|s| s.name == form.name);

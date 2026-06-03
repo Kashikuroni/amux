@@ -122,7 +122,7 @@ const BASE_ROWS: u16 = 13;
 /// Extra rows when the worktree toggle is on (base picker + branch input).
 const WORKTREE_ROWS: u16 = 2;
 
-pub fn render(f: &mut Frame, form: &CreateForm) {
+pub fn render(f: &mut Frame, form: &CreateForm, error: Option<&str>) {
     let full = f.area();
     let picker_active = form.field == CreateField::Dir && !form.dir_entries.is_empty();
     let want_picker = if picker_active {
@@ -135,7 +135,9 @@ pub fn render(f: &mut Frame, form: &CreateForm) {
     let warn_extra = u16::from(agent_warn);
     // Panel hugs its content: border (2) + top/bottom inner padding (2) + rows.
     let wt_extra = if form.worktree { WORKTREE_ROWS } else { 0 };
-    let h = (BASE_ROWS + want_picker + wt_extra + warn_extra + 4).min(full.height);
+    // One extra row for the validation error banner when present.
+    let err_extra = u16::from(error.is_some());
+    let h = (BASE_ROWS + want_picker + wt_extra + warn_extra + err_extra + 4).min(full.height);
     let w = ((full.width as u32 * 70 / 100) as u16).min(full.width);
     let area = Rect {
         x: full.x + (full.width.saturating_sub(w)) / 2,
@@ -182,6 +184,21 @@ pub fn render(f: &mut Frame, form: &CreateForm) {
         );
     }
     y += 2;
+
+    // Validation error banner — explains why Enter wouldn't advance (e.g. an
+    // empty name or a '.' in it), so a rejected submit isn't a silent no-op.
+    if let Some(msg) = error {
+        if let Some(r) = row(x, y, w, bottom) {
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    format!("! {msg}"),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ))),
+                r,
+            );
+        }
+        y += 1;
+    }
 
     // name.
     if let Some(r) = row(x, y, w, bottom) {
@@ -404,7 +421,7 @@ mod tests {
     fn new_modal_shows_inline_labels_and_agent_segments() {
         let form = CreateForm::new("claude", &["claude".into(), "codex".into()]);
         let mut t = Terminal::new(TestBackend::new(80, 30)).unwrap();
-        t.draw(|f| render(f, &form)).unwrap();
+        t.draw(|f| render(f, &form, None)).unwrap();
         let s = buf_to_string(t.backend().buffer());
         assert!(s.contains("New session"), "header title");
         assert!(s.contains("of 3"), "step indicator");
@@ -421,13 +438,26 @@ mod tests {
     }
 
     #[test]
+    fn new_modal_shows_validation_error_banner() {
+        let form = CreateForm::new("claude", &["claude".into()]);
+        let mut t = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        t.draw(|f| render(f, &form, Some("name cannot contain ':' or '.'")))
+            .unwrap();
+        let s = buf_to_string(t.backend().buffer());
+        assert!(
+            s.contains("name cannot contain"),
+            "validation error must be visible:\n{s}"
+        );
+    }
+
+    #[test]
     fn new_modal_shows_worktree_rows_when_enabled() {
         let mut form = CreateForm::new("claude", &["claude".into()]);
         form.worktree = true;
         form.base_branches = vec!["main".into()];
         form.new_branch = "feature-x".into();
         let mut t = Terminal::new(TestBackend::new(90, 40)).unwrap();
-        t.draw(|f| render(f, &form)).unwrap();
+        t.draw(|f| render(f, &form, None)).unwrap();
         let s = buf_to_string(t.backend().buffer());
         assert!(s.contains("base"), "base label");
         assert!(s.contains("branch"), "branch label");
@@ -439,7 +469,7 @@ mod tests {
     fn new_modal_hides_worktree_rows_by_default() {
         let form = CreateForm::new("claude", &["claude".into()]);
         let mut t = Terminal::new(TestBackend::new(90, 40)).unwrap();
-        t.draw(|f| render(f, &form)).unwrap();
+        t.draw(|f| render(f, &form, None)).unwrap();
         let s = buf_to_string(t.backend().buffer());
         assert!(!s.contains("base"));
         assert!(s.contains("of 3"));
@@ -451,7 +481,7 @@ mod tests {
         // project (not a generic default), and a recognizable project dir.
         let form = CreateForm::for_project("/home/u/proj", "codex", &["codex".into()]);
         let mut t = Terminal::new(TestBackend::new(80, 30)).unwrap();
-        t.draw(|f| render(f, &form)).unwrap();
+        t.draw(|f| render(f, &form, None)).unwrap();
         let s = buf_to_string(t.backend().buffer());
         assert!(s.contains("of 2"), "streamlined step total:\n{s}");
         assert!(s.contains("proj"), "project path on directory row:\n{s}");
