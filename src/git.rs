@@ -148,7 +148,12 @@ pub fn add_worktree(
 pub fn branch_exists(dir: &str, branch: &str) -> bool {
     git_out(
         dir,
-        &["show-ref", "--verify", "--quiet", &format!("refs/heads/{branch}")],
+        &[
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ],
     )
     .is_some()
 }
