@@ -95,9 +95,11 @@ mod tests {
 
     #[test]
     fn notes_round_trip_through_toml() {
-        let mut s = State::default();
-        s.inbox = "# today\n- [ ] ship".into();
-        s.notes.insert("proj".into(), "- [x] done".into());
+        let s = State {
+            inbox: "# today\n- [ ] ship".into(),
+            notes: BTreeMap::from([("proj".to_string(), "- [x] done".to_string())]),
+            ..Default::default()
+        };
         let text = toml::to_string(&s).unwrap();
         let back: State = toml::from_str(&text).unwrap();
         assert_eq!(back.inbox, s.inbox);

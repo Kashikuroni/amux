@@ -3055,7 +3055,7 @@ mod tests {
         let mut app = App::new(Config::default());
         app.notes.insert("s".into(), "- [ ] x".into());
         app.notes.remove("s"); // mirrors the Kill handler
-        assert!(app.notes.get("s").is_none());
+        assert!(!app.notes.contains_key("s"));
     }
 
     #[test]
@@ -3066,7 +3066,7 @@ mod tests {
             app.notes.insert("new".into(), t);
         }
         assert_eq!(app.notes.get("new").map(String::as_str), Some("- [ ] x"));
-        assert!(app.notes.get("old").is_none());
+        assert!(!app.notes.contains_key("old"));
     }
 
     fn note_app_with(text: &str) -> App {
