@@ -459,6 +459,9 @@ pub enum Action {
     SendShiftTab {
         name: String,
     },
+    /// Send double Ctrl+C to all Claude sessions and begin watching for
+    /// their `claude --resume <uuid>` output so they can be restarted.
+    RestartAllClaude,
 }
 
 #[derive(Copy, Clone)]
@@ -527,6 +530,11 @@ pub struct App {
     /// Reason the latest usage fetch failed ("429", "no auth", …), or `None` if
     /// it succeeded. Shown in the header so an empty limits area is explainable.
     pub usage_error: Option<String>,
+    /// Sessions that received double Ctrl+C and are waiting for a
+    /// `claude --resume <uuid>` command to appear in their pane output.
+    /// Maps session name → `now_unix` when the restart was initiated (for
+    /// the 30-second timeout).
+    pub restarting: HashMap<String, i64>,
     /// User's custom session order *within projects* (by name). Empty = tmux order.
     pub order: Vec<String>,
     /// User's custom project (group) order, by project root path.
@@ -571,6 +579,7 @@ impl App {
             usage: None,
             plan: None,
             usage_error: None,
+            restarting: HashMap::new(),
             order: Vec::new(),
             project_order: Vec::new(),
             project_names: std::collections::BTreeMap::new(),
@@ -897,6 +906,10 @@ impl App {
                         remove_worktree: false,
                     });
                 }
+            }
+            // u: restart all Claude sessions (double Ctrl+C, then auto-resume).
+            KeyCode::Char('u') => {
+                return Some(Action::RestartAllClaude);
             }
             KeyCode::Char('r') => {
                 if let Some(name) = self.selected_name() {
@@ -2102,6 +2115,17 @@ mod tests {
         app.selected = 0;
         let act = app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE));
         assert!(matches!(act, Some(Action::SendShiftTab { name }) if name == "s"));
+    }
+
+    #[test]
+    fn u_key_returns_restart_all_claude_action() {
+        let mut app = App::new(Config::default());
+        let key = KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE);
+        let action = app.handle_key(key);
+        assert!(
+            matches!(action, Some(Action::RestartAllClaude)),
+            "expected RestartAllClaude, got {action:?}"
+        );
     }
 
     #[test]

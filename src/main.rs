@@ -338,6 +338,9 @@ fn handle_action(terminal: &mut Term, app: &mut App, action: Action) -> io::Resu
             }
             app.refresh();
         }
+        // TODO(Task 3): send double Ctrl+C to all Claude sessions and begin
+        // watching for `claude --resume <uuid>` output to restart them.
+        Action::RestartAllClaude => {}
     }
     Ok(())
 }
