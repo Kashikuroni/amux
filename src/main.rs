@@ -224,6 +224,30 @@ fn run(
         if !app.tmux_missing && last_refresh.elapsed() >= refresh {
             app.refresh();
             last_refresh = Instant::now();
+
+            // For sessions awaiting resume: scan their pane for the
+            // `claude --resume <uuid>` command and send it when found.
+            // Time out after 30 s (something went wrong — user can retry).
+            if !app.restarting.is_empty() {
+                let mut to_clear: Vec<String> = Vec::new();
+                for (name, &started) in &app.restarting {
+                    if app.now_unix - started > 30 {
+                        to_clear.push(name.clone());
+                        continue;
+                    }
+                    if let Ok(pane) = tmux::capture_pane(name) {
+                        if let Some(cmd) = tmux::parse_resume_command(&pane) {
+                            if let Err(e) = tmux::send_text(name, &cmd) {
+                                app.error = Some(format!("resume: {e}"));
+                            }
+                            to_clear.push(name.clone());
+                        }
+                    }
+                }
+                for name in &to_clear {
+                    app.restarting.remove(name);
+                }
+            }
         }
 
         if app.should_quit {
@@ -338,9 +362,24 @@ fn handle_action(terminal: &mut Term, app: &mut App, action: Action) -> io::Resu
             }
             app.refresh();
         }
-        // TODO(Task 3): send double Ctrl+C to all Claude sessions and begin
-        // watching for `claude --resume <uuid>` output to restart them.
-        Action::RestartAllClaude => {}
+        Action::RestartAllClaude => {
+            let now = app.now_unix;
+            // is_claude: first whitespace token == "claude" (mirrors ui::preview::is_claude).
+            let names: Vec<String> = app
+                .sessions
+                .iter()
+                .filter(|s| s.agent.split_whitespace().next() == Some("claude"))
+                .map(|s| s.name.clone())
+                .collect();
+            for name in names {
+                if let Err(e) = tmux::send_ctrl_c(&name) {
+                    app.error = Some(format!("restart: {e}"));
+                } else {
+                    app.restarting.insert(name, now);
+                }
+            }
+            app.refresh();
+        }
     }
     Ok(())
 }
