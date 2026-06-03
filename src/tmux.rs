@@ -186,7 +186,10 @@ pub fn new_session(name: &str, dir: &str, command: &str, label: &str) -> io::Res
         let _ = run(&["kill-session", "-t", name]);
         return Err(e);
     }
+    // Detach + scroll key bindings. Server-global, but our socket only ever
+    // hosts am sessions, so it stays scoped to them. Best-effort.
     apply_key_bindings();
+    // Hide tmux's status bar — am provides its own chrome. Best-effort.
     let _ = run(&["set-option", "-g", "status", "off"]);
     Ok(())
 }
