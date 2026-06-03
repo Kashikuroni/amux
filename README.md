@@ -50,7 +50,17 @@ git worktrees, and keep per‑session markdown to‑do notes.
 
 ## Install
 
-### Homebrew (recommended on macOS)
+### Quick install (script) — recommended
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Kashikuroni/amux/main/install.sh | sh
+```
+
+Detects your Mac's architecture, downloads the latest release binary, clears the
+Gatekeeper quarantine, and puts `amux` on your PATH. Override the version or
+location with `AMUX_VERSION=v0.1.0` / `AMUX_BIN_DIR=~/bin`.
+
+### Homebrew
 
 ```sh
 brew install kashikuroni/tap/amux
@@ -66,6 +76,16 @@ tar xzf amux-*-apple-darwin.tar.gz
 xattr -d com.apple.quarantine amux   # unsigned binary: clear Gatekeeper
 sudo mv amux /usr/local/bin/
 ```
+
+### Prebuilt via cargo-binstall (no compile)
+
+```sh
+cargo binstall --git https://github.com/Kashikuroni/amux amux
+```
+
+Fetches the prebuilt binary straight from GitHub Releases — needs
+[`cargo-binstall`](https://github.com/cargo-bins/cargo-binstall), but no crates.io
+and no compilation.
 
 ### From source (`cargo install`)
 

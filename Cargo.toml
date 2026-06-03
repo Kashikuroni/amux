@@ -11,6 +11,14 @@ keywords = ["tui", "tmux", "ai", "agent", "claude"]
 categories = ["command-line-utilities", "development-tools"]
 rust-version = "1.82"
 
+# cargo-binstall: fetch the prebuilt binary from GitHub Releases (no crates.io,
+# no compile). `cargo binstall --git https://github.com/Kashikuroni/amux amux`.
+# Asset naming matches .github/workflows/release.yml.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-v{ version }-{ target }.tar.gz"
+pkg-fmt = "tgz"
+bin-dir = "{ bin }"
+
 # The library keeps the short internal name `am` so existing `am::` paths in the
 # binary and tests are unchanged; the installed binary is `amux`.
 [lib]
