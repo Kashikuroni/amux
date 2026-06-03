@@ -306,9 +306,11 @@ fn is_resume_uuid(s: &str) -> bool {
 
 /// Scans pane output for the last `claude --resume <uuid>` command and returns
 /// it as a ready-to-run string. Returns `None` if no valid UUID-shaped token is
-/// found. Extra text after the UUID on the same line is ignored.
+/// found. ANSI escapes are stripped first (capture-pane runs with `-e`), and
+/// extra text after the UUID on the same line is ignored.
 pub fn parse_resume_command(pane: &str) -> Option<String> {
-    pane.lines().rev().find_map(|line| {
+    let clean = crate::app::strip_ansi(pane);
+    clean.lines().rev().find_map(|line| {
         let trimmed = line.trim();
         let rest = trimmed.strip_prefix("claude --resume ")?;
         let token = rest.split_whitespace().next()?;
@@ -440,6 +442,16 @@ mod tests {
     fn parse_resume_command_rejects_non_uuid_token() {
         assert!(parse_resume_command("claude --resume not-a-uuid").is_none());
         assert!(parse_resume_command("claude --resume 1234").is_none());
+    }
+
+    #[test]
+    fn parse_resume_command_strips_ansi_escapes() {
+        // capture-pane -e emits SGR codes; Claude colorizes the resume hint.
+        let pane = "\u{1b}[33mclaude --resume f612324d-83b6-407a-9d74-d89ef7b91f70\u{1b}[0m\n";
+        assert_eq!(
+            parse_resume_command(pane),
+            Some("claude --resume f612324d-83b6-407a-9d74-d89ef7b91f70".to_string())
+        );
     }
 
     #[test]
