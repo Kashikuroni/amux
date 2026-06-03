@@ -1,16 +1,12 @@
 name: Release
 
-# Build macOS binaries and attach them to the GitHub Release when a vX.Y.Z tag
-# is pushed. Create the tag with: git tag v0.1.0 && git push origin v0.1.0
+# On a vX.Y.Z tag push: create the GitHub Release, then build the macOS binaries
+# and attach them. Re-run by re-pushing the tag:
+#   git tag -f v0.1.0 && git push -f origin v0.1.0
 on:
   push:
     tags:
       - "v*.*.*"
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: "Tag to build (e.g. v0.1.0)"
-        required: true
 
 permissions:
   contents: write
@@ -19,7 +15,22 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # taiki-e/upload-rust-binary-action uploads to an *existing* release, so create
+  # it first (idempotent: skip if it already exists).
+  create-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create the release if it doesn't exist
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release view "$TAG" >/dev/null 2>&1 \
+            || gh release create "$TAG" --title "$TAG" --notes "amux $TAG"
+
   upload-binaries:
+    needs: create-release
     name: ${{ matrix.target }}
     runs-on: macos-latest
     strategy:
@@ -40,9 +51,6 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      # Builds `amux` for the target and uploads a tarball to the release for
-      # the pushed tag (creating the release if needed). The token is provided
-      # automatically; no untrusted input is interpolated into shell commands.
       - name: Build and upload
         uses: taiki-e/upload-rust-binary-action@v1
         with:
@@ -50,5 +58,4 @@ jobs:
           target: ${{ matrix.target }}
           archive: $bin-$tag-$target
           tar: unix
-          ref: refs/tags/${{ github.event.inputs.tag || github.ref_name }}
           token: ${{ secrets.GITHUB_TOKEN }}
