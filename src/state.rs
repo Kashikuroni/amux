@@ -22,6 +22,11 @@ pub struct State {
     /// against two projects sharing a folder name). Value is the shown name; the
     /// directory itself is never renamed. BTreeMap → deterministic file output.
     pub project_names: BTreeMap<String, String>,
+    /// Global "Inbox" note (markdown). Empty by default.
+    pub inbox: String,
+    /// Per-session notes (markdown), keyed by tmux session name. BTreeMap →
+    /// deterministic file output.
+    pub notes: BTreeMap<String, String>,
 }
 
 fn state_path() -> Option<PathBuf> {
@@ -73,6 +78,8 @@ mod tests {
             order: vec!["a".into(), "b".into()],
             project_order: vec!["/home/u/p".into()],
             project_names: names,
+            inbox: String::new(),
+            notes: BTreeMap::new(),
         };
         let toml = toml::to_string(&s).unwrap();
         let back: State = toml::from_str(&toml).unwrap();
@@ -84,5 +91,24 @@ mod tests {
         let s: State = toml::from_str("").unwrap();
         assert_eq!(s.split_pct, None);
         assert!(s.order.is_empty());
+    }
+
+    #[test]
+    fn notes_round_trip_through_toml() {
+        let mut s = State::default();
+        s.inbox = "# today\n- [ ] ship".into();
+        s.notes.insert("proj".into(), "- [x] done".into());
+        let text = toml::to_string(&s).unwrap();
+        let back: State = toml::from_str(&text).unwrap();
+        assert_eq!(back.inbox, s.inbox);
+        assert_eq!(back.notes.get("proj").map(String::as_str), Some("- [x] done"));
+    }
+
+    #[test]
+    fn missing_notes_fields_default_empty() {
+        // An old state file with no inbox/notes keys still loads.
+        let s: State = toml::from_str("split_pct = 40").unwrap();
+        assert_eq!(s.inbox, "");
+        assert!(s.notes.is_empty());
     }
 }

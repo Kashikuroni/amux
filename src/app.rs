@@ -131,6 +131,23 @@ impl CreateForm {
         }
     }
 
+    fn prev_field(&self) -> CreateField {
+        let seq = self.field_sequence();
+        match seq.iter().position(|&f| f == self.field) {
+            // Wrap to the last step from the first, mirroring `next_field`.
+            Some(i) => seq[(i + seq.len() - 1) % seq.len()],
+            None => seq[0],
+        }
+    }
+
+    /// Move focus to the previous field (Shift+Tab). Mirror of `advance`.
+    pub fn retreat(&mut self) {
+        self.field = self.prev_field();
+        if self.field == CreateField::Dir {
+            self.refresh_dir_entries();
+        }
+    }
+
     /// True when the current `dir` resolves inside a git repository.
     pub fn dir_is_repo(&self) -> bool {
         crate::git::repo_root(&expand_tilde(&self.dir)).is_some()
@@ -276,156 +293,74 @@ pub struct KillForm {
 
 /// Free-text reply being composed for a specific session.
 ///
-/// `cursor` is a *character* index into `buffer` (0..=char_count), so editing
-/// stays correct with multi-byte input (e.g. Cyrillic). All byte offsets are
-/// derived from it on demand.
+/// Editing is delegated to [`crate::editor::TextArea`] which holds the buffer
+/// and character-indexed cursor.
 #[derive(Debug, Clone)]
 pub struct ReplyForm {
     pub name: String,
-    pub buffer: String,
-    pub cursor: usize,
+    pub area: crate::editor::TextArea,
 }
 
 impl ReplyForm {
     fn new(name: String) -> Self {
         Self {
             name,
-            buffer: String::new(),
-            cursor: 0,
+            area: crate::editor::TextArea::default(),
         }
     }
 
-    fn char_count(&self) -> usize {
-        self.buffer.chars().count()
+    pub fn insert_char(&mut self, c: char) {
+        self.area.insert_char(c)
     }
 
-    /// Byte offset of character `idx` (or end of buffer if out of range).
-    fn byte_at(&self, idx: usize) -> usize {
-        self.buffer
-            .char_indices()
-            .nth(idx)
-            .map(|(b, _)| b)
-            .unwrap_or(self.buffer.len())
+    pub fn insert_str(&mut self, s: &str) {
+        self.area.insert_str(s)
     }
 
-    fn insert_char(&mut self, c: char) {
-        let b = self.byte_at(self.cursor);
-        self.buffer.insert(b, c);
-        self.cursor += 1;
+    pub fn backspace(&mut self) {
+        self.area.backspace()
     }
 
-    fn insert_str(&mut self, s: &str) {
-        let b = self.byte_at(self.cursor);
-        self.buffer.insert_str(b, s);
-        self.cursor += s.chars().count();
+    pub fn delete(&mut self) {
+        self.area.delete()
     }
 
-    fn backspace(&mut self) {
-        if self.cursor == 0 {
-            return;
-        }
-        let b = self.byte_at(self.cursor - 1);
-        self.buffer.remove(b);
-        self.cursor -= 1;
+    pub fn left(&mut self) {
+        self.area.left()
     }
 
-    fn delete(&mut self) {
-        if self.cursor >= self.char_count() {
-            return;
-        }
-        let b = self.byte_at(self.cursor);
-        self.buffer.remove(b);
+    pub fn right(&mut self) {
+        self.area.right()
     }
 
-    fn left(&mut self) {
-        self.cursor = self.cursor.saturating_sub(1);
+    pub fn home(&mut self) {
+        self.area.home()
     }
 
-    fn right(&mut self) {
-        if self.cursor < self.char_count() {
-            self.cursor += 1;
-        }
+    pub fn end(&mut self) {
+        self.area.end()
     }
 
-    /// Start/end character index of the logical line the cursor sits on.
+    pub fn up(&mut self) {
+        self.area.up()
+    }
+
+    pub fn down(&mut self) {
+        self.area.down()
+    }
+
+    pub fn delete_word(&mut self) {
+        self.area.delete_word()
+    }
+
+    pub fn delete_to_line_start(&mut self) {
+        self.area.delete_to_line_start()
+    }
+
+    /// Delegates to `TextArea::line_bounds` for tests within this module.
+    #[cfg(test)]
     fn line_bounds(&self) -> (usize, usize) {
-        let chars: Vec<char> = self.buffer.chars().collect();
-        let mut start = self.cursor.min(chars.len());
-        while start > 0 && chars[start - 1] != '\n' {
-            start -= 1;
-        }
-        let mut end = self.cursor.min(chars.len());
-        while end < chars.len() && chars[end] != '\n' {
-            end += 1;
-        }
-        (start, end)
-    }
-
-    fn home(&mut self) {
-        self.cursor = self.line_bounds().0;
-    }
-
-    fn end(&mut self) {
-        self.cursor = self.line_bounds().1;
-    }
-
-    /// Move up one logical line, preserving the column where possible.
-    fn up(&mut self) {
-        let chars: Vec<char> = self.buffer.chars().collect();
-        let (start, _) = self.line_bounds();
-        if start == 0 {
-            self.cursor = 0;
-            return;
-        }
-        let col = self.cursor - start;
-        let prev_end = start - 1; // the '\n'
-        let mut prev_start = prev_end;
-        while prev_start > 0 && chars[prev_start - 1] != '\n' {
-            prev_start -= 1;
-        }
-        let prev_len = prev_end - prev_start;
-        self.cursor = prev_start + col.min(prev_len);
-    }
-
-    /// Move down one logical line, preserving the column where possible.
-    fn down(&mut self) {
-        let chars: Vec<char> = self.buffer.chars().collect();
-        let (start, end) = self.line_bounds();
-        if end >= chars.len() {
-            self.cursor = chars.len();
-            return;
-        }
-        let col = self.cursor - start;
-        let next_start = end + 1;
-        let mut next_end = next_start;
-        while next_end < chars.len() && chars[next_end] != '\n' {
-            next_end += 1;
-        }
-        let next_len = next_end - next_start;
-        self.cursor = next_start + col.min(next_len);
-    }
-
-    /// Delete the word (and any trailing spaces) before the cursor (Ctrl+W).
-    fn delete_word(&mut self) {
-        let chars: Vec<char> = self.buffer.chars().collect();
-        let mut i = self.cursor;
-        while i > 0 && chars[i - 1] == ' ' {
-            i -= 1;
-        }
-        while i > 0 && chars[i - 1] != ' ' && chars[i - 1] != '\n' {
-            i -= 1;
-        }
-        let (sb, eb) = (self.byte_at(i), self.byte_at(self.cursor));
-        self.buffer.replace_range(sb..eb, "");
-        self.cursor = i;
-    }
-
-    /// Delete from the start of the current line to the cursor (Ctrl+U).
-    fn delete_to_line_start(&mut self) {
-        let (start, _) = self.line_bounds();
-        let (sb, eb) = (self.byte_at(start), self.byte_at(self.cursor));
-        self.buffer.replace_range(sb..eb, "");
-        self.cursor = start;
+        self.area.line_bounds()
     }
 }
 
@@ -443,6 +378,35 @@ pub enum Mode {
     /// Editing a project's display name (entered with Shift+R). Display-only —
     /// never renames the directory.
     RenameProject(ProjectRenameForm),
+    /// Focused-note mode: the user is reading/editing the right-pane note.
+    Note(NoteState),
+}
+
+/// Which note `Mode::Note` is editing.
+#[derive(Debug, Clone, PartialEq)]
+pub enum NoteTarget {
+    Inbox,
+    Session(String),
+}
+
+/// Render vs raw-edit sub-mode inside a focused note.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoteSub {
+    Render,
+    Edit,
+}
+
+/// Focused-note state (the user pressed Tab into the note pane).
+#[derive(Debug, Clone)]
+pub struct NoteState {
+    pub target: NoteTarget,
+    pub sub: NoteSub,
+    /// Task ordinal the render cursor is on.
+    pub cursor: usize,
+    /// Visual-selection anchor (task ordinal), or None when not selecting.
+    pub anchor: Option<usize>,
+    /// Edit buffer; only meaningful in `Edit` sub-mode.
+    pub editor: crate::editor::TextArea,
 }
 
 /// Display-name editor for a project, keyed by its root path.
@@ -505,6 +469,16 @@ enum ModeKind {
     Reply,
     SelectSession,
     RenameProject,
+    Note,
+}
+
+/// What the right pane renders: the live session preview, the selected session's
+/// note, or the global Inbox note.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RightPane {
+    Preview,
+    SessionNote,
+    Inbox,
 }
 
 pub struct App {
@@ -551,6 +525,12 @@ pub struct App {
     /// Set when persisted state (split width / order / names) changed and needs
     /// saving. The event loop saves and clears it; keeps `App` itself IO-free.
     pub dirty: bool,
+    /// Global Inbox note (markdown).
+    pub inbox: String,
+    /// Per-session notes (markdown), keyed by tmux session name.
+    pub notes: std::collections::BTreeMap<String, String>,
+    /// Which content the right pane shows.
+    pub right_pane: RightPane,
 }
 
 impl App {
@@ -581,6 +561,9 @@ impl App {
             project_order: Vec::new(),
             project_names: std::collections::BTreeMap::new(),
             dirty: false,
+            inbox: String::new(),
+            notes: std::collections::BTreeMap::new(),
+            right_pane: RightPane::Preview,
         }
     }
 
@@ -592,6 +575,8 @@ impl App {
         self.order = state.order;
         self.project_order = state.project_order;
         self.project_names = state.project_names;
+        self.inbox = state.inbox;
+        self.notes = state.notes;
     }
 
     /// Snapshots the persistable UI state for saving to disk.
@@ -601,6 +586,8 @@ impl App {
             order: self.order.clone(),
             project_order: self.project_order.clone(),
             project_names: self.project_names.clone(),
+            inbox: self.inbox.clone(),
+            notes: self.notes.clone(),
         }
     }
 
@@ -784,6 +771,7 @@ impl App {
             Mode::Reply(_) => ModeKind::Reply,
             Mode::SelectSession => ModeKind::SelectSession,
             Mode::RenameProject(_) => ModeKind::RenameProject,
+            Mode::Note(_) => ModeKind::Note,
         }
     }
 
@@ -804,6 +792,7 @@ impl App {
             ModeKind::Reply => self.handle_reply_key(key),
             ModeKind::SelectSession => self.handle_select_session_key(key),
             ModeKind::RenameProject => self.handle_rename_project_key(key),
+            ModeKind::Note => self.handle_note_key(key),
         }
     }
 
@@ -968,6 +957,34 @@ impl App {
                     self.mode = Mode::Reply(ReplyForm::new(name));
                 }
             }
+            KeyCode::Char('t') => {
+                self.right_pane = match self.right_pane {
+                    RightPane::SessionNote => RightPane::Preview,
+                    _ => RightPane::SessionNote,
+                };
+            }
+            KeyCode::Char('T') => {
+                self.right_pane = match self.right_pane {
+                    RightPane::Inbox => RightPane::Preview,
+                    _ => RightPane::Inbox,
+                };
+            }
+            KeyCode::Tab if self.right_pane != RightPane::Preview => {
+                let target = match self.right_pane {
+                    RightPane::Inbox => NoteTarget::Inbox,
+                    _ => match self.selected_name() {
+                        Some(name) => NoteTarget::Session(name),
+                        None => return None,
+                    },
+                };
+                self.mode = Mode::Note(NoteState {
+                    target,
+                    sub: NoteSub::Render,
+                    cursor: 0,
+                    anchor: None,
+                    editor: crate::editor::TextArea::default(),
+                });
+            }
             _ => {}
         }
         None
@@ -1013,7 +1030,7 @@ impl App {
             KeyCode::Char(c) if !ctrl => form.insert_char(c),
             // Plain Enter sends the composed message.
             KeyCode::Enter => {
-                let text = form.buffer.trim().to_string();
+                let text = form.area.buffer.trim().to_string();
                 if text.is_empty() {
                     return None;
                 }
@@ -1085,6 +1102,13 @@ impl App {
         // key's submit still fails, so the banner always reflects the last action.
         self.error = None;
 
+        // Shift+Tab walks focus backwards from any step (mirror of Tab).
+        if key.code == KeyCode::BackTab {
+            form.retreat();
+            self.mode = Mode::Create(form);
+            return None;
+        }
+
         // Dir step: interactive picker (live subdir list).
         if form.field == CreateField::Dir {
             match key.code {
@@ -1155,12 +1179,13 @@ impl App {
             return None;
         }
 
-        // Base-branch picker step.
+        // Base-branch picker step. h/l mirror ←/→ (vim-style) — it's a pure
+        // selection step with no free text, so the letters are unambiguous.
         if form.field == CreateField::Base {
             match key.code {
                 KeyCode::Esc => return None,
-                KeyCode::Left => form.cycle_base(-1),
-                KeyCode::Right => form.cycle_base(1),
+                KeyCode::Left | KeyCode::Char('h') => form.cycle_base(-1),
+                KeyCode::Right | KeyCode::Char('l') => form.cycle_base(1),
                 KeyCode::Tab | KeyCode::Enter => form.advance(),
                 _ => {}
             }
@@ -1173,6 +1198,14 @@ impl App {
             KeyCode::Esc => return None,
             KeyCode::Left if form.field == CreateField::Agent => form.cycle_agent(-1),
             KeyCode::Right if form.field == CreateField::Agent => form.cycle_agent(1),
+            // h/l cycle agents vim-style, but only while a preset is selected —
+            // once on the custom slot they're typed so a command can contain them.
+            KeyCode::Char('h') if form.field == CreateField::Agent && !form.agent_is_custom() => {
+                form.cycle_agent(-1)
+            }
+            KeyCode::Char('l') if form.field == CreateField::Agent && !form.agent_is_custom() => {
+                form.cycle_agent(1)
+            }
             KeyCode::Backspace => {
                 if form.field == CreateField::Agent && !form.agent_is_custom() {
                     // Backspace off a preset: jump to custom and start fresh (matches Char).
@@ -1291,6 +1324,103 @@ impl App {
             _ => {}
         }
         None
+    }
+
+    /// The markdown text for a note target (read-only). Missing session = "".
+    pub fn note_text(&self, target: &NoteTarget) -> &str {
+        match target {
+            NoteTarget::Inbox => &self.inbox,
+            NoteTarget::Session(name) => self.notes.get(name).map(String::as_str).unwrap_or(""),
+        }
+    }
+
+    /// Mutable handle to a note target, creating an empty session entry if needed.
+    pub fn note_text_mut(&mut self, target: &NoteTarget) -> &mut String {
+        match target {
+            NoteTarget::Inbox => &mut self.inbox,
+            NoteTarget::Session(name) => self.notes.entry(name.clone()).or_default(),
+        }
+    }
+
+    fn handle_note_key(&mut self, key: KeyEvent) -> Option<Action> {
+        let Mode::Note(mut ns) = std::mem::replace(&mut self.mode, Mode::List) else {
+            return None;
+        };
+        match ns.sub {
+            NoteSub::Render => {
+                let task_count = crate::note::task_line_indices(self.note_text(&ns.target)).len();
+                let last = task_count.saturating_sub(1);
+                match key.code {
+                    KeyCode::Esc => {
+                        if ns.anchor.is_some() {
+                            ns.anchor = None; // first esc clears selection
+                            self.mode = Mode::Note(ns);
+                        }
+                        // else: leave Mode::List (exits focus)
+                        return None;
+                    }
+                    KeyCode::Char('j') | KeyCode::Down => {
+                        ns.cursor = (ns.cursor + 1).min(last);
+                    }
+                    KeyCode::Char('k') | KeyCode::Up => {
+                        ns.cursor = ns.cursor.saturating_sub(1);
+                    }
+                    KeyCode::Char('V') => {
+                        ns.anchor = Some(ns.cursor);
+                    }
+                    KeyCode::Char(' ') => {
+                        let range = selection_range(&ns);
+                        let buf = self.note_text_mut(&ns.target);
+                        for ord in range {
+                            crate::note::toggle(buf, ord);
+                        }
+                        ns.anchor = None;
+                        self.dirty = true;
+                    }
+                    KeyCode::Char('y') => {
+                        let ords: Vec<usize> = selection_range(&ns).collect();
+                        let text = crate::note::selected_as_numbered(self.note_text(&ns.target), &ords);
+                        crate::clip::copy(&text);
+                        ns.anchor = None;
+                    }
+                    KeyCode::Char('e') => {
+                        ns.editor = crate::editor::TextArea::new(self.note_text(&ns.target).to_string());
+                        ns.sub = NoteSub::Edit;
+                    }
+                    _ => {}
+                }
+                self.mode = Mode::Note(ns);
+                None
+            }
+            NoteSub::Edit => {
+                let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+                match key.code {
+                    KeyCode::Esc => {
+                        // Commit the edited buffer back to the note, re-parse on render.
+                        *self.note_text_mut(&ns.target) = ns.editor.buffer.clone();
+                        self.dirty = true;
+                        ns.cursor = 0;
+                        ns.anchor = None;
+                        ns.sub = NoteSub::Render;
+                    }
+                    KeyCode::Enter => ns.editor.insert_char('\n'),
+                    KeyCode::Char('w') if ctrl => ns.editor.delete_word(),
+                    KeyCode::Char('u') if ctrl => ns.editor.delete_to_line_start(),
+                    KeyCode::Char(c) if !ctrl => ns.editor.insert_char(c),
+                    KeyCode::Backspace => ns.editor.backspace(),
+                    KeyCode::Delete => ns.editor.delete(),
+                    KeyCode::Left => ns.editor.left(),
+                    KeyCode::Right => ns.editor.right(),
+                    KeyCode::Up => ns.editor.up(),
+                    KeyCode::Down => ns.editor.down(),
+                    KeyCode::Home => ns.editor.home(),
+                    KeyCode::End => ns.editor.end(),
+                    _ => {}
+                }
+                self.mode = Mode::Note(ns);
+                None
+            }
+        }
     }
 
     /// Re-derives sessions from tmux and recomputes statuses + preview.
@@ -1646,6 +1776,24 @@ pub fn validate_create(name: &str, dir: &str, existing: &[String]) -> Result<(),
         return Err(format!("directory not found: {expanded}"));
     }
     Ok(())
+}
+
+/// The task ordinals covered by the current selection (anchor..=cursor), or just
+/// the cursor when nothing is selected.
+fn selection_range(ns: &NoteState) -> std::ops::RangeInclusive<usize> {
+    match ns.anchor {
+        Some(a) => a.min(ns.cursor)..=a.max(ns.cursor),
+        None => ns.cursor..=ns.cursor,
+    }
+}
+
+/// Task ordinals currently selected (for render highlight). Empty when no
+/// selection is active.
+pub fn selection_set(ns: &NoteState) -> std::collections::HashSet<usize> {
+    match ns.anchor {
+        Some(_) => selection_range(ns).collect(),
+        None => std::collections::HashSet::new(),
+    }
 }
 
 #[cfg(test)]
@@ -2113,6 +2261,76 @@ mod tests {
         assert_eq!(form.dir, "~/");
     }
 
+    fn cform(app: &App) -> &CreateForm {
+        match &app.mode {
+            Mode::Create(f) => f,
+            other => panic!("expected Create mode, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn retreat_mirrors_advance_and_wraps_to_last() {
+        let mut form = CreateForm::new("claude", &["claude".into()]);
+        let last = *form.field_sequence().last().unwrap();
+        // advance then retreat returns to the start.
+        form.advance();
+        assert_ne!(form.field, CreateField::Name);
+        form.retreat();
+        assert_eq!(form.field, CreateField::Name);
+        // retreat from the first field wraps to the final step.
+        form.retreat();
+        assert_eq!(form.field, last);
+    }
+
+    #[test]
+    fn shift_tab_walks_focus_backwards() {
+        let mut app = App::new(Config::default());
+        let mut form = CreateForm::new("claude", &["claude".into()]);
+        form.field = CreateField::Terminal; // a mid-flow step
+        app.mode = Mode::Create(form);
+        app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE));
+        assert_eq!(cform(&app).field, CreateField::Dir); // step before Terminal
+    }
+
+    #[test]
+    fn base_picker_cycles_with_h_and_l() {
+        let mut app = App::new(Config::default());
+        let mut form = CreateForm::new("claude", &["claude".into()]);
+        form.field = CreateField::Base;
+        form.base_branches = vec!["main".into(), "dev".into(), "feat".into()];
+        form.base_index = 0;
+        app.mode = Mode::Create(form);
+        app.handle_key(key('l'));
+        assert_eq!(cform(&app).base_index, 1);
+        app.handle_key(key('l'));
+        assert_eq!(cform(&app).base_index, 2);
+        app.handle_key(key('h'));
+        assert_eq!(cform(&app).base_index, 1);
+    }
+
+    #[test]
+    fn agent_h_l_cycles_preset_but_types_on_custom_slot() {
+        let mut app = App::new(Config::default());
+        // On a preset, l moves to the next choice.
+        let mut form = CreateForm::new("claude", &["codex".into()]);
+        form.field = CreateField::Agent;
+        form.agent_index = 0;
+        app.mode = Mode::Create(form);
+        app.handle_key(key('l'));
+        assert_eq!(cform(&app).agent_index, 1);
+
+        // On the custom slot, h/l are literal text so a command can contain them.
+        let mut custom = CreateForm::new("claude", &["codex".into()]);
+        custom.field = CreateField::Agent;
+        custom.agent_index = custom.agent_choices.len() - 1; // the custom slot
+        custom.agent.clear();
+        assert!(custom.agent_is_custom());
+        app.mode = Mode::Create(custom);
+        app.handle_key(key('h'));
+        app.handle_key(key('l'));
+        assert_eq!(cform(&app).agent, "hl");
+    }
+
     #[test]
     fn for_project_prefills_dir_agent_and_starts_at_name() {
         let form = CreateForm::for_project("/home/u/proj", "claude", &["codex".into()]);
@@ -2408,19 +2626,19 @@ mod tests {
         for c in "привет".chars() {
             f.insert_char(c);
         }
-        assert_eq!(f.buffer, "привет");
-        assert_eq!(f.cursor, 6);
+        assert_eq!(f.area.buffer, "привет");
+        assert_eq!(f.area.cursor, 6);
         // Move into the middle and insert (cursor lands before "е").
         f.left();
         f.left();
         f.insert_char('Х');
-        assert_eq!(f.buffer, "привХет");
+        assert_eq!(f.area.buffer, "привХет");
         // Backspace removes the char we just inserted.
         f.backspace();
-        assert_eq!(f.buffer, "привет");
+        assert_eq!(f.area.buffer, "привет");
         // Delete (forward) removes "е".
         f.delete();
-        assert_eq!(f.buffer, "привт");
+        assert_eq!(f.area.buffer, "привт");
     }
 
     #[test]
@@ -2428,10 +2646,10 @@ mod tests {
         let mut f = ReplyForm::new("s".into());
         f.insert_str("hello world foo");
         f.delete_word();
-        assert_eq!(f.buffer, "hello world ");
+        assert_eq!(f.area.buffer, "hello world ");
         f.delete_to_line_start();
-        assert_eq!(f.buffer, "");
-        assert_eq!(f.cursor, 0);
+        assert_eq!(f.area.buffer, "");
+        assert_eq!(f.area.cursor, 0);
     }
 
     #[test]
@@ -2439,17 +2657,17 @@ mod tests {
         let mut f = ReplyForm::new("s".into());
         f.insert_str("abcd\nef\nghij");
         // cursor at end (line "ghij", col 4)
-        assert_eq!(f.cursor, 12);
+        assert_eq!(f.area.cursor, 12);
         f.up(); // onto "ef" (len 2) → column clamps to 2
         let (start, _) = f.line_bounds();
-        assert_eq!(f.cursor - start, 2);
+        assert_eq!(f.area.cursor - start, 2);
         f.up(); // onto "abcd", same column 2
         let (start, _) = f.line_bounds();
-        assert_eq!(f.cursor - start, 2);
+        assert_eq!(f.area.cursor - start, 2);
         f.home();
-        assert_eq!(f.cursor, 0);
+        assert_eq!(f.area.cursor, 0);
         f.end();
-        assert_eq!(f.cursor, 4); // end of first logical line, before '\n'
+        assert_eq!(f.area.cursor, 4); // end of first logical line, before '\n'
     }
 
     #[test]
@@ -2654,6 +2872,151 @@ mod tests {
         match app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)) {
             Some(Action::Create { terminal, .. }) => assert!(!terminal),
             other => panic!("expected Action::Create, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn t_toggles_session_note_pane() {
+        let mut app = app_with(vec![at("s", "/p")]);
+        app.selected = 0;
+        app.handle_key(key('t'));
+        assert_eq!(app.right_pane, RightPane::SessionNote);
+        app.handle_key(key('t'));
+        assert_eq!(app.right_pane, RightPane::Preview);
+    }
+
+    #[test]
+    fn shift_t_toggles_inbox_pane() {
+        let mut app = app_with(vec![at("s", "/p")]);
+        app.handle_key(key('T'));
+        assert_eq!(app.right_pane, RightPane::Inbox);
+        app.handle_key(key('T'));
+        assert_eq!(app.right_pane, RightPane::Preview);
+    }
+
+    #[test]
+    fn tab_focuses_the_shown_session_note() {
+        let mut app = app_with(vec![at("s", "/p")]);
+        app.selected = 0;
+        app.handle_key(key('t')); // show session note
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        match &app.mode {
+            Mode::Note(ns) => assert_eq!(ns.target, NoteTarget::Session("s".into())),
+            other => panic!("expected Mode::Note, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn killing_a_session_drops_its_note() {
+        let mut app = App::new(Config::default());
+        app.notes.insert("s".into(), "- [ ] x".into());
+        app.notes.remove("s"); // mirrors the Kill handler
+        assert!(app.notes.get("s").is_none());
+    }
+
+    #[test]
+    fn renaming_moves_the_note() {
+        let mut app = App::new(Config::default());
+        app.notes.insert("old".into(), "- [ ] x".into());
+        if let Some(t) = app.notes.remove("old") {
+            app.notes.insert("new".into(), t);
+        }
+        assert_eq!(app.notes.get("new").map(String::as_str), Some("- [ ] x"));
+        assert!(app.notes.get("old").is_none());
+    }
+
+    fn note_app_with(text: &str) -> App {
+        let mut app = App::new(Config::default());
+        app.inbox = text.into();
+        app.mode = Mode::Note(NoteState {
+            target: NoteTarget::Inbox,
+            sub: NoteSub::Render,
+            cursor: 0,
+            anchor: None,
+            editor: crate::editor::TextArea::default(),
+        });
+        app
+    }
+    fn note_state(app: &App) -> &NoteState {
+        match &app.mode { Mode::Note(ns) => ns, _ => panic!("not in note mode") }
+    }
+
+    #[test]
+    fn j_k_move_task_cursor_within_bounds() {
+        let mut app = note_app_with("- [ ] a\n- [ ] b\n- [ ] c");
+        app.handle_key(key('j'));
+        assert_eq!(note_state(&app).cursor, 1);
+        app.handle_key(key('j'));
+        app.handle_key(key('j')); // clamp at last task (index 2)
+        assert_eq!(note_state(&app).cursor, 2);
+        app.handle_key(key('k'));
+        assert_eq!(note_state(&app).cursor, 1);
+    }
+
+    #[test]
+    fn space_toggles_task_under_cursor() {
+        let mut app = note_app_with("- [ ] a\n- [ ] b");
+        app.handle_key(key('j'));            // cursor on task 1
+        app.handle_key(key(' '));
+        assert_eq!(app.inbox, "- [ ] a\n- [x] b");
+    }
+
+    #[test]
+    fn visual_select_then_space_toggles_range() {
+        let mut app = note_app_with("- [ ] a\n- [ ] b\n- [ ] c");
+        app.handle_key(key('V'));            // anchor at 0
+        app.handle_key(key('j'));            // extend to 1
+        app.handle_key(key(' '));            // toggle 0..=1
+        assert_eq!(app.inbox, "- [x] a\n- [x] b\n- [ ] c");
+        assert!(note_state(&app).anchor.is_none(), "selection cleared after toggle");
+    }
+
+    #[test]
+    fn e_enters_edit_seeded_from_note() {
+        let mut app = note_app_with("- [ ] a");
+        app.handle_key(key('e'));
+        let ns = note_state(&app);
+        assert_eq!(ns.sub, NoteSub::Edit);
+        assert_eq!(ns.editor.buffer, "- [ ] a");
+    }
+
+    #[test]
+    fn esc_exits_to_list() {
+        let mut app = note_app_with("- [ ] a");
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(matches!(app.mode, Mode::List));
+    }
+
+    fn note_app_editing(text: &str) -> App {
+        let mut app = App::new(Config::default());
+        app.inbox = text.into();
+        app.mode = Mode::Note(NoteState {
+            target: NoteTarget::Inbox,
+            sub: NoteSub::Edit,
+            cursor: 0,
+            anchor: None,
+            editor: crate::editor::TextArea::new(text.to_string()),
+        });
+        app
+    }
+
+    #[test]
+    fn typing_in_edit_writes_back_to_note() {
+        let mut app = note_app_editing("- [ ] a");
+        app.handle_key(key('!'));            // appended at end (cursor at end)
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)); // esc commits
+        assert_eq!(app.inbox, "- [ ] a!");
+        assert_eq!(note_state(&app).sub, NoteSub::Render);
+    }
+
+    #[test]
+    fn enter_inserts_newline_not_submit() {
+        let mut app = note_app_editing("a");
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.handle_key(key('b'));
+        match &app.mode {
+            Mode::Note(ns) => assert_eq!(ns.editor.buffer, "a\nb"),
+            _ => panic!("still editing"),
         }
     }
 }

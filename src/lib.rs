@@ -1,7 +1,10 @@
 pub mod app;
 pub mod browse;
+pub mod editor;
+pub mod clip;
 pub mod config;
 pub mod git;
+pub mod note;
 pub mod spinner;
 pub mod state;
 pub mod theme;

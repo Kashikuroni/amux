@@ -1,12 +1,11 @@
 use crate::theme as th;
+use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 use ratatui::Frame;
 
 pub fn render(f: &mut Frame) {
-    let area = super::centered(70, 70, f.area());
-    f.render_widget(Clear, area);
     let groups: [(&str, &[(&str, &str)]); 4] = [
         (
             "Navigation",
@@ -20,21 +19,26 @@ pub fn render(f: &mut Frame) {
         (
             "Session",
             &[
-                ("↵ o", "attach"),
+                ("enter o", "attach"),
                 ("n", "new"),
+                ("N", "new in project"),
+                ("i", "reply to agent"),
+                ("1-9", "answer prompt"),
                 ("d", "kill"),
                 ("r", "rename"),
-                ("⇧⇥", "agent mode"),
-                ("⇧K ⇧J", "reorder (project on edge)"),
-                ("⇧R", "rename project"),
+                ("R", "rename project"),
+                ("shift+tab", "agent mode"),
+                ("J/K", "reorder (project on edge)"),
             ],
         ),
         (
             "Preview",
             &[
-                ("^k ^j", "scroll up · down"),
+                ("ctrl+k/j", "scroll up · down"),
                 ("PgUp PgDn", "scroll up · down"),
                 ("G", "jump to latest"),
+                ("[ ] { }", "resize split"),
+                ("ctrl+←→", "resize split (±8)"),
                 ("auto", "refresh on interval"),
             ],
         ),
@@ -63,6 +67,19 @@ pub fn render(f: &mut Frame) {
         }
         lines.push(Line::from(""));
     }
+    // Size the panel to its content (lines + top/bottom border), centered and
+    // clamped to the screen — so nothing clips and large terminals get no empty
+    // box. Width is a fixed share wide enough for the longest "key  label" row.
+    let screen = f.area();
+    let h = (lines.len() as u16 + 2).min(screen.height);
+    let w = ((screen.width as u32 * 60 / 100) as u16).min(screen.width);
+    let area = Rect {
+        x: screen.x + screen.width.saturating_sub(w) / 2,
+        y: screen.y + screen.height.saturating_sub(h) / 2,
+        width: w,
+        height: h,
+    };
+    f.render_widget(Clear, area);
     f.render_widget(
         Paragraph::new(lines).block(
             th::panel()
@@ -92,12 +109,23 @@ mod tests {
     }
     #[test]
     fn help_lists_groups_and_keys() {
-        let mut t = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        // Tall enough that the content-sized panel renders every group.
+        let mut t = Terminal::new(TestBackend::new(80, 40)).unwrap();
         t.draw(render).unwrap();
         let s = buf_to_string(t.backend().buffer());
         assert!(s.contains("Help"));
         assert!(s.contains("Navigation"));
         assert!(s.contains("attach"));
         assert!(s.contains("filter"));
+        // The combos that were previously missing must all be listed.
+        assert!(s.contains("new in project"), "missing N:\n{s}");
+        assert!(s.contains("reply to agent"), "missing i:\n{s}");
+        assert!(s.contains("answer prompt"), "missing 1-9:\n{s}");
+        assert!(s.contains("resize split"), "missing split resize:\n{s}");
+        assert!(s.contains("quit (sessions stay)"), "bottom group clipped:\n{s}");
+        // No modifier-key glyphs leak in (arrows are intentionally kept).
+        for glyph in ["⇧", "⇥", "↵", "^"] {
+            assert!(!s.contains(glyph), "stale key glyph {glyph}:\n{s}");
+        }
     }
 }
