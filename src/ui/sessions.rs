@@ -833,6 +833,11 @@ mod tests {
         assert!(s.contains("restarting"), "expected 'restarting' label:\n{s}");
         // Must NOT show the normal Running status label.
         assert!(!s.contains(" running"), "must not show 'running' while restarting:\n{s}");
+        assert_eq!(
+            glyph_fg(buf, crate::spinner::glyph(0), 1),
+            Some(Color::Yellow),
+            "restarting spinner must be yellow"
+        );
     }
 
     #[test]
