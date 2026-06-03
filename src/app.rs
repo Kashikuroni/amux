@@ -1350,7 +1350,9 @@ impl App {
             NoteSub::Render => {
                 let task_count = crate::note::task_line_indices(self.note_text(&ns.target)).len();
                 let last = task_count.saturating_sub(1);
-                match key.code {
+                // Normalize the key to its QWERTY position so the render-mode
+                // chords (j/k/V/y/e/space) work on any keyboard layout.
+                match latin_code(key.code) {
                     KeyCode::Esc => {
                         if ns.anchor.is_some() {
                             ns.anchor = None; // first esc clears selection
@@ -1404,9 +1406,14 @@ impl App {
                         ns.sub = NoteSub::Render;
                     }
                     KeyCode::Enter => ns.editor.insert_char('\n'),
-                    KeyCode::Char('w') if ctrl => ns.editor.delete_word(),
-                    KeyCode::Char('u') if ctrl => ns.editor.delete_to_line_start(),
-                    KeyCode::Char(c) if !ctrl => ns.editor.insert_char(c),
+                    // Ctrl shortcuts are layout-independent; typed text below stays
+                    // raw so the user can write Cyrillic (and any other) characters.
+                    KeyCode::Char(_) if ctrl => match latin_code(key.code) {
+                        KeyCode::Char('w') => ns.editor.delete_word(),
+                        KeyCode::Char('u') => ns.editor.delete_to_line_start(),
+                        _ => {}
+                    },
+                    KeyCode::Char(c) => ns.editor.insert_char(c),
                     KeyCode::Backspace => ns.editor.backspace(),
                     KeyCode::Delete => ns.editor.delete(),
                     KeyCode::Left => ns.editor.left(),
@@ -2985,6 +2992,31 @@ mod tests {
         let mut app = note_app_with("- [ ] a");
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(matches!(app.mode, Mode::List));
+    }
+
+    #[test]
+    fn render_chords_work_on_cyrillic_layout() {
+        // On a Russian layout the physical keys emit Cyrillic: e→у, j→о, V→М.
+        let mut app = note_app_with("- [ ] a\n- [ ] b");
+        app.handle_key(key('о')); // physical 'j' → move cursor down
+        assert_eq!(note_state(&app).cursor, 1);
+        app.handle_key(KeyEvent::new(KeyCode::Char('М'), KeyModifiers::SHIFT)); // 'V' select
+        assert_eq!(note_state(&app).anchor, Some(1));
+        app.handle_key(key('у')); // physical 'e' → enter edit
+        assert_eq!(note_state(&app).sub, NoteSub::Edit);
+    }
+
+    #[test]
+    fn edit_mode_types_cyrillic_literally() {
+        let mut app = note_app_with("");
+        app.handle_key(key('у')); // 'e' → edit
+        assert_eq!(note_state(&app).sub, NoteSub::Edit);
+        app.handle_key(key('п')); // a Cyrillic letter must be inserted as-is
+        app.handle_key(key('р'));
+        match &app.mode {
+            Mode::Note(ns) => assert_eq!(ns.editor.buffer, "пр"),
+            _ => panic!("expected edit mode"),
+        }
     }
 
     fn note_app_editing(text: &str) -> App {
