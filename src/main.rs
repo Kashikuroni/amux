@@ -231,10 +231,18 @@ fn handle_action(terminal: &mut Term, app: &mut App, action: Action) -> io::Resu
             dir,
             agent,
             worktree,
+            terminal,
         } => {
+            let (command, label) = if terminal {
+                let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+                let label = tmux::shell_basename(&shell).to_string();
+                (shell, label)
+            } else {
+                (agent.clone(), agent.clone())
+            };
             let result = match worktree {
-                None => tmux::new_session(&name, &dir, &agent),
-                Some(spec) => create_worktree_session(&name, &dir, &agent, &spec),
+                None => tmux::new_session(&name, &dir, &command, &label),
+                Some(spec) => create_worktree_session(&name, &dir, &command, &label, &spec),
             };
             if let Err(e) = result {
                 app.error = Some(e.to_string());
@@ -296,7 +304,8 @@ fn handle_action(terminal: &mut Term, app: &mut App, action: Action) -> io::Resu
 fn create_worktree_session(
     name: &str,
     dir: &str,
-    agent: &str,
+    command: &str,
+    label: &str,
     spec: &am::app::WorktreeSpec,
 ) -> io::Result<()> {
     let repo = am::git::repo_root(dir)
@@ -307,5 +316,5 @@ fn create_worktree_session(
         .join(&spec.new_branch);
     let wt_str = wt_path.to_string_lossy().to_string();
     am::git::add_worktree(&repo, &wt_str, &spec.new_branch, &spec.base)?;
-    tmux::new_worktree_session(name, &wt_str, agent, &repo)
+    tmux::new_worktree_session(name, &wt_str, command, label, &repo)
 }

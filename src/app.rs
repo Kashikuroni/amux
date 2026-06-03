@@ -468,6 +468,7 @@ pub enum Action {
         dir: String,
         agent: String,
         worktree: Option<WorktreeSpec>,
+        terminal: bool,
     },
     Kill {
         name: String,
@@ -1590,6 +1591,7 @@ pub fn build_create_action(form: &CreateForm, existing: &[String]) -> Result<Act
         dir: expand_tilde(&form.dir),
         agent: form.agent.clone(),
         worktree,
+        terminal: form.terminal,
     })
 }
 
@@ -2184,7 +2186,7 @@ mod tests {
         app.mode = Mode::Create(form);
         let act = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         match act {
-            Some(Action::Create { name, dir: d, agent, worktree }) => {
+            Some(Action::Create { name, dir: d, agent, worktree, terminal: _ }) => {
                 assert_eq!(name, "sess");
                 assert_eq!(d, dir);
                 assert_eq!(agent, "claude");
@@ -2587,6 +2589,37 @@ mod tests {
                 assert_eq!(spec.new_branch, "iso-branch");
             }
             other => panic!("expected Create with worktree, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn terminal_submit_carries_terminal_flag() {
+        let dir = std::env::temp_dir().to_string_lossy().to_string();
+        let mut app = app_with(vec![at("s", "/p")]);
+        let mut form = CreateForm::new("claude", &[]);
+        form.name = "sh".into();
+        form.dir = dir;
+        form.terminal = true;
+        form.field = CreateField::Worktree; // last step when terminal & no worktree
+        app.mode = Mode::Create(form);
+        match app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)) {
+            Some(Action::Create { terminal, .. }) => assert!(terminal),
+            other => panic!("expected Action::Create, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn non_terminal_submit_sets_terminal_false() {
+        let dir = std::env::temp_dir().to_string_lossy().to_string();
+        let mut app = app_with(vec![at("s", "/p")]);
+        let mut form = CreateForm::new("claude", &[]);
+        form.name = "x".into();
+        form.dir = dir;
+        form.field = CreateField::Agent;
+        app.mode = Mode::Create(form);
+        match app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)) {
+            Some(Action::Create { terminal, .. }) => assert!(!terminal),
+            other => panic!("expected Action::Create, got {other:?}"),
         }
     }
 }

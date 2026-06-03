@@ -88,6 +88,12 @@ fn run(args: &[&str]) -> io::Result<()> {
     }
 }
 
+/// The basename of a shell path, used as the `@cm_agent` label for a terminal
+/// session: `/bin/zsh` → `zsh`, `bash` → `bash`.
+pub fn shell_basename(shell: &str) -> &str {
+    shell.rsplit('/').next().unwrap_or(shell)
+}
+
 /// True if a `tmux` binary is callable.
 pub fn is_available() -> bool {
     Command::new("tmux")
@@ -161,45 +167,40 @@ fn apply_key_bindings() {
     }
 }
 
-/// Creates a detached session running `agent` in `dir` and tags it as managed.
-pub fn new_session(name: &str, dir: &str, agent: &str) -> io::Result<()> {
+/// Creates a detached session running `command` in `dir`, tagged managed with
+/// `@cm_agent = label`. For agents, command and label are the same string; for a
+/// plain terminal, command is the shell and label its basename.
+pub fn new_session(name: &str, dir: &str, command: &str, label: &str) -> io::Result<()> {
     // Create at the current terminal size so the first attach needs no resize.
     let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
     let (cols, rows) = (cols.max(1).to_string(), rows.max(1).to_string());
     run(&[
-        "new-session",
-        "-d",
-        "-s",
-        name,
-        "-x",
-        &cols,
-        "-y",
-        &rows,
-        "-c",
-        dir,
-        agent,
+        "new-session", "-d", "-s", name, "-x", &cols, "-y", &rows, "-c", dir, command,
     ])?;
     apply_resize_options();
     // If tagging fails, the session would exist untagged (invisible to list_sessions);
     // kill it so creation is all-or-nothing.
     if let Err(e) = run(&["set-option", "-t", name, "@cm_managed", "1"])
-        .and_then(|_| run(&["set-option", "-t", name, "@cm_agent", agent]))
+        .and_then(|_| run(&["set-option", "-t", name, "@cm_agent", label]))
     {
         let _ = run(&["kill-session", "-t", name]);
         return Err(e);
     }
-    // Detach + scroll key bindings. Server-global, but our socket only ever
-    // hosts am sessions, so it stays scoped to them. Best-effort.
     apply_key_bindings();
-    // Hide tmux's status bar — am provides its own chrome. Best-effort.
     let _ = run(&["set-option", "-g", "status", "off"]);
     Ok(())
 }
 
 /// Like `new_session`, but also tags the session with `@cm_repo=<repo_root>` so
 /// the UI knows it runs in a worktree (enables worktree-aware kill).
-pub fn new_worktree_session(name: &str, dir: &str, agent: &str, repo_root: &str) -> io::Result<()> {
-    new_session(name, dir, agent)?;
+pub fn new_worktree_session(
+    name: &str,
+    dir: &str,
+    command: &str,
+    label: &str,
+    repo_root: &str,
+) -> io::Result<()> {
+    new_session(name, dir, command, label)?;
     if let Err(e) = run(&["set-option", "-t", name, "@cm_repo", repo_root]) {
         let _ = run(&["kill-session", "-t", name]);
         return Err(e);
@@ -288,6 +289,13 @@ mod tests {
         assert_eq!(sessions[0].status, Status::Idle);
         assert!(!sessions[0].attached);
         assert_eq!(sessions[0].worktree_repo, None);
+    }
+
+    #[test]
+    fn shell_basename_takes_last_component() {
+        assert_eq!(shell_basename("/bin/zsh"), "zsh");
+        assert_eq!(shell_basename("/bin/sh"), "sh");
+        assert_eq!(shell_basename("bash"), "bash");
     }
 
     #[test]
