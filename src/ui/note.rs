@@ -38,8 +38,9 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         NoteTarget::Session(name) => name.clone(),
     };
     let hint = match &app.mode {
+        Mode::Note(ns) if ns.confirm_clear => "clear note? y / n",
         Mode::Note(ns) if ns.sub == NoteSub::Edit => "edit — esc done",
-        Mode::Note(_) => "j/k · space · V · y · e edit · esc",
+        Mode::Note(_) => "j/k · space · V · y · e edit · c clear · esc",
         _ => "Tab to edit",
     };
     f.render_widget(

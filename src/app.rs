@@ -407,6 +407,9 @@ pub struct NoteState {
     pub anchor: Option<usize>,
     /// Edit buffer; only meaningful in `Edit` sub-mode.
     pub editor: crate::editor::TextArea,
+    /// True while a "clear note?" confirmation is pending (render sub-mode): the
+    /// next key either confirms (`y`) or cancels the wipe.
+    pub confirm_clear: bool,
 }
 
 /// Display-name editor for a project, keyed by its root path.
@@ -983,6 +986,7 @@ impl App {
                     cursor: 0,
                     anchor: None,
                     editor: crate::editor::TextArea::default(),
+                    confirm_clear: false,
                 });
             }
             _ => {}
@@ -1348,10 +1352,23 @@ impl App {
         };
         match ns.sub {
             NoteSub::Render => {
+                // A pending "clear note?" confirmation captures the next key:
+                // `y` wipes the note, anything else cancels.
+                if ns.confirm_clear {
+                    ns.confirm_clear = false;
+                    if latin_code(key.code) == KeyCode::Char('y') {
+                        *self.note_text_mut(&ns.target) = String::new();
+                        ns.cursor = 0;
+                        ns.anchor = None;
+                        self.dirty = true;
+                    }
+                    self.mode = Mode::Note(ns);
+                    return None;
+                }
                 let task_count = crate::note::task_line_indices(self.note_text(&ns.target)).len();
                 let last = task_count.saturating_sub(1);
                 // Normalize the key to its QWERTY position so the render-mode
-                // chords (j/k/V/y/e/space) work on any keyboard layout.
+                // chords (j/k/V/y/e/c/space) work on any keyboard layout.
                 match latin_code(key.code) {
                     KeyCode::Esc => {
                         if ns.anchor.is_some() {
@@ -1388,6 +1405,12 @@ impl App {
                     KeyCode::Char('e') => {
                         ns.editor = crate::editor::TextArea::new(self.note_text(&ns.target).to_string());
                         ns.sub = NoteSub::Edit;
+                    }
+                    KeyCode::Char('c') => {
+                        // Arm the clear confirmation only if there's something to wipe.
+                        if !self.note_text(&ns.target).is_empty() {
+                            ns.confirm_clear = true;
+                        }
                     }
                     _ => {}
                 }
@@ -2941,6 +2964,7 @@ mod tests {
             cursor: 0,
             anchor: None,
             editor: crate::editor::TextArea::default(),
+            confirm_clear: false,
         });
         app
     }
@@ -3019,6 +3043,46 @@ mod tests {
         }
     }
 
+    #[test]
+    fn inbox_note_persists_to_snapshot() {
+        // Editing the Inbox note marks state dirty and snapshot_state carries it,
+        // so the autosave loop writes it to state.toml permanently.
+        let mut app = App::new(Config::default());
+        app.mode = Mode::Note(NoteState {
+            target: NoteTarget::Inbox,
+            sub: NoteSub::Edit,
+            cursor: 0,
+            anchor: None,
+            editor: crate::editor::TextArea::new("- [ ] buy milk".to_string()),
+            confirm_clear: false,
+        });
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)); // commit
+        assert_eq!(app.inbox, "- [ ] buy milk");
+        assert!(app.dirty, "edit must mark state dirty for autosave");
+        assert_eq!(app.snapshot_state().inbox, "- [ ] buy milk");
+    }
+
+    #[test]
+    fn c_then_y_clears_note_with_confirmation() {
+        let mut app = note_app_with("- [ ] a\n- [ ] b");
+        app.handle_key(key('c'));
+        assert!(note_state(&app).confirm_clear, "c arms the confirmation");
+        assert_eq!(app.inbox, "- [ ] a\n- [ ] b", "not cleared until confirmed");
+        app.handle_key(key('y'));
+        assert_eq!(app.inbox, "");
+        assert!(!note_state(&app).confirm_clear);
+        assert!(app.dirty);
+    }
+
+    #[test]
+    fn clear_confirmation_cancels_on_other_key() {
+        let mut app = note_app_with("- [ ] keep");
+        app.handle_key(key('c'));
+        app.handle_key(key('n')); // anything but y cancels
+        assert!(!note_state(&app).confirm_clear);
+        assert_eq!(app.inbox, "- [ ] keep", "note untouched on cancel");
+    }
+
     fn note_app_editing(text: &str) -> App {
         let mut app = App::new(Config::default());
         app.inbox = text.into();
@@ -3028,6 +3092,7 @@ mod tests {
             cursor: 0,
             anchor: None,
             editor: crate::editor::TextArea::new(text.to_string()),
+            confirm_clear: false,
         });
         app
     }

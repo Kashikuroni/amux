@@ -55,6 +55,9 @@ fn items_for(mode: &Mode) -> Vec<Item> {
             ("?", "help", false),
             ("q", "quit", false),
         ],
+        Mode::Note(ns) if ns.confirm_clear => {
+            vec![("y", "clear note", true), ("n", "cancel", false)]
+        }
         Mode::Note(ns) => match ns.sub {
             crate::app::NoteSub::Edit => vec![("esc", "done", true), ("enter", "newline", false)],
             crate::app::NoteSub::Render => vec![
@@ -63,6 +66,7 @@ fn items_for(mode: &Mode) -> Vec<Item> {
                 ("V", "select", false),
                 ("y", "copy", false),
                 ("e", "edit", false),
+                ("c", "clear", false),
                 ("esc", "back", false),
             ],
         },
