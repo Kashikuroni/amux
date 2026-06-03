@@ -47,6 +47,7 @@ fn items_for(mode: &Mode) -> Vec<Item> {
             ("shift+tab", "agent mode", false),
             ("1-9", "answer", false),
             ("i", "reply", false),
+            ("t", "notes", false),
             ("d", "kill", false),
             ("r", "rename", false),
             ("R", "rename proj", false),
@@ -54,7 +55,17 @@ fn items_for(mode: &Mode) -> Vec<Item> {
             ("?", "help", false),
             ("q", "quit", false),
         ],
-        Mode::Note(_) => vec![("esc", "back", true), ("tab", "edit", false)],
+        Mode::Note(ns) => match ns.sub {
+            crate::app::NoteSub::Edit => vec![("esc", "done", true), ("enter", "newline", false)],
+            crate::app::NoteSub::Render => vec![
+                ("j/k", "task", true),
+                ("space", "toggle", false),
+                ("V", "select", false),
+                ("y", "copy", false),
+                ("e", "edit", false),
+                ("esc", "back", false),
+            ],
+        },
     }
 }
 

@@ -5,6 +5,7 @@ mod header;
 mod modal_help;
 mod modal_kill;
 mod modal_new;
+mod note;
 mod preview;
 mod sessions;
 
@@ -83,7 +84,6 @@ fn draw_reply_modal(f: &mut Frame, form: &ReplyForm) {
         ..inner
     };
 
-    let width = text_area.width as usize;
     let chars: Vec<char> = form.area.buffer.chars().collect();
 
     if chars.is_empty() {
@@ -94,38 +94,10 @@ fn draw_reply_modal(f: &mut Frame, form: &ReplyForm) {
             ))),
             text_area,
         );
+        // Place the hardware cursor at the start for the empty buffer.
+        f.set_cursor_position((text_area.x, text_area.y));
     } else {
-        let rows = wrap_rows(&chars, width);
-        let (crow, _) = cursor_rowcol(&rows, form.area.cursor);
-        // Scroll vertically so the cursor row stays on screen.
-        let visible = text_h as usize;
-        let scroll = if crow >= visible {
-            crow - visible + 1
-        } else {
-            0
-        };
-        let lines: Vec<Line> = rows
-            .iter()
-            .skip(scroll)
-            .take(visible)
-            .map(|(_, t)| Line::from(t.as_str()))
-            .collect();
-        f.render_widget(Paragraph::new(lines), text_area);
-    }
-
-    // Place the hardware cursor (works for the empty buffer too: row 0, col 0).
-    let rows = wrap_rows(&chars, width);
-    let (crow, ccol) = cursor_rowcol(&rows, form.area.cursor);
-    let visible = text_h as usize;
-    let scroll = if crow >= visible {
-        crow - visible + 1
-    } else {
-        0
-    };
-    if crow >= scroll {
-        let cx = text_area.x + ccol.min(width.saturating_sub(1)) as u16;
-        let cy = text_area.y + (crow - scroll) as u16;
-        f.set_cursor_position((cx, cy));
+        render_editor(f, text_area, &form.area);
     }
 
     f.render_widget(
@@ -154,10 +126,34 @@ fn hint_label(s: &str) -> Span<'_> {
     Span::styled(s, Style::default().fg(th::MUTED))
 }
 
+/// Render an editable text buffer into `area`: wrapped text + a hardware cursor
+/// kept on-screen. Shared by the reply modal and the note editor.
+pub(crate) fn render_editor(f: &mut Frame, area: Rect, ta: &crate::editor::TextArea) {
+    use ratatui::text::Line;
+    use ratatui::widgets::Paragraph;
+    let chars: Vec<char> = ta.buffer.chars().collect();
+    let rows = wrap_rows(&chars, area.width as usize);
+    let (crow, ccol) = cursor_rowcol(&rows, ta.cursor);
+    let visible = area.height as usize;
+    let scroll = if crow >= visible { crow - visible + 1 } else { 0 };
+    let lines: Vec<Line> = rows
+        .iter()
+        .skip(scroll)
+        .take(visible)
+        .map(|(_, text)| Line::from(text.clone()))
+        .collect();
+    f.render_widget(Paragraph::new(lines), area);
+    if crow >= scroll {
+        let cx = area.x + ccol.min(area.width.saturating_sub(1) as usize) as u16;
+        let cy = area.y + (crow - scroll) as u16;
+        f.set_cursor_position((cx, cy));
+    }
+}
+
 /// Word-wraps `chars` to `width` columns, honoring explicit newlines. Returns
 /// `(start_char_index, row_text)` for each display row. Empty logical lines (and
 /// a trailing newline) yield empty rows so the cursor can rest on them.
-fn wrap_rows(chars: &[char], width: usize) -> Vec<(usize, String)> {
+pub(crate) fn wrap_rows(chars: &[char], width: usize) -> Vec<(usize, String)> {
     let width = width.max(1);
     let mut rows: Vec<(usize, String)> = Vec::new();
     let n = chars.len();
@@ -204,7 +200,7 @@ fn wrap_rows(chars: &[char], width: usize) -> Vec<(usize, String)> {
 }
 
 /// Maps a character cursor index onto a `(row, col)` in the wrapped layout.
-fn cursor_rowcol(rows: &[(usize, String)], cursor: usize) -> (usize, usize) {
+pub(crate) fn cursor_rowcol(rows: &[(usize, String)], cursor: usize) -> (usize, usize) {
     for (ri, (start, text)) in rows.iter().enumerate() {
         let len = text.chars().count();
         let end = start + len;
@@ -244,7 +240,13 @@ fn draw_body(f: &mut Frame, area: Rect, app: &App) {
             .border_style(th::chrome(th::BORDER)),
         cols[1],
     );
-    preview::render(f, cols[2], app);
+    // The right column shows the live preview, or a note when the user toggled
+    // notes mode (`t`/`T`) or is focused in a note (`Mode::Note`).
+    if app.right_pane == crate::app::RightPane::Preview && !matches!(app.mode, Mode::Note(_)) {
+        preview::render(f, cols[2], app);
+    } else {
+        note::render(f, cols[2], app);
+    }
 }
 
 /// Centered Rect helper shared with modal submodules (Task 10).

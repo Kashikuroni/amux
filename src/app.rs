@@ -1787,6 +1787,15 @@ fn selection_range(ns: &NoteState) -> std::ops::RangeInclusive<usize> {
     }
 }
 
+/// Task ordinals currently selected (for render highlight). Empty when no
+/// selection is active.
+pub fn selection_set(ns: &NoteState) -> std::collections::HashSet<usize> {
+    match ns.anchor {
+        Some(_) => selection_range(ns).collect(),
+        None => std::collections::HashSet::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
