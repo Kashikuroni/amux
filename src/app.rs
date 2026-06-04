@@ -1099,11 +1099,18 @@ impl App {
             // requires the kitty keyboard protocol to be reported distinctly
             // (enabled in main); Alt+Enter is a fallback on terminals without it.
             KeyCode::Enter if shift || alt => form.insert_char('\n'),
-            // Editing chords (readline-ish).
-            KeyCode::Char('w') if ctrl => form.delete_word(),
-            KeyCode::Char('u') if ctrl => form.delete_to_line_start(),
-            KeyCode::Char('a') if ctrl => form.home(),
-            KeyCode::Char('e') if ctrl => form.end(),
+            // Editing chords (readline-ish), layout-independent via latin_code.
+            KeyCode::Char(_) if ctrl => match latin_code(key.code) {
+                KeyCode::Char('w') => form.delete_word(),
+                KeyCode::Char('u') => form.delete_to_line_start(),
+                KeyCode::Char('a') => form.home(),
+                KeyCode::Char('e') => form.end(),
+                // "copy all": the whole buffer to the system clipboard.
+                KeyCode::Char('y') => crate::clip::copy(&form.area.buffer),
+                // "clear all": wipe the buffer (Esc then drops the draft too).
+                KeyCode::Char('x') => form.area = crate::editor::TextArea::default(),
+                _ => {}
+            },
             // Plain text entry — guard against control chords leaking through.
             KeyCode::Char(c) if !ctrl => form.insert_char(c),
             // Plain Enter sends the composed message and drops the draft.
@@ -3559,6 +3566,36 @@ mod tests {
         match &app.mode {
             Mode::Note(ns) => assert_eq!(ns.editor.buffer, "a\nb"),
             _ => panic!("still editing"),
+        }
+    }
+
+    #[test]
+    fn ctrl_x_clears_the_composer_buffer() {
+        let mut app = app_with_two_sessions();
+        app.drafts.insert("a".into(), "old draft".into());
+        app.selected = 0;
+        app.handle_key(key('i'));
+        app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+        match &app.mode {
+            Mode::Reply(f) => assert_eq!(f.area.buffer, ""),
+            other => panic!("expected Reply, got {other:?}"),
+        }
+        // Esc after the wipe drops the stored draft too.
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!app.drafts.contains_key("a"));
+    }
+
+    #[test]
+    fn reply_ctrl_chords_work_on_cyrillic_layout() {
+        // Physical 'x' emits 'ч' on a Russian layout; ctrl+ч must still clear.
+        let mut app = app_with_two_sessions();
+        app.selected = 0;
+        app.handle_key(key('i'));
+        app.handle_key(key('п'));
+        app.handle_key(KeyEvent::new(KeyCode::Char('ч'), KeyModifiers::CONTROL));
+        match &app.mode {
+            Mode::Reply(f) => assert_eq!(f.area.buffer, ""),
+            other => panic!("expected Reply, got {other:?}"),
         }
     }
 }

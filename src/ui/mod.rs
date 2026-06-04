@@ -106,11 +106,15 @@ fn draw_reply_modal(f: &mut Frame, form: &ReplyForm) {
     f.render_widget(
         Paragraph::new(Line::from(vec![
             hint_key("enter"),
-            hint_label(" send   "),
+            hint_label(" send  "),
             hint_key("shift+enter"),
-            hint_label(" newline   "),
+            hint_label(" newline  "),
+            hint_key("ctrl+y"),
+            hint_label(" copy all  "),
+            hint_key("ctrl+x"),
+            hint_label(" clear all  "),
             hint_key("esc"),
-            hint_label(" cancel"),
+            hint_label(" close"),
         ])),
         hint_area,
     );
