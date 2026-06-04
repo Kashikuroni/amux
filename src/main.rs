@@ -57,9 +57,11 @@ fn main() -> io::Result<()> {
     let usage_log = am::usage::new_log();
     app.usage_log = usage_log.clone();
     let usage_rx = spawn_usage_poller(usage_log);
+    // One-shot release check; a found update arrives over this channel.
+    let update_rx = am::update::spawn_check();
 
     let mut terminal = init_terminal()?;
-    let result = run(&mut terminal, &mut app, refresh, &usage_rx);
+    let result = run(&mut terminal, &mut app, refresh, &usage_rx, &update_rx);
     let restore = restore_terminal(&mut terminal);
     result.and(restore)?;
     if app.tmux_missing {
@@ -168,10 +170,13 @@ fn run(
     app: &mut App,
     refresh: Duration,
     usage_rx: &mpsc::Receiver<am::usage::Account>,
+    update_rx: &mpsc::Receiver<am::update::UpdateInfo>,
 ) -> io::Result<()> {
     let start = Instant::now();
     let tick = Duration::from_millis(80);
     let mut last_refresh = Instant::now();
+    // Progress of an in-flight self-update install, if any.
+    let mut install_rx: Option<mpsc::Receiver<am::update::UpdateStage>> = None;
     loop {
         app.spinner_frame = am::spinner::frame_index(start.elapsed().as_millis());
         // Drain account updates; keep the last good value on a failed fetch.
@@ -186,6 +191,15 @@ fn run(
                 app.plan = acct.plan;
             }
         }
+        while let Ok(info) = update_rx.try_recv() {
+            app.update = Some(info);
+        }
+        if let Some(rx) = &install_rx {
+            while let Ok(stage) = rx.try_recv() {
+                app.set_update_stage(stage);
+            }
+        }
+        app.offer_update_if_idle();
         terminal.draw(|f| ui::draw(f, app))?;
 
         if event::poll(tick)? {
@@ -213,7 +227,7 @@ fn run(
                     continue;
                 }
                 if let Some(action) = app.handle_key(key) {
-                    handle_action(terminal, app, action)?;
+                    handle_action(terminal, app, action, &mut install_rx)?;
                 }
                 // Persist split width / session order if a key changed them.
                 if app.dirty {
@@ -281,7 +295,12 @@ fn run(
     Ok(())
 }
 
-fn handle_action(terminal: &mut Term, app: &mut App, action: Action) -> io::Result<()> {
+fn handle_action(
+    terminal: &mut Term,
+    app: &mut App,
+    action: Action,
+    install_rx: &mut Option<mpsc::Receiver<am::update::UpdateStage>>,
+) -> io::Result<()> {
     match action {
         Action::Attach(name) => {
             if tmux::in_tmux() {
@@ -404,11 +423,32 @@ fn handle_action(terminal: &mut Term, app: &mut App, action: Action) -> io::Resu
             }
             app.refresh();
         }
-        Action::StartUpdate(_info) => {
-            // Wired in Task 5: spawn the installer thread.
+        Action::StartUpdate(info) => {
+            // Idempotent: a second StartUpdate while one install is live would
+            // orphan a swap thread — ignore it (the modal can't emit one, but
+            // don't rely on UI invariants here).
+            if install_rx.is_none() {
+                *install_rx = Some(am::update::spawn_install(info));
+            }
         }
         Action::RestartSelf => {
-            // Wired in Task 5: exec() the new binary.
+            restore_terminal(terminal)?;
+            let err = am::update::restart(); // only returns on failure
+            // exec failed — re-enter the TUI instead of dumping to a broken shell.
+            enable_raw_mode()?;
+            execute!(
+                terminal.backend_mut(),
+                EnterAlternateScreen,
+                EnableBracketedPaste,
+                EnableMouseCapture
+            )?;
+            enable_key_disambiguation(terminal.backend_mut());
+            terminal.clear()?;
+            // Attaching reset the window to the full client size; force the next
+            // refresh to re-fit it to the preview width.
+            app.preview_sized = None;
+            app.refresh();
+            app.error = Some(format!("restart failed: {err}"));
         }
         Action::RestartAllClaude => {
             let now = app.now_unix;
