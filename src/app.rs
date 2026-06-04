@@ -1652,6 +1652,10 @@ impl App {
                 self.snapshots = new_snaps;
                 self.prompts = new_prompts;
                 self.sessions = apply_grouped_order(&self.project_order, &self.order, sessions);
+                // A draft lives exactly as long as its session: drop entries for
+                // sessions that no longer exist (covers ones that died while
+                // amux wasn't running).
+                self.prune_dead_drafts();
                 self.clamp_selection();
                 if let Some(p) = new_preview {
                     self.preview = p;
@@ -1661,6 +1665,19 @@ impl App {
                 }
             }
             Err(e) => self.error = Some(e.to_string()),
+        }
+    }
+
+    /// Removes drafts whose session is gone. Only called from `refresh` with a
+    /// freshly fetched session list — never after a failed tmux read (which
+    /// must not wipe drafts).
+    fn prune_dead_drafts(&mut self) {
+        let sessions = &self.sessions;
+        let before = self.drafts.len();
+        self.drafts
+            .retain(|name, _| sessions.iter().any(|s| s.name == *name));
+        if self.drafts.len() != before {
+            self.dirty = true;
         }
     }
 }
@@ -3357,6 +3374,45 @@ mod tests {
         }
         assert_eq!(app.notes.get("new").map(String::as_str), Some("- [ ] x"));
         assert!(!app.notes.contains_key("old"));
+    }
+
+    #[test]
+    fn killing_a_session_drops_its_draft() {
+        let mut app = App::new(Config::default());
+        app.drafts.insert("s".into(), "draft".into());
+        app.drafts.remove("s"); // mirrors the Kill handler
+        assert!(!app.drafts.contains_key("s"));
+    }
+
+    #[test]
+    fn renaming_moves_the_draft() {
+        let mut app = App::new(Config::default());
+        app.drafts.insert("old".into(), "draft".into());
+        // Mirrors the Rename handler.
+        if let Some(d) = app.drafts.remove("old") {
+            app.drafts.insert("new".into(), d);
+        }
+        assert_eq!(app.drafts.get("new").map(String::as_str), Some("draft"));
+        assert!(!app.drafts.contains_key("old"));
+    }
+
+    #[test]
+    fn prune_dead_drafts_drops_only_dead_sessions() {
+        let mut app = app_with_two_sessions(); // sessions "a" and "b"
+        app.drafts.insert("a".into(), "keep".into());
+        app.drafts.insert("dead".into(), "drop".into());
+        app.prune_dead_drafts();
+        assert_eq!(app.drafts.get("a").map(String::as_str), Some("keep"));
+        assert!(!app.drafts.contains_key("dead"));
+        assert!(app.dirty, "removal must be persisted");
+    }
+
+    #[test]
+    fn prune_dead_drafts_without_removals_keeps_state_clean() {
+        let mut app = app_with_two_sessions();
+        app.drafts.insert("a".into(), "keep".into());
+        app.prune_dead_drafts();
+        assert!(!app.dirty, "no removal → nothing to save");
     }
 
     fn note_app_with(text: &str) -> App {

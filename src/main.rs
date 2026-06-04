@@ -351,6 +351,7 @@ fn handle_action(terminal: &mut Term, app: &mut App, action: Action) -> io::Resu
                     }
                 }
                 app.notes.remove(&name);
+                app.drafts.remove(&name);
                 app.dirty = true;
             }
             app.refresh();
@@ -361,6 +362,10 @@ fn handle_action(terminal: &mut Term, app: &mut App, action: Action) -> io::Resu
             } else {
                 if let Some(text) = app.notes.remove(&old) {
                     app.notes.insert(new.clone(), text);
+                    app.dirty = true;
+                }
+                if let Some(draft) = app.drafts.remove(&old) {
+                    app.drafts.insert(new.clone(), draft);
                     app.dirty = true;
                 }
             }
