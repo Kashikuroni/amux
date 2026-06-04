@@ -1,4 +1,4 @@
-use crate::app::{collapse_home, App};
+use crate::app::{session_root, App};
 use crate::theme as th;
 use crate::timeutil;
 use ansi_to_tui::IntoText;
@@ -57,8 +57,11 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     }
     f.render_widget(Paragraph::new(Line::from(title_spans)), rows[0]);
 
+    let project_name = sel
+        .map(|s| app.project_display_name(session_root(s)))
+        .unwrap_or_default();
     let mut sub = vec![Span::styled(
-        sel.map(|s| collapse_home(&s.dir)).unwrap_or_default(),
+        project_name,
         Style::default().fg(th::MUTED),
     )];
     if let Some(g) = sel.and_then(|s| s.git.as_ref()) {
