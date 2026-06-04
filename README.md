@@ -24,8 +24,11 @@ git worktrees, and keep per‑session markdown to‑do notes.
   `Ctrl‑q`. No nested‑tmux headaches (a private socket keeps things isolated).
 - **Answer prompts inline** — when an agent shows a numbered choice, press
   `1`–`9` from the dashboard; reply with free text via `i`.
-- **Git worktrees** — create a session on a fresh worktree + branch from the new‑
-  session form; the branch marker (`⎇` repo / `⧉` worktree) is color‑coded.
+- **Branch picker & git worktrees** — pick a branch right in the new‑session
+  form: the current branch opens in place, any other branch opens in its
+  worktree (reused or created on the fly), and an unmatched name becomes a
+  fresh branch + worktree. The branch marker (`⎇` repo / `⧉` worktree) is
+  color‑coded.
 - **Per‑session notes & to‑do** — an Obsidian‑style markdown note per session,
   plus a global **Inbox**, shown in place of the preview. Toggle checkboxes,
   select tasks vim‑style and copy them as a numbered list. Progress (`3/5`)
@@ -59,12 +62,6 @@ curl -fsSL https://raw.githubusercontent.com/Kashikuroni/amux/main/install.sh | 
 Detects your Mac's architecture, downloads the latest release binary, clears the
 Gatekeeper quarantine, and puts `amux` on your PATH. Override the version or
 location with `AMUX_VERSION=v0.1.0` / `AMUX_BIN_DIR=~/bin`.
-
-### Homebrew
-
-```sh
-brew install kashikuroni/tap/amux
-```
 
 ### Prebuilt binary
 
@@ -126,6 +123,7 @@ then watch it run in the list. `?` opens the full keybinding help at any time.
 | `i` | Reply to the agent with free text |
 | `1`–`9` | Answer a numbered prompt the agent is showing |
 | `d` / `r` / `R` | Kill / rename session / rename project |
+| `u` | Restart all Claude sessions (re-`--resume` after a CLI update) |
 | `J` / `K` | Reorder the selected session |
 | `t` / `T` / `Tab` | Session note / Inbox note / focus the note |
 | `Ctrl‑k`/`Ctrl‑j`, `PgUp`/`PgDn` | Scroll the preview |
