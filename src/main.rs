@@ -324,7 +324,7 @@ fn handle_action(terminal: &mut Term, app: &mut App, action: Action) -> io::Resu
                 let label = tmux::shell_basename(&shell).to_string();
                 (shell, label)
             } else {
-                (agent.clone(), agent.clone())
+                (resolve_agent_command_for_tmux(&agent), agent.clone())
             };
             let result = match worktree {
                 None => tmux::new_session(&name, &dir, &command, &label),
@@ -476,6 +476,23 @@ fn create_worktree_session(
     }
 }
 
+/// Rewrites the first word of an agent command to the absolute executable path
+/// visible to amux itself. tmux panes inherit the tmux server's environment,
+/// which may have an older PATH than the shell that launched amux.
+fn resolve_agent_command_for_tmux(command: &str) -> String {
+    let Some(bin) = command.split_whitespace().next() else {
+        return command.to_string();
+    };
+    if bin.contains('/') {
+        return command.to_string();
+    }
+    let Some(path) = am::app::resolve_agent_path(bin) else {
+        return command.to_string();
+    };
+    let suffix = command.strip_prefix(bin).unwrap_or("");
+    format!("{path}{suffix}")
+}
+
 /// Path equality robust to symlinks (macOS /var → /private/var) and trailing slashes.
 fn same_dir(a: &str, b: &str) -> bool {
     let canon = |p: &str| {
@@ -484,4 +501,38 @@ fn same_dir(a: &str, b: &str) -> bool {
             .unwrap_or_else(|_| p.trim_end_matches('/').to_string())
     };
     canon(a) == canon(b)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_command_keeps_absolute_path() {
+        assert_eq!(
+            resolve_agent_command_for_tmux("/usr/local/bin/opencode --flag"),
+            "/usr/local/bin/opencode --flag"
+        );
+    }
+
+    #[test]
+    fn agent_command_keeps_relative_path() {
+        assert_eq!(
+            resolve_agent_command_for_tmux("./opencode --flag"),
+            "./opencode --flag"
+        );
+    }
+
+    #[test]
+    fn agent_command_keeps_missing_binary() {
+        let cmd = "definitely-not-an-amux-test-binary --flag";
+        assert_eq!(resolve_agent_command_for_tmux(cmd), cmd);
+    }
+
+    #[test]
+    fn agent_command_resolves_found_binary_and_keeps_args() {
+        let resolved = resolve_agent_command_for_tmux("sh -c true");
+        assert!(resolved.ends_with("sh -c true"), "{resolved}");
+        assert!(resolved.starts_with('/'), "{resolved}");
+    }
 }
