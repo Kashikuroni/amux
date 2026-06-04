@@ -243,13 +243,16 @@ fn oauth_get(path: &'static str, log: &UsageLog) -> Result<Vec<u8>, String> {
     let creds = match read_credentials() {
         Some(c) => c,
         None => {
-            push_log(log, LogEntry {
-                hms,
-                path,
-                status: 0,
-                raw: String::new(),
-                error: Some("no auth".into()),
-            });
+            push_log(
+                log,
+                LogEntry {
+                    hms,
+                    path,
+                    status: 0,
+                    raw: String::new(),
+                    error: Some("no auth".into()),
+                },
+            );
             return Err("no auth".into());
         }
     };
@@ -281,36 +284,45 @@ fn oauth_get(path: &'static str, log: &UsageLog) -> Result<Vec<u8>, String> {
     {
         Ok(o) => o,
         Err(_) => {
-            push_log(log, LogEntry {
+            push_log(
+                log,
+                LogEntry {
+                    hms,
+                    path,
+                    status: 0,
+                    raw: String::new(),
+                    error: Some("net".into()),
+                },
+            );
+            return Err("net".into());
+        }
+    };
+    if !out.status.success() {
+        push_log(
+            log,
+            LogEntry {
                 hms,
                 path,
                 status: 0,
                 raw: String::new(),
                 error: Some("net".into()),
-            });
-            return Err("net".into());
-        }
-    };
-    if !out.status.success() {
-        push_log(log, LogEntry {
-            hms,
-            path,
-            status: 0,
-            raw: String::new(),
-            error: Some("net".into()),
-        });
+            },
+        );
         return Err("net".into());
     }
     // Split the trailing "\n<status>" the -w format appended.
     let mut body = out.stdout;
     let Some(nl) = body.iter().rposition(|&b| b == b'\n') else {
-        push_log(log, LogEntry {
-            hms,
-            path,
-            status: 0,
-            raw: String::new(),
-            error: Some("net".into()),
-        });
+        push_log(
+            log,
+            LogEntry {
+                hms,
+                path,
+                status: 0,
+                raw: String::new(),
+                error: Some("net".into()),
+            },
+        );
         return Err("net".into());
     };
     let code: u16 = String::from_utf8_lossy(&body[nl + 1..])
@@ -320,17 +332,39 @@ fn oauth_get(path: &'static str, log: &UsageLog) -> Result<Vec<u8>, String> {
     body.truncate(nl);
     let raw = body_snippet(&body);
     if (200..300).contains(&code) {
-        push_log(log, LogEntry { hms, path, status: code, raw, error: None });
+        push_log(
+            log,
+            LogEntry {
+                hms,
+                path,
+                status: code,
+                raw,
+                error: None,
+            },
+        );
         Ok(body)
     } else {
         let err = match code {
             401 => "token expired".to_string(),
             _ => {
                 let detail = error_detail(&body);
-                if detail.is_empty() { code.to_string() } else { format!("{code}: {detail}") }
+                if detail.is_empty() {
+                    code.to_string()
+                } else {
+                    format!("{code}: {detail}")
+                }
             }
         };
-        push_log(log, LogEntry { hms, path, status: code, raw, error: Some(err.clone()) });
+        push_log(
+            log,
+            LogEntry {
+                hms,
+                path,
+                status: code,
+                raw,
+                error: Some(err.clone()),
+            },
+        );
         Err(err)
     }
 }
@@ -466,7 +500,12 @@ fn read_credentials() -> Option<Credentials> {
 
     let from_keychain = (|| -> Option<Credentials> {
         let out = Command::new("security")
-            .args(["find-generic-password", "-s", "Claude Code-credentials", "-w"])
+            .args([
+                "find-generic-password",
+                "-s",
+                "Claude Code-credentials",
+                "-w",
+            ])
             .output()
             .ok()?;
         if !out.status.success() {
@@ -493,7 +532,10 @@ fn credentials_from_json(s: &str) -> Option<Credentials> {
     let oauth = v.get("claudeAiOauth")?;
     let access_token = oauth.get("accessToken")?.as_str()?.to_string();
     let expires_at_ms = oauth.get("expiresAt").and_then(|e| e.as_i64());
-    Some(Credentials { access_token, expires_at_ms })
+    Some(Credentials {
+        access_token,
+        expires_at_ms,
+    })
 }
 
 /// Extracts and humanizes the plan from a `/api/oauth/profile` body, reading
@@ -580,17 +622,14 @@ mod tests {
     fn credentials_expiry_parsed_and_checked() {
         // expiresAt is Unix milliseconds.
         let far_future = crate::timeutil::now_unix() * 1000 + 3_600_000; // +1h
-        let s = format!(
-            r#"{{"claudeAiOauth": {{"accessToken": "tok", "expiresAt": {far_future}}}}}"#
-        );
+        let s =
+            format!(r#"{{"claudeAiOauth": {{"accessToken": "tok", "expiresAt": {far_future}}}}}"#);
         let c = credentials_from_json(&s).expect("should parse");
         assert_eq!(c.expires_at_ms, Some(far_future));
         assert!(!c.is_expired(), "token an hour away should not be expired");
 
         let past = crate::timeutil::now_unix() * 1000 - 1_000; // 1s ago
-        let s2 = format!(
-            r#"{{"claudeAiOauth": {{"accessToken": "tok", "expiresAt": {past}}}}}"#
-        );
+        let s2 = format!(r#"{{"claudeAiOauth": {{"accessToken": "tok", "expiresAt": {past}}}}}"#);
         let c2 = credentials_from_json(&s2).expect("should parse");
         assert!(c2.is_expired(), "token in the past should be expired");
     }

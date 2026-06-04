@@ -43,7 +43,9 @@ pub fn render(f: &mut Frame, app: &App) {
             let status_style = if e.status == 0 || e.status >= 400 {
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD)
             };
             let mut sep_spans = vec![
                 Span::styled("── ", Style::default().fg(th::DIM)),

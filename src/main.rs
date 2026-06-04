@@ -89,7 +89,11 @@ fn spawn_usage_poller(log: am::usage::UsageLog) -> mpsc::Receiver<am::usage::Acc
             if tx.send(acct).is_err() {
                 break; // receiver dropped → app is shutting down
             }
-            thread::sleep(if last_ok { POLL_INTERVAL } else { FAILURE_BACKOFF });
+            thread::sleep(if last_ok {
+                POLL_INTERVAL
+            } else {
+                FAILURE_BACKOFF
+            });
         }
     });
     rx
