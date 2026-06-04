@@ -629,6 +629,8 @@ pub enum Mode {
     RenameProject(ProjectRenameForm),
     /// Focused-note mode: the user is reading/editing the right-pane note.
     Note(NoteState),
+    /// Full-screen log of recent OAuth calls (usage + profile endpoints).
+    UsageLog,
 }
 
 /// Which note `Mode::Note` is editing.
@@ -734,6 +736,7 @@ enum ModeKind {
     SelectSession,
     RenameProject,
     Note,
+    UsageLog,
 }
 
 /// What the right pane renders: the live session preview, the selected session's
@@ -788,6 +791,11 @@ pub struct App {
     /// Reason the latest usage fetch failed ("429", "no auth", …), or `None` if
     /// it succeeded. Shown in the header so an empty limits area is explainable.
     pub usage_error: Option<String>,
+    /// Rolling log of OAuth calls (up to 50 entries), shared with the background
+    /// poller. Read by the `Mode::UsageLog` modal for debugging.
+    pub usage_log: crate::usage::UsageLog,
+    /// How many display-rows the usage-log modal is scrolled up from the top.
+    pub usage_log_scroll: u16,
     /// Sessions that received double Ctrl+C and are waiting for a
     /// `claude --resume <uuid>` command to appear in their pane output.
     /// Maps session name → `now_unix` when the restart was initiated (for
@@ -839,6 +847,8 @@ impl App {
             usage: None,
             plan: None,
             usage_error: None,
+            usage_log: crate::usage::new_log(),
+            usage_log_scroll: 0,
             restarting: HashMap::new(),
             order: Vec::new(),
             project_order: Vec::new(),
@@ -1059,6 +1069,7 @@ impl App {
             Mode::SelectSession => ModeKind::SelectSession,
             Mode::RenameProject(_) => ModeKind::RenameProject,
             Mode::Note(_) => ModeKind::Note,
+            Mode::UsageLog => ModeKind::UsageLog,
         }
     }
 
@@ -1081,6 +1092,32 @@ impl App {
             ModeKind::SelectSession => self.handle_select_session_key(key),
             ModeKind::RenameProject => self.handle_rename_project_key(key),
             ModeKind::Note => self.handle_note_key(key),
+            ModeKind::UsageLog => {
+                let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+                match latin_code(key.code) {
+                    KeyCode::Char('k') if ctrl => {
+                        self.usage_log_scroll = self.usage_log_scroll.saturating_add(10);
+                    }
+                    KeyCode::Char('j') if ctrl => {
+                        self.usage_log_scroll = self.usage_log_scroll.saturating_sub(10);
+                    }
+                    KeyCode::PageUp => {
+                        self.usage_log_scroll = self.usage_log_scroll.saturating_add(10);
+                    }
+                    KeyCode::PageDown => {
+                        self.usage_log_scroll = self.usage_log_scroll.saturating_sub(10);
+                    }
+                    KeyCode::Char('y') if ctrl => {
+                        if let Ok(g) = self.usage_log.lock() {
+                            crate::clip::copy(&crate::usage::format_log_plain(&g));
+                        }
+                    }
+                    _ => {
+                        self.mode = Mode::List;
+                    }
+                }
+                None
+            }
         }
     }
 
@@ -1196,6 +1233,10 @@ impl App {
                 }
             }
             KeyCode::Char('?') => self.mode = Mode::Help,
+            KeyCode::Char('L') => {
+                self.usage_log_scroll = 0;
+                self.mode = Mode::UsageLog;
+            }
             KeyCode::Enter | KeyCode::Char('o') => {
                 if let Some(name) = self.selected_name() {
                     return Some(Action::Attach(name));

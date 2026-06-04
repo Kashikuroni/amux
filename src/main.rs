@@ -54,7 +54,9 @@ fn main() -> io::Result<()> {
     install_panic_hook();
     // Poll Claude Code usage limits off the UI thread (a `curl` round-trip), and
     // hand fresh values to the loop over a channel so rendering never blocks.
-    let usage_rx = spawn_usage_poller();
+    let usage_log = am::usage::new_log();
+    app.usage_log = usage_log.clone();
+    let usage_rx = spawn_usage_poller(usage_log);
 
     let mut terminal = init_terminal()?;
     let result = run(&mut terminal, &mut app, refresh, &usage_rx);
@@ -76,13 +78,13 @@ fn main() -> io::Result<()> {
 ///   - any failure/net    → `FAILURE_BACKOFF` (back off so we don't sustain it)
 ///
 /// The first request still fires immediately at startup.
-fn spawn_usage_poller() -> mpsc::Receiver<am::usage::Account> {
+fn spawn_usage_poller(log: am::usage::UsageLog) -> mpsc::Receiver<am::usage::Account> {
     const POLL_INTERVAL: Duration = Duration::from_secs(300); // 5 min, steady state
     const FAILURE_BACKOFF: Duration = Duration::from_secs(600); // 10 min after any failure
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         loop {
-            let acct = am::usage::fetch_account();
+            let acct = am::usage::fetch_account(&log);
             let last_ok = acct.usage.is_some();
             if tx.send(acct).is_err() {
                 break; // receiver dropped → app is shutting down

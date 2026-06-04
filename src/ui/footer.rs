@@ -61,6 +61,7 @@ fn items_for(mode: &Mode) -> Vec<Item> {
             ("?", "help", false),
             ("q", "quit", false),
         ],
+        Mode::UsageLog => vec![("any key", "close", true)],
         Mode::Note(ns) if ns.confirm_clear => {
             vec![("y", "clear note", true), ("n", "cancel", false)]
         }

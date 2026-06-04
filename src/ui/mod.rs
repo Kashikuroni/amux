@@ -5,6 +5,7 @@ mod header;
 mod modal_help;
 mod modal_kill;
 mod modal_new;
+mod modal_usage_log;
 mod note;
 mod preview;
 mod sessions;
@@ -54,6 +55,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Mode::Help => modal_help::render(f),
         Mode::Reply(form) => draw_reply_modal(f, form),
         Mode::RenameProject(form) => draw_project_rename_modal(f, form),
+        Mode::UsageLog => modal_usage_log::render(f, app),
         // No modal: these render over the plain list (the SESSIONS label shows
         // the select-mode prompt).
         Mode::List | Mode::Filter | Mode::SelectSession | Mode::Note(_) => {}
