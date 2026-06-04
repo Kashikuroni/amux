@@ -216,8 +216,7 @@ fn run(
                         // Only scroll the preview when the cursor is over the right
                         // panel. The boundary is: x=2 margin + left-panel width.
                         let screen = terminal.size().unwrap_or_default();
-                        let area_w = screen.width.saturating_sub(4);
-                        let split_col = 2 + area_w * app.split_pct / 100 + 1;
+                        let split_col = preview_boundary_col(screen.width, app.split_pct);
                         if m.column >= split_col {
                             if m.kind == MouseEventKind::ScrollUp {
                                 app.preview_scroll_up(3);
@@ -565,6 +564,14 @@ fn resolve_agent_command_for_tmux(command: &str) -> String {
     format!("{path}{suffix}")
 }
 
+/// First column of the right (preview) pane: 2-col left margin + left-pane
+/// percentage of the body width + 1-col separator. Mirrors the body layout in
+/// ui::draw_body. Widened to u32 so wide terminals can't overflow u16.
+fn preview_boundary_col(screen_width: u16, split_pct: u16) -> u16 {
+    let area_w = screen_width.saturating_sub(4) as u32;
+    (2 + area_w * split_pct as u32 / 100 + 1) as u16
+}
+
 /// Path equality robust to symlinks (macOS /var → /private/var) and trailing slashes.
 fn same_dir(a: &str, b: &str) -> bool {
     let canon = |p: &str| {
@@ -606,5 +613,26 @@ mod tests {
         let resolved = resolve_agent_command_for_tmux("sh -c true");
         assert!(resolved.ends_with("sh -c true"), "{resolved}");
         assert!(resolved.starts_with('/'), "{resolved}");
+    }
+
+    #[test]
+    fn preview_boundary_matches_layout_split() {
+        // 120-col screen, 40% split: body=116, left=46 → boundary at 2+46+1.
+        assert_eq!(preview_boundary_col(120, 40), 49);
+        // Narrow floor.
+        assert_eq!(preview_boundary_col(10, 40), 2 + 2 + 1);
+    }
+
+    #[test]
+    fn preview_boundary_survives_wide_terminals() {
+        // u16 math would overflow at width ≥ ~878 (panic in debug builds).
+        assert_eq!(
+            preview_boundary_col(2000, 75),
+            (2u32 + 1996 * 75 / 100 + 1) as u16
+        );
+        assert_eq!(
+            preview_boundary_col(u16::MAX, 75),
+            (2u32 + 65531 * 75 / 100 + 1) as u16
+        );
     }
 }
