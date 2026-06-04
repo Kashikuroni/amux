@@ -81,19 +81,13 @@ fn spawn_usage_poller() -> mpsc::Receiver<am::usage::Account> {
     const FAILURE_BACKOFF: Duration = Duration::from_secs(600); // 10 min after any failure
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
-        let mut got_usage = false;
         loop {
             let acct = am::usage::fetch_account();
-            got_usage |= acct.usage.is_some();
+            let last_ok = acct.usage.is_some();
             if tx.send(acct).is_err() {
                 break; // receiver dropped → app is shutting down
             }
-            let wait = if got_usage {
-                POLL_INTERVAL
-            } else {
-                FAILURE_BACKOFF
-            };
-            thread::sleep(wait);
+            thread::sleep(if last_ok { POLL_INTERVAL } else { FAILURE_BACKOFF });
         }
     });
     rx
@@ -178,12 +172,13 @@ fn run(
         while let Ok(acct) = usage_rx.try_recv() {
             if acct.usage.is_some() {
                 app.usage = acct.usage;
+                app.usage_error = None;
+            } else if acct.usage_error.is_some() {
+                app.usage_error = acct.usage_error;
             }
             if acct.plan.is_some() {
                 app.plan = acct.plan;
             }
-            // Track the latest fetch outcome (cleared to None on success).
-            app.usage_error = acct.usage_error;
         }
         terminal.draw(|f| ui::draw(f, app))?;
 

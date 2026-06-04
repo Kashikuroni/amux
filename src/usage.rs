@@ -194,7 +194,10 @@ fn oauth_get(path: &str) -> Result<Vec<u8>, String> {
     if (200..300).contains(&code) {
         Ok(body)
     } else {
-        Err(code.to_string())
+        Err(match code {
+            401 => "token expired".to_string(),
+            _ => code.to_string(),
+        })
     }
 }
 
