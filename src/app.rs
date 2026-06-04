@@ -231,6 +231,7 @@ impl CreateForm {
         self.base_index = 0;
     }
 
+    /// Mirror of `base_filter_push`: shrink the filter; highlight resets too.
     pub fn base_filter_pop(&mut self) {
         self.base_filter.pop();
         self.base_index = 0;
@@ -1330,17 +1331,34 @@ impl App {
         // key's submit still fails, so the banner always reflects the last action.
         self.error = None;
 
-        // Shift+Tab walks focus backwards from any step (mirror of Tab).
-        if key.code == KeyCode::BackTab {
-            form.retreat();
-            self.mode = Mode::Create(form);
-            return None;
+        // Keys with one meaning on every step: close, create, walk fields.
+        // (Tab never moves focus — it only cycles completion candidates below.)
+        match key.code {
+            KeyCode::Esc => return None, // mode already reset to List
+            KeyCode::Enter => return self.submit_create(form),
+            KeyCode::Up => {
+                // On the Agent step the model list is walked first; the agent
+                // row is the exit at the top.
+                if !(form.field == CreateField::Agent && form.model_up()) {
+                    form.retreat();
+                }
+                self.mode = Mode::Create(form);
+                return None;
+            }
+            KeyCode::Down => {
+                if !(form.field == CreateField::Agent && form.model_down()) {
+                    form.advance();
+                }
+                self.mode = Mode::Create(form);
+                return None;
+            }
+            _ => {}
         }
 
-        // Dir step: interactive picker (live subdir list).
-        if form.field == CreateField::Dir {
-            match key.code {
-                KeyCode::Esc => return None, // mode already reset to List
+        match form.field {
+            // Dir: free text + completion. Tab cycles the candidates, → descends
+            // into the highlighted one.
+            CreateField::Dir => match key.code {
                 KeyCode::Backspace => {
                     form.dir.pop();
                     form.refresh_dir_entries();
@@ -1349,115 +1367,89 @@ impl App {
                     form.dir.push(c);
                     form.refresh_dir_entries();
                 }
-                KeyCode::Up => form.dir_select_prev(),
-                KeyCode::Down => form.dir_select_next(),
-                KeyCode::Tab | KeyCode::Right => form.enter_selected_dir(),
-                KeyCode::Enter => {
-                    let existing: Vec<String> =
-                        self.sessions.iter().map(|s| s.name.clone()).collect();
-                    match validate_create(&form.name, &form.dir, &existing) {
-                        Ok(()) => {
-                            self.error = None;
-                            form.advance();
-                        }
-                        Err(e) => self.error = Some(e),
-                    }
-                }
+                KeyCode::Tab => form.dir_select_next(),
+                KeyCode::BackTab => form.dir_select_prev(),
+                KeyCode::Right => form.enter_selected_dir(),
                 _ => {}
-            }
-            self.mode = Mode::Create(form);
-            return None;
-        }
-
-        // Terminal toggle step.
-        if form.field == CreateField::Terminal {
-            match key.code {
-                KeyCode::Esc => return None,
-                KeyCode::Char(' ') => form.toggle_terminal(),
-                KeyCode::Tab => form.advance(),
-                KeyCode::Enter => {
-                    if form.is_last_step() {
-                        return self.submit_create(form);
-                    } else {
+            },
+            // Toggles: space/h/l/←/→ all flip; j/k mirror ↓/↑ (no free text here).
+            CreateField::Terminal => match key.code {
+                KeyCode::Char(' ' | 'h' | 'l') | KeyCode::Left | KeyCode::Right => {
+                    form.toggle_terminal()
+                }
+                KeyCode::Char('j') => form.advance(),
+                KeyCode::Char('k') => form.retreat(),
+                _ => {}
+            },
+            CreateField::Worktree => match key.code {
+                KeyCode::Char(' ' | 'h' | 'l') | KeyCode::Left | KeyCode::Right => {
+                    form.toggle_worktree()
+                }
+                KeyCode::Char('j') => form.advance(),
+                KeyCode::Char('k') => form.retreat(),
+                _ => {}
+            },
+            // Base: branch search. Typing filters, Tab cycles the matches.
+            CreateField::Base => match key.code {
+                KeyCode::Backspace => form.base_filter_pop(),
+                KeyCode::Char(c) => form.base_filter_push(c),
+                KeyCode::Tab => form.base_select(1),
+                KeyCode::BackTab => form.base_select(-1),
+                _ => {}
+            },
+            // Model list (the cursor is on a model row): j/k walk it, h/l slide
+            // the effort. Plain letters do nothing — it's not a text field.
+            CreateField::Agent if form.model_index.is_some() => match key.code {
+                KeyCode::Char('j') => {
+                    if !form.model_down() {
                         form.advance();
                     }
                 }
+                KeyCode::Char('k') => {
+                    form.model_up();
+                }
+                KeyCode::Left | KeyCode::Char('h') => form.cycle_effort(-1),
+                KeyCode::Right | KeyCode::Char('l') => form.cycle_effort(1),
                 _ => {}
-            }
-            self.mode = Mode::Create(form);
-            return None;
-        }
-
-        // Worktree toggle step.
-        if form.field == CreateField::Worktree {
-            match key.code {
-                KeyCode::Esc => return None,
-                KeyCode::Char(' ') => form.toggle_worktree(),
-                KeyCode::Tab => form.advance(),
-                KeyCode::Enter => {
-                    if form.is_last_step() {
-                        return self.submit_create(form);
-                    } else {
+            },
+            // Agent row. h/l/j/k act as keys only while a preset is selected —
+            // on the custom slot they're typed so a command can contain them.
+            CreateField::Agent => match key.code {
+                KeyCode::Left => form.cycle_agent(-1),
+                KeyCode::Right => form.cycle_agent(1),
+                KeyCode::Char('h') if !form.agent_is_custom() => form.cycle_agent(-1),
+                KeyCode::Char('l') if !form.agent_is_custom() => form.cycle_agent(1),
+                KeyCode::Char('j') if !form.agent_is_custom() => {
+                    if !form.model_down() {
                         form.advance();
                     }
                 }
+                KeyCode::Char('k') if !form.agent_is_custom() => form.retreat(),
+                KeyCode::Backspace => {
+                    if !form.agent_is_custom() {
+                        // Backspace off a preset: jump to custom and start fresh.
+                        form.switch_to_custom();
+                    }
+                    form.agent.pop();
+                }
+                KeyCode::Char(c) => {
+                    if !form.agent_is_custom() {
+                        form.switch_to_custom();
+                    }
+                    form.agent.push(c);
+                }
                 _ => {}
-            }
-            self.mode = Mode::Create(form);
-            return None;
-        }
-
-        // Base-branch picker step. h/l mirror ←/→ (vim-style) — it's a pure
-        // selection step with no free text, so the letters are unambiguous.
-        if form.field == CreateField::Base {
-            match key.code {
-                KeyCode::Esc => return None,
-                KeyCode::Left | KeyCode::Char('h') => form.base_select(-1),
-                KeyCode::Right | KeyCode::Char('l') => form.base_select(1),
-                KeyCode::Tab | KeyCode::Enter => form.advance(),
+            },
+            // Name / Branch: plain text fields.
+            CreateField::Name | CreateField::Branch => match key.code {
+                KeyCode::Backspace => {
+                    form.current_mut().pop();
+                }
+                KeyCode::Char(c) => {
+                    form.current_mut().push(c);
+                }
                 _ => {}
-            }
-            self.mode = Mode::Create(form);
-            return None;
-        }
-
-        // Name / agent / branch steps: plain text fields.
-        match key.code {
-            KeyCode::Esc => return None,
-            KeyCode::Left if form.field == CreateField::Agent => form.cycle_agent(-1),
-            KeyCode::Right if form.field == CreateField::Agent => form.cycle_agent(1),
-            // h/l cycle agents vim-style, but only while a preset is selected —
-            // once on the custom slot they're typed so a command can contain them.
-            KeyCode::Char('h') if form.field == CreateField::Agent && !form.agent_is_custom() => {
-                form.cycle_agent(-1)
-            }
-            KeyCode::Char('l') if form.field == CreateField::Agent && !form.agent_is_custom() => {
-                form.cycle_agent(1)
-            }
-            KeyCode::Backspace => {
-                if form.field == CreateField::Agent && !form.agent_is_custom() {
-                    // Backspace off a preset: jump to custom and start fresh (matches Char).
-                    form.switch_to_custom();
-                }
-                form.current_mut().pop();
-            }
-            KeyCode::Char(c) => {
-                if form.field == CreateField::Agent && !form.agent_is_custom() {
-                    form.switch_to_custom();
-                }
-                form.current_mut().push(c);
-            }
-            KeyCode::Tab => form.advance(),
-            KeyCode::Enter => {
-                let submit = form.is_last_step();
-                if submit {
-                    return self.submit_create(form);
-                } else {
-                    // Non-submit step → advance (handles Dir refresh when needed).
-                    form.advance();
-                }
-            }
-            _ => {}
+            },
         }
         self.mode = Mode::Create(form);
         None
@@ -2747,29 +2739,31 @@ mod tests {
     }
 
     #[test]
-    fn shift_tab_walks_focus_backwards() {
+    fn arrows_walk_fields_both_ways() {
         let mut app = App::new(Config::default());
         let mut form = CreateForm::new("claude", &["claude".into()]);
-        form.field = CreateField::Terminal; // a mid-flow step
+        form.field = CreateField::Terminal;
         app.mode = Mode::Create(form);
-        app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE));
-        assert_eq!(cform(&app).field, CreateField::Dir); // step before Terminal
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(cform(&app).field, CreateField::Dir);
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(cform(&app).field, CreateField::Terminal);
     }
 
     #[test]
-    fn base_picker_cycles_with_h_and_l() {
+    fn base_typing_filters_and_tab_cycles() {
         let mut app = App::new(Config::default());
         let mut form = CreateForm::new("claude", &["claude".into()]);
         form.field = CreateField::Base;
-        form.base_branches = vec!["main".into(), "dev".into(), "feat".into()];
-        form.base_index = 0;
+        form.base_branches = vec!["main".into(), "dev".into(), "feature".into()];
         app.mode = Mode::Create(form);
-        app.handle_key(key('l'));
-        assert_eq!(cform(&app).base_index, 1);
-        app.handle_key(key('l'));
-        assert_eq!(cform(&app).base_index, 2);
-        app.handle_key(key('h'));
-        assert_eq!(cform(&app).base_index, 1);
+        app.handle_key(key('e')); // filter: dev, feature
+        assert_eq!(cform(&app).base_filter, "e");
+        assert_eq!(cform(&app).selected_base().as_deref(), Some("dev"));
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(cform(&app).selected_base().as_deref(), Some("feature"));
+        app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        assert_eq!(cform(&app).selected_base().as_deref(), Some("dev"));
     }
 
     #[test]
@@ -2900,13 +2894,8 @@ mod tests {
         let mut app = app_with(vec![at("s", "/p")]);
         let mut form = CreateForm::for_project(&dir, "claude", &[]);
         form.name = "sess".into();
-        form.field = CreateField::Worktree; // worktree off
+        form.field = CreateField::Worktree; // any field — Enter submits from anywhere
         app.mode = Mode::Create(form);
-        // The bug: Enter used to submit here. Worktree is no longer the last
-        // step — Enter walks to the Agent step first.
-        let act = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(act.is_none());
-        assert_eq!(cform(&app).field, CreateField::Agent);
         let act = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         match act {
             Some(Action::Create {
@@ -2923,6 +2912,104 @@ mod tests {
             }
             other => panic!("expected Action::Create, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn enter_submits_from_name_field() {
+        let dir = std::env::temp_dir().to_string_lossy().to_string();
+        let mut app = app_with(vec![at("s", "/p")]);
+        let mut form = CreateForm::new("claude", &[]);
+        form.name = "quick".into();
+        form.dir = dir;
+        assert_eq!(form.field, CreateField::Name);
+        app.mode = Mode::Create(form);
+        let act = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(act, Some(Action::Create { .. })));
+    }
+
+    #[test]
+    fn enter_with_invalid_form_shows_error_and_keeps_form() {
+        let mut app = App::new(Config::default());
+        let form = CreateForm::new("claude", &[]); // empty name → invalid
+        app.mode = Mode::Create(form);
+        let act = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(act.is_none());
+        assert!(app.error.is_some());
+        assert!(matches!(app.mode, Mode::Create(_)));
+    }
+
+    #[test]
+    fn j_dives_into_model_list_and_h_l_set_effort() {
+        let mut app = App::new(Config::default());
+        let mut form = CreateForm::new("claude", &[]);
+        form.field = CreateField::Agent;
+        app.mode = Mode::Create(form);
+        app.handle_key(key('j')); // agent row → opus
+        assert_eq!(cform(&app).model_index, Some(0));
+        app.handle_key(key('j')); // opus → sonnet
+        assert_eq!(cform(&app).model_index, Some(1));
+        app.handle_key(key('l')); // auto → low
+        app.handle_key(key('l')); // low → medium
+        assert_eq!(cform(&app).effort_index, 2);
+        app.handle_key(key('k')); // back to opus — effort resets
+        assert_eq!(cform(&app).model_index, Some(0));
+        assert_eq!(cform(&app).effort_index, 0);
+        app.handle_key(key('k')); // opus → agent row (auto)
+        assert_eq!(cform(&app).model_index, None);
+    }
+
+    #[test]
+    fn down_past_haiku_leaves_list_but_keeps_selection() {
+        let mut app = App::new(Config::default());
+        let mut form = CreateForm::new("claude", &[]);
+        form.field = CreateField::Agent;
+        form.model_index = Some(2); // haiku
+        app.mode = Mode::Create(form);
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(cform(&app).field, CreateField::Name); // wrapped
+        assert_eq!(cform(&app).model_index, Some(2)); // selection survives
+    }
+
+    #[test]
+    fn enter_on_model_row_submits_with_flags() {
+        let dir = std::env::temp_dir().to_string_lossy().to_string();
+        let mut app = app_with(vec![at("s", "/p")]);
+        let mut form = CreateForm::new("claude", &[]);
+        form.name = "sess".into();
+        form.dir = dir;
+        form.field = CreateField::Agent;
+        form.model_index = Some(1); // sonnet
+        form.effort_index = 3; // high
+        app.mode = Mode::Create(form);
+        match app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)) {
+            Some(Action::Create { model, effort, .. }) => {
+                assert_eq!(model.as_deref(), Some("sonnet"));
+                assert_eq!(effort.as_deref(), Some("high"));
+            }
+            other => panic!("expected Create, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn h_l_toggle_worktree_and_terminal() {
+        let mut app = App::new(Config::default());
+        let mut form = CreateForm::new("claude", &[]);
+        form.field = CreateField::Terminal;
+        app.mode = Mode::Create(form);
+        app.handle_key(key('l'));
+        assert!(cform(&app).terminal);
+        app.handle_key(key('h'));
+        assert!(!cform(&app).terminal);
+    }
+
+    #[test]
+    fn j_k_type_into_text_fields() {
+        let mut app = App::new(Config::default());
+        let form = CreateForm::new("claude", &[]); // field = Name
+        app.mode = Mode::Create(form);
+        app.handle_key(key('j'));
+        app.handle_key(key('k'));
+        assert_eq!(cform(&app).name, "jk");
     }
 
     #[test]
@@ -3216,14 +3303,14 @@ mod tests {
     }
 
     #[test]
-    fn left_right_cycles_base_branch() {
+    fn tab_cycles_base_branch() {
         let mut app = App::new(Config::default());
         let mut form = CreateForm::new("claude", &[]);
         form.worktree = true;
         form.base_branches = vec!["main".into(), "dev".into()];
         form.field = CreateField::Base;
         app.mode = Mode::Create(form);
-        app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         match &app.mode {
             Mode::Create(f) => assert_eq!(f.base_index, 1),
             _ => panic!(),
@@ -3272,31 +3359,27 @@ mod tests {
     }
 
     #[test]
-    fn dir_enter_advances_to_worktree_step() {
+    fn dir_tab_cycles_candidates_and_right_descends() {
+        let base = std::env::temp_dir().join(format!("cm_tab_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("sub_a")).unwrap();
+        std::fs::create_dir_all(base.join("sub_b")).unwrap();
+
         let mut app = App::new(Config::default());
-        app.mode = Mode::Create(CreateForm::new("claude", &[]));
-        // Name step: type a name, Enter -> Dir.
-        for c in "iso".chars() {
-            app.handle_key(key(c));
-        }
-        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        match &app.mode {
-            Mode::Create(f) => assert_eq!(f.field, CreateField::Dir),
-            _ => panic!("expected Dir step"),
-        }
-        // Dir step: set an existing dir, Enter -> Terminal (NOT Agent).
-        if let Mode::Create(f) = &mut app.mode {
-            f.dir = "/tmp".into();
-        }
-        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        match &app.mode {
-            Mode::Create(f) => assert_eq!(
-                f.field,
-                CreateField::Terminal,
-                "Dir Enter must advance to the Terminal step, not skip it"
-            ),
-            _ => panic!("expected Terminal step"),
-        }
+        let mut form = CreateForm::new("claude", &[]);
+        form.field = CreateField::Dir;
+        form.dir = format!("{}/", base.display());
+        form.refresh_dir_entries();
+        app.mode = Mode::Create(form);
+
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(cform(&app).dir_selected, 1);
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)); // wraps
+        assert_eq!(cform(&app).dir_selected, 0);
+        app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(cform(&app).dir, format!("{}/sub_a/", base.display()));
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
