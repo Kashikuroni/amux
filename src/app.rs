@@ -32,8 +32,8 @@ pub struct CreateForm {
     pub base_branches: Vec<String>,
     pub base_index: usize,
     pub new_branch: String,
-    /// True when opened pre-filled for an existing project (`N`): `dir` and
-    /// `agent` are fixed and the flow only walks Name → Terminal → Worktree → [Base → Branch].
+    /// True when opened pre-filled for an existing project (`N`): `dir` is
+    /// fixed, so the flow skips the Dir step (agent is still selectable).
     pub prefilled: bool,
     /// True when the session should run a plain shell instead of an agent.
     /// When set, the Agent step is skipped and `$SHELL` is launched.
@@ -68,9 +68,9 @@ impl CreateForm {
         }
     }
 
-    /// New-session form pre-filled for an existing project: `dir` and `agent`
-    /// are fixed, so the streamlined flow only walks Name → Terminal → Worktree → [Base →
-    /// Branch]. `new(project_agent, ...)` already puts `project_agent` first in
+    /// New-session form pre-filled for an existing project: `dir` is fixed, so
+    /// the flow walks Name → Terminal → Worktree → [Base → Branch] → Agent.
+    /// `new(project_agent, ...)` already puts `project_agent` first in
     /// `agent_choices` and selects it (index 0), so the agent is pre-chosen.
     pub fn for_project(project_dir: &str, project_agent: &str, presets: &[String]) -> Self {
         let mut f = CreateForm::new(project_agent, presets);
@@ -92,7 +92,7 @@ impl CreateForm {
 
     /// The ordered steps for the current configuration — the single source of
     /// truth for next_field / step / total_steps / is_last_step. Dir is dropped
-    /// when prefilled (`N`); Agent is dropped when prefilled or terminal.
+    /// when prefilled (`N`); Agent is dropped when terminal.
     fn field_sequence(&self) -> Vec<CreateField> {
         let mut v = vec![CreateField::Name];
         if !self.prefilled {
@@ -104,7 +104,7 @@ impl CreateForm {
             v.push(CreateField::Base);
             v.push(CreateField::Branch);
         }
-        if !self.prefilled && !self.terminal {
+        if !self.terminal {
             v.push(CreateField::Agent);
         }
         v
@@ -893,8 +893,8 @@ impl App {
                 ));
             }
             // Shift+N: new session pre-filled from the selected session's project
-            // (path + agent), streamlined to name + worktree. No-op if nothing
-            // is selected.
+            // (path pre-filled; agent still selectable in the form). No-op if
+            // nothing is selected.
             KeyCode::Char('N') => {
                 if let Some(s) = self.selected_session() {
                     let dir = session_root(s).to_string();
@@ -2631,13 +2631,15 @@ mod tests {
     }
 
     #[test]
-    fn prefilled_flow_skips_dir_and_agent() {
+    fn prefilled_flow_skips_dir_but_keeps_agent() {
         let mut form = CreateForm::for_project("/home/u/proj", "claude", &[]);
-        // Name → Terminal → Worktree → wrap to Name (Dir and Agent skipped).
+        // Name → Terminal → Worktree → Agent → wrap to Name (only Dir skipped).
         form.advance();
         assert_eq!(form.field, CreateField::Terminal);
         form.advance();
         assert_eq!(form.field, CreateField::Worktree);
+        form.advance();
+        assert_eq!(form.field, CreateField::Agent);
         form.advance();
         assert_eq!(form.field, CreateField::Name);
     }
@@ -2652,7 +2654,7 @@ mod tests {
         form.advance();
         assert_eq!(form.field, CreateField::Branch);
         form.advance();
-        assert_eq!(form.field, CreateField::Name);
+        assert_eq!(form.field, CreateField::Agent);
     }
 
     #[test]
@@ -2725,6 +2727,11 @@ mod tests {
         form.name = "sess".into();
         form.field = CreateField::Worktree; // worktree off
         app.mode = Mode::Create(form);
+        // The bug: Enter used to submit here. Worktree is no longer the last
+        // step — Enter walks to the Agent step first.
+        let act = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(act.is_none());
+        assert_eq!(cform(&app).field, CreateField::Agent);
         let act = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         match act {
             Some(Action::Create {
@@ -2753,7 +2760,7 @@ mod tests {
         form.base_branches = vec!["main".into()];
         form.base_index = 0;
         form.new_branch = "feat".into();
-        form.field = CreateField::Branch;
+        form.field = CreateField::Agent;
         app.mode = Mode::Create(form);
         let act = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         match act {
@@ -2790,12 +2797,12 @@ mod tests {
     #[test]
     fn prefilled_step_indicator_counts() {
         let mut form = CreateForm::for_project("/home/u/proj", "claude", &[]);
-        assert_eq!(form.total_steps(), 3); // name, terminal, worktree
+        assert_eq!(form.total_steps(), 4); // name, terminal, worktree, agent
         assert_eq!(form.step(), 1);
         form.field = CreateField::Worktree;
         assert_eq!(form.step(), 3);
         form.worktree = true;
-        assert_eq!(form.total_steps(), 5); // name, terminal, worktree, base, branch
+        assert_eq!(form.total_steps(), 6); // + base, branch
         form.field = CreateField::Branch;
         assert_eq!(form.step(), 5);
     }

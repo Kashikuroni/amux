@@ -516,7 +516,7 @@ mod tests {
         let mut t = Terminal::new(TestBackend::new(80, 30)).unwrap();
         t.draw(|f| render(f, &form, None)).unwrap();
         let s = buf_to_string(t.backend().buffer());
-        assert!(s.contains("of 3"), "streamlined step total:\n{s}");
+        assert!(s.contains("of 4"), "streamlined step total:\n{s}");
         assert!(s.contains("proj"), "project path on directory row:\n{s}");
         assert!(s.contains("codex"), "project agent shown:\n{s}");
     }
