@@ -33,7 +33,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(th::AMBER),
         ),
         Span::styled(title.to_string(), Style::default().fg(th::TEXT_BOLD)),
-        Span::styled(format!("    {age}"), Style::default().fg(th::DIM)),
+        Span::styled(format!("  {age}"), Style::default().fg(th::DIM)),
     ];
     let right = if sel.is_some_and(|s| is_claude(&s.agent)) {
         crate::usage::account_right_spans(
@@ -60,10 +60,12 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let project_name = sel
         .map(|s| app.project_display_name(session_root(s)))
         .unwrap_or_default();
-    let mut sub = vec![Span::styled(
-        project_name,
-        Style::default().fg(th::MUTED),
-    )];
+    // Indent aligns project name under the session name (skips the "▸ " prefix).
+    let indent = " ".repeat(th::PREVIEW_MARK.chars().count() + 1);
+    let mut sub = vec![
+        Span::raw(indent),
+        Span::styled(project_name, Style::default().fg(th::DIM)),
+    ];
     if let Some(g) = sel.and_then(|s| s.git.as_ref()) {
         sub.push(Span::styled(
             format!(" · {} {}", th::BRANCH, g.branch),
