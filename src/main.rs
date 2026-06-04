@@ -5,7 +5,7 @@ use am::{tmux, ui};
 
 use crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    Event, KeyCode, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
+    Event, KeyCode, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, MouseEventKind,
     PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
@@ -210,8 +210,25 @@ fn run(
                 }
                 continue;
             }
-            if let Event::Mouse(_) = &ev {
-                continue; // wheel/click do nothing — kills accidental list scroll
+            if let Event::Mouse(m) = &ev {
+                match m.kind {
+                    MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                        // Only scroll the preview when the cursor is over the right
+                        // panel. The boundary is: x=2 margin + left-panel width.
+                        let screen = terminal.size().unwrap_or_default();
+                        let area_w = screen.width.saturating_sub(4);
+                        let split_col = 2 + area_w * app.split_pct / 100 + 1;
+                        if m.column >= split_col {
+                            if m.kind == MouseEventKind::ScrollUp {
+                                app.preview_scroll_up(3);
+                            } else {
+                                app.preview_scroll_down(3);
+                            }
+                        }
+                    }
+                    _ => {} // clicks/moves ignored
+                }
+                continue;
             }
             if let Event::Key(key) = ev {
                 if key.kind != KeyEventKind::Press {
@@ -434,7 +451,7 @@ fn handle_action(
         Action::RestartSelf => {
             restore_terminal(terminal)?;
             let err = am::update::restart(); // only returns on failure
-            // exec failed — re-enter the TUI instead of dumping to a broken shell.
+                                             // exec failed — re-enter the TUI instead of dumping to a broken shell.
             enable_raw_mode()?;
             execute!(
                 terminal.backend_mut(),

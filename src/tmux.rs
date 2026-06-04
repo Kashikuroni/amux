@@ -380,7 +380,27 @@ pub fn attach_session(name: &str) -> io::Result<()> {
     // The preview shrinks the window via `resize_window`, which sets a per-window
     // `window-size manual`. Reset it to `latest` so attaching fills the client.
     let _ = run(&["set-window-option", "-t", name, "window-size", "latest"]);
+    // Enable mouse mode so the user can scroll with the wheel inside the session.
+    // Read the current value first and restore it after detach so we don't leave
+    // a side-effect when am itself doesn't use mouse mode.
+    let prev_mouse = tmux()
+        .args(["show-option", "-gv", "mouse"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty());
+    let _ = run(&["set-option", "-g", "mouse", "on"]);
     tmux().args(["attach-session", "-t", name]).status()?;
+    // Restore: if there was a prior value use it, otherwise unset (remove override).
+    match prev_mouse.as_deref() {
+        Some(v) => {
+            let _ = run(&["set-option", "-g", "mouse", v]);
+        }
+        None => {
+            let _ = run(&["set-option", "-gu", "mouse"]);
+        }
+    }
     Ok(())
 }
 

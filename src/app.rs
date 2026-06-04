@@ -921,10 +921,10 @@ impl App {
     }
 
     /// Scroll the preview up (into history) / down (toward latest) by `n` lines.
-    fn preview_scroll_up(&mut self, n: u16) {
+    pub fn preview_scroll_up(&mut self, n: u16) {
         self.preview_scroll = self.preview_scroll.saturating_add(n).min(5000);
     }
-    fn preview_scroll_down(&mut self, n: u16) {
+    pub fn preview_scroll_down(&mut self, n: u16) {
         self.preview_scroll = self.preview_scroll.saturating_sub(n);
     }
     /// Jump the preview to the latest output (bottom).
