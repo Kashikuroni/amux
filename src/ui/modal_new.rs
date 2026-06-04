@@ -165,7 +165,7 @@ pub fn render(f: &mut Frame, form: &CreateForm, error: Option<&str>) {
     };
     let h = (BASE_ROWS
         + want_picker
-        + wt_extra
+        + branch_extra
         + warn_extra
         + err_extra
         + model_rows
@@ -331,83 +331,7 @@ pub fn render(f: &mut Frame, form: &CreateForm, error: Option<&str>) {
     }
     y += 1;
 
-    // worktree toggle.
-    if let Some(r) = row(x, y, w, bottom) {
-        let focused = form.field == CreateField::Worktree;
-        let line = if !form.dir_is_repo() {
-            Line::from(vec![
-                lbl("worktree"),
-                Span::styled(
-                    "[ ] needs a git repo",
-                    Style::default().add_modifier(Modifier::DIM),
-                ),
-            ])
-        } else {
-            let mark = if form.worktree { "[x]" } else { "[ ]" };
-            Line::from(vec![
-                lbl("worktree"),
-                Span::styled(format!("{mark} create worktree"), Style::default()),
-                Span::styled("   space", Style::default().add_modifier(Modifier::DIM)),
-            ])
-        };
-        f.render_widget(band(Paragraph::new(line), focused), r);
-    }
-    y += 1;
-
-    if form.worktree {
-        // base: a search field — typing filters the branch list, Tab cycles the
-        // matches. Unfocused it shows the branch the submit would use.
-        let base_focused = form.field == CreateField::Base;
-        if let Some(r) = row(x, y, w, bottom) {
-            if base_focused {
-                input_row(f, r, "base", &form.base_filter, "filter branches", true);
-            } else {
-                let val = form
-                    .selected_base()
-                    .unwrap_or_else(|| "(no branches)".into());
-                input_row(f, r, "base", &val, "(no branches)", false);
-            }
-        }
-        y += 1;
-        // Match list under the filter, windowed like the dir picker.
-        if base_focused {
-            let matches = form.base_matches();
-            if matches.is_empty() {
-                if let Some(r) = row(x + VALUE_INDENT, y, w.saturating_sub(VALUE_INDENT), bottom) {
-                    f.render_widget(
-                        Paragraph::new(Line::from(Span::styled(
-                            "no match",
-                            Style::default().add_modifier(Modifier::DIM | Modifier::BOLD),
-                        ))),
-                        r,
-                    );
-                }
-                y += 1;
-            } else {
-                let cap = PICKER_MAX;
-                let start = if form.base_index >= cap {
-                    form.base_index + 1 - cap
-                } else {
-                    0
-                };
-                let end = (start + cap).min(matches.len());
-                for (i, m) in matches.iter().enumerate().take(end).skip(start) {
-                    let Some(r) = row(x + VALUE_INDENT, y, w.saturating_sub(VALUE_INDENT), bottom)
-                    else {
-                        break;
-                    };
-                    let selected = i == form.base_index;
-                    let text = format!("{}{}", if selected { "‹ " } else { "  " }, m);
-                    let style = if selected {
-                        Style::default().add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().add_modifier(Modifier::DIM)
-                    };
-                    f.render_widget(Paragraph::new(Line::from(Span::styled(text, style))), r);
-                    y += 1;
-                }
-            }
-        }
+    if !form.branches.is_empty() {
         if let Some(r) = row(x, y, w, bottom) {
             input_row(
                 f,
@@ -470,18 +394,59 @@ pub fn render(f: &mut Frame, form: &CreateForm, error: Option<&str>) {
         }
         // base picker — only when the highlighted row is `+ create`.
         if form.branch_is_new() {
+            let base_focused = form.field == CreateField::Base;
             if let Some(r) = row(x, y, w, bottom) {
-                segment_row(
-                    f,
-                    r,
-                    "base",
-                    &form.branches,
-                    form.base_index,
-                    form.field == CreateField::Base,
-                    "(no branches)",
-                );
+                if base_focused {
+                    input_row(f, r, "base", &form.base_filter, "filter branches", true);
+                } else {
+                    let val = form
+                        .selected_base()
+                        .unwrap_or_else(|| "(no branches)".into());
+                    input_row(f, r, "base", &val, "(no branches)", false);
+                }
             }
             y += 1;
+            if base_focused {
+                let matches = form.base_matches();
+                if matches.is_empty() {
+                    if let Some(r) =
+                        row(x + VALUE_INDENT, y, w.saturating_sub(VALUE_INDENT), bottom)
+                    {
+                        f.render_widget(
+                            Paragraph::new(Line::from(Span::styled(
+                                "no match",
+                                Style::default().add_modifier(Modifier::DIM | Modifier::BOLD),
+                            ))),
+                            r,
+                        );
+                    }
+                    y += 1;
+                } else {
+                    let cap = PICKER_MAX;
+                    let start = if form.base_index >= cap {
+                        form.base_index + 1 - cap
+                    } else {
+                        0
+                    };
+                    let end = (start + cap).min(matches.len());
+                    for (i, m) in matches.iter().enumerate().take(end).skip(start) {
+                        let Some(r) =
+                            row(x + VALUE_INDENT, y, w.saturating_sub(VALUE_INDENT), bottom)
+                        else {
+                            break;
+                        };
+                        let selected = i == form.base_index;
+                        let text = format!("{}{}", if selected { "‹ " } else { "  " }, m);
+                        let style = if selected {
+                            Style::default().add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().add_modifier(Modifier::DIM)
+                        };
+                        f.render_widget(Paragraph::new(Line::from(Span::styled(text, style))), r);
+                        y += 1;
+                    }
+                }
+            }
         }
     }
     y += 1;
@@ -709,7 +674,7 @@ mod tests {
         let mut t = Terminal::new(TestBackend::new(80, 30)).unwrap();
         t.draw(|f| render(f, &form, None)).unwrap();
         let s = buf_to_string(t.backend().buffer());
-        assert!(s.contains("of 4"), "streamlined step total:\n{s}");
+        assert!(s.contains("of 3"), "streamlined step total:\n{s}");
         assert!(s.contains("proj"), "project path on directory row:\n{s}");
         assert!(s.contains("codex"), "project agent shown:\n{s}");
     }
@@ -783,9 +748,12 @@ mod tests {
     #[test]
     fn base_search_renders_filter_and_matches() {
         let mut form = CreateForm::new("claude", &[]);
-        form.worktree = true;
+        // A repo with a typed new branch name: the + create row is selected,
+        // so the Base step is live and focusable.
+        form.branches = vec!["main".into(), "dev".into(), "feature".into()];
+        form.branch_input = "newb".into();
+        form.refresh_branch_entries();
         form.field = CreateField::Base;
-        form.base_branches = vec!["main".into(), "dev".into(), "feature".into()];
         form.base_filter = "e".into(); // dev, feature
         let mut t = Terminal::new(TestBackend::new(90, 40)).unwrap();
         t.draw(|f| render(f, &form, None)).unwrap();
@@ -798,9 +766,10 @@ mod tests {
     #[test]
     fn base_unfocused_shows_selected_branch() {
         let mut form = CreateForm::new("claude", &[]);
-        form.worktree = true;
+        form.branches = vec!["main".into(), "dev".into()];
+        form.branch_input = "feat".into();
+        form.refresh_branch_entries(); // + create row → Base step exists
         form.field = CreateField::Branch;
-        form.base_branches = vec!["main".into(), "dev".into()];
         let mut t = Terminal::new(TestBackend::new(90, 40)).unwrap();
         t.draw(|f| render(f, &form, None)).unwrap();
         let s = buf_to_string(t.backend().buffer());

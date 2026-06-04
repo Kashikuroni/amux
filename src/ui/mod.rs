@@ -436,7 +436,10 @@ mod tests {
 
         let text = buf_to_string(terminal.backend().buffer());
         assert!(text.contains("New session"), "create modal must be visible");
-        assert!(text.contains("create"), "footer must show create key hint");
+        assert!(
+            text.contains("enter next"),
+            "footer must show next key hint"
+        );
     }
 
     #[test]

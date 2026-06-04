@@ -12,9 +12,10 @@ type Item = (&'static str, &'static str, bool);
 fn items_for(mode: &Mode) -> Vec<Item> {
     match mode {
         Mode::Create(_) => vec![
-            ("enter", "create", true),
-            ("↑↓ j/k", "move", false),
-            ("←→ h/l", "pick", false),
+            ("enter", "next", true),
+            ("shift+enter", "create", false),
+            ("↑↓", "move", false),
+            ("h/l j/k", "agent", false),
             ("tab", "complete", false),
             ("esc", "cancel", false),
         ],
@@ -152,8 +153,9 @@ mod tests {
         let mut t = Terminal::new(TestBackend::new(120, 6)).unwrap();
         t.draw(|f| render(f, f.area(), &app)).unwrap();
         let s = buf_to_string(t.backend().buffer());
-        assert!(s.contains("enter create"), "enter hint:\n{s}");
-        assert!(s.contains("move"), "j/k move hint:\n{s}");
+        assert!(s.contains("enter next"), "enter hint:\n{s}");
+        assert!(s.contains("shift+enter create"), "submit hint:\n{s}");
+        assert!(s.contains("move"), "arrow move hint:\n{s}");
         assert!(s.contains("tab complete"), "tab hint:\n{s}");
         assert!(!s.contains("next field"), "old wizard hint gone:\n{s}");
     }

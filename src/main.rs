@@ -73,30 +73,25 @@ fn main() -> io::Result<()> {
 /// Cadence depends on the outcome, since the endpoint publishes no rate-limit
 /// numbers (only an opaque `429` `rate_limit_error`):
 ///   - success            → `POLL_INTERVAL` (steady state; usage changes slowly)
-///   - HTTP 429           → `RATE_LIMIT_BACKOFF` (back off so we don't sustain it)
-///   - other failure/net  → `RETRY_INTERVAL` (recover quickly from a transient error)
+///   - any failure/net    → `FAILURE_BACKOFF` (back off so we don't sustain it)
 ///
 /// The first request still fires immediately at startup.
 fn spawn_usage_poller() -> mpsc::Receiver<am::usage::Account> {
     const POLL_INTERVAL: Duration = Duration::from_secs(300); // 5 min, steady state
-    const RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(600); // 10 min after a 429
-    const RETRY_INTERVAL: Duration = Duration::from_secs(30); // transient error (net/token)
+    const FAILURE_BACKOFF: Duration = Duration::from_secs(600); // 10 min after any failure
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         let mut got_usage = false;
         loop {
             let acct = am::usage::fetch_account();
             got_usage |= acct.usage.is_some();
-            let rate_limited = acct.usage_error.as_deref() == Some("429");
             if tx.send(acct).is_err() {
                 break; // receiver dropped → app is shutting down
             }
-            let wait = if rate_limited {
-                RATE_LIMIT_BACKOFF
-            } else if got_usage {
+            let wait = if got_usage {
                 POLL_INTERVAL
             } else {
-                RETRY_INTERVAL
+                FAILURE_BACKOFF
             };
             thread::sleep(wait);
         }
@@ -327,9 +322,15 @@ fn handle_action(terminal: &mut Term, app: &mut App, action: Action) -> io::Resu
                 (shell, label)
             } else {
                 // Flags go into the command only; the label (@cm_agent, the
-                // session list) stays the bare agent.
+                // session list) stays the bare agent. The binary is resolved
+                // to an absolute path so the tmux server's (possibly stale)
+                // PATH cannot break the launch.
                 (
-                    am::app::compose_agent_command(&agent, model.as_deref(), effort.as_deref()),
+                    resolve_agent_command_for_tmux(&am::app::compose_agent_command(
+                        &agent,
+                        model.as_deref(),
+                        effort.as_deref(),
+                    )),
                     agent.clone(),
                 )
             };
