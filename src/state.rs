@@ -29,6 +29,9 @@ pub struct State {
     /// Per-session notes (markdown), keyed by tmux session name. BTreeMap →
     /// deterministic file output.
     pub notes: BTreeMap<String, String>,
+    /// In-progress reply drafts (the `i` composer), keyed by tmux session
+    /// name. A draft lives exactly as long as its session.
+    pub drafts: BTreeMap<String, String>,
 }
 
 fn state_path() -> Option<PathBuf> {
@@ -93,6 +96,7 @@ mod tests {
             project_names: names,
             project_notes: BTreeMap::new(),
             notes: BTreeMap::new(),
+            drafts: BTreeMap::new(),
         };
         let toml = toml::to_string(&s).unwrap();
         let back: State = toml::from_str(&toml).unwrap();
@@ -111,6 +115,7 @@ mod tests {
         let s = State {
             project_notes: BTreeMap::from([("/p".to_string(), "# today\n- [ ] ship".to_string())]),
             notes: BTreeMap::from([("proj".to_string(), "- [x] done".to_string())]),
+            drafts: BTreeMap::from([("sess".to_string(), "half-written".to_string())]),
             ..Default::default()
         };
         let text = toml::to_string(&s).unwrap();
@@ -122,6 +127,10 @@ mod tests {
         assert_eq!(
             back.notes.get("proj").map(String::as_str),
             Some("- [x] done")
+        );
+        assert_eq!(
+            back.drafts.get("sess").map(String::as_str),
+            Some("half-written")
         );
     }
 

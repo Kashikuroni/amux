@@ -303,9 +303,14 @@ pub struct ReplyForm {
 
 impl ReplyForm {
     fn new(name: String) -> Self {
+        Self::with_draft(name, String::new())
+    }
+
+    /// Composer pre-filled with a saved draft, cursor at the end.
+    fn with_draft(name: String, draft: String) -> Self {
         Self {
             name,
-            area: crate::editor::TextArea::default(),
+            area: crate::editor::TextArea::new(draft),
         }
     }
 
@@ -554,6 +559,8 @@ pub struct App {
     pub project_notes: std::collections::BTreeMap<String, String>,
     /// Per-session notes (markdown), keyed by tmux session name.
     pub notes: std::collections::BTreeMap<String, String>,
+    /// In-progress reply drafts, keyed by tmux session name.
+    pub drafts: std::collections::BTreeMap<String, String>,
     /// Which content the right pane shows.
     pub right_pane: RightPane,
 }
@@ -592,6 +599,7 @@ impl App {
             dirty: false,
             project_notes: std::collections::BTreeMap::new(),
             notes: std::collections::BTreeMap::new(),
+            drafts: std::collections::BTreeMap::new(),
             right_pane: RightPane::Preview,
         }
     }
@@ -606,6 +614,7 @@ impl App {
         self.project_names = state.project_names;
         self.project_notes = state.project_notes;
         self.notes = state.notes;
+        self.drafts = state.drafts;
     }
 
     /// Snapshots the persistable UI state for saving to disk.
@@ -617,6 +626,7 @@ impl App {
             project_names: self.project_names.clone(),
             project_notes: self.project_notes.clone(),
             notes: self.notes.clone(),
+            drafts: self.drafts.clone(),
         }
     }
 
@@ -986,10 +996,11 @@ impl App {
                     }
                 }
             }
-            // Free-text reply to the selected session.
+            // Free-text reply to the selected session, restoring its draft.
             KeyCode::Char('i') => {
                 if let Some(name) = self.selected_name() {
-                    self.mode = Mode::Reply(ReplyForm::new(name));
+                    let draft = self.drafts.get(&name).cloned().unwrap_or_default();
+                    self.mode = Mode::Reply(ReplyForm::with_draft(name, draft));
                 }
             }
             KeyCode::Char('t') => {
@@ -1055,6 +1066,20 @@ impl App {
         None
     }
 
+    /// Persists the composer buffer as the session's draft — an empty buffer
+    /// removes the entry. Marks state dirty so the autosave loop writes it.
+    fn save_draft(&mut self, form: &ReplyForm) {
+        if form.area.buffer.is_empty() {
+            if self.drafts.remove(&form.name).is_some() {
+                self.dirty = true;
+            }
+        } else {
+            self.drafts
+                .insert(form.name.clone(), form.area.buffer.clone());
+            self.dirty = true;
+        }
+    }
+
     fn handle_reply_key(&mut self, key: KeyEvent) -> Option<Action> {
         let Mode::Reply(mut form) = std::mem::replace(&mut self.mode, Mode::List) else {
             return None;
@@ -1063,7 +1088,11 @@ impl App {
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         match key.code {
-            KeyCode::Esc => return None, // mode already reset to List → cancels
+            // Esc closes the composer but keeps the message as the session's draft.
+            KeyCode::Esc => {
+                self.save_draft(&form);
+                return None; // mode already reset to List
+            }
             // Newline on Shift+Enter; plain Enter sends (see below). Shift+Enter
             // requires the kitty keyboard protocol to be reported distinctly
             // (enabled in main); Alt+Enter is a fallback on terminals without it.
@@ -1075,11 +1104,15 @@ impl App {
             KeyCode::Char('e') if ctrl => form.end(),
             // Plain text entry — guard against control chords leaking through.
             KeyCode::Char(c) if !ctrl => form.insert_char(c),
-            // Plain Enter sends the composed message.
+            // Plain Enter sends the composed message and drops the draft.
             KeyCode::Enter => {
                 let text = form.area.buffer.trim().to_string();
                 if text.is_empty() {
+                    self.save_draft(&form); // nothing to send — close like Esc
                     return None;
+                }
+                if self.drafts.remove(&form.name).is_some() {
+                    self.dirty = true;
                 }
                 return Some(Action::SendText {
                     name: form.name,
@@ -2002,6 +2035,62 @@ mod tests {
             }
             other => panic!("expected SendText, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn esc_saves_reply_draft_and_i_restores_it() {
+        let mut app = app_with_two_sessions();
+        app.selected = 0; // session "a"
+        app.handle_key(key('i'));
+        app.handle_key(key('h'));
+        app.handle_key(key('i'));
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(matches!(app.mode, Mode::List));
+        assert_eq!(app.drafts.get("a").map(String::as_str), Some("hi"));
+        assert!(app.dirty, "draft must persist via autosave");
+        // Reopen: buffer restored with the cursor at the end (typing appends).
+        app.handle_key(key('i'));
+        app.handle_key(key('!'));
+        match &app.mode {
+            Mode::Reply(f) => assert_eq!(f.area.buffer, "hi!"),
+            other => panic!("expected Reply, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn drafts_are_per_session() {
+        let mut app = app_with_two_sessions();
+        app.drafts.insert("b".into(), "for b".into());
+        app.selected = 0; // session "a"
+        app.handle_key(key('i'));
+        match &app.mode {
+            Mode::Reply(f) => assert_eq!(f.area.buffer, "", "a has no draft"),
+            other => panic!("expected Reply, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sending_clears_the_draft() {
+        let mut app = app_with_two_sessions();
+        app.drafts.insert("a".into(), "hello".into());
+        app.dirty = false;
+        app.selected = 0;
+        app.handle_key(key('i'));
+        let act = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(act, Some(Action::SendText { .. })));
+        assert!(!app.drafts.contains_key("a"));
+        assert!(app.dirty);
+    }
+
+    #[test]
+    fn esc_with_emptied_buffer_removes_the_draft() {
+        let mut app = app_with_two_sessions();
+        app.drafts.insert("a".into(), "x".into());
+        app.selected = 0;
+        app.handle_key(key('i')); // restores "x", cursor at end
+        app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!app.drafts.contains_key("a"));
     }
 
     fn app_with_two_sessions() -> App {
