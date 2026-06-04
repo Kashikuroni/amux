@@ -12,10 +12,17 @@ pub enum CreateField {
     Name,
     Dir,
     Terminal,
-    Worktree,
-    Base,
     Branch,
+    Base,
     Agent,
+}
+
+/// One row of the branch typeahead picker.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BranchEntry {
+    Existing(String),
+    /// The `+ create "<name>"` row; carries the typed name.
+    Create(String),
 }
 
 #[derive(Debug, Clone)]
@@ -28,12 +35,19 @@ pub struct CreateForm {
     pub dir_selected: usize,
     pub agent_choices: Vec<String>,
     pub agent_index: usize,
-    pub worktree: bool,
-    pub base_branches: Vec<String>,
+    /// Typeahead filter text on the Branch step; doubles as the new-branch name.
+    pub branch_input: String,
+    /// All local branches (current first); empty ⇒ dir is not a git repo.
+    pub branches: Vec<String>,
+    /// Branch checked out in `dir`, if any (None on detached HEAD / non-repo).
+    pub current_branch: Option<String>,
+    /// Filtered picker rows (+ trailing Create entry when input is unmatched).
+    pub branch_entries: Vec<BranchEntry>,
+    pub branch_selected: usize,
+    /// Base selection (index into `branches`) for the `+ create` flow.
     pub base_index: usize,
-    pub new_branch: String,
     /// True when opened pre-filled for an existing project (`N`): `dir` and
-    /// `agent` are fixed and the flow only walks Name → Terminal → Worktree → [Base → Branch].
+    /// `agent` are fixed and the flow only walks Name → Terminal → [Branch → Base].
     pub prefilled: bool,
     /// True when the session should run a plain shell instead of an agent.
     /// When set, the Agent step is skipped and `$SHELL` is launched.
@@ -59,24 +73,28 @@ impl CreateForm {
             dir_selected: 0,
             agent_choices: choices,
             agent_index: 0,
-            worktree: false,
-            base_branches: Vec::new(),
+            branch_input: String::new(),
+            branches: Vec::new(),
+            current_branch: None,
+            branch_entries: Vec::new(),
+            branch_selected: 0,
             base_index: 0,
-            new_branch: String::new(),
             prefilled: false,
             terminal: false,
         }
     }
 
     /// New-session form pre-filled for an existing project: `dir` and `agent`
-    /// are fixed, so the streamlined flow only walks Name → Terminal → Worktree → [Base →
-    /// Branch]. `new(project_agent, ...)` already puts `project_agent` first in
-    /// `agent_choices` and selects it (index 0), so the agent is pre-chosen.
+    /// are fixed, so the streamlined flow only walks Name → Terminal → [Branch →
+    /// Base]. `new(project_agent, ...)` already puts `project_agent` first in
+    /// `agent_choices` and selects it (index 0), so the agent is pre-chosen. The
+    /// dir is fixed here, so branches are loaded once up front.
     pub fn for_project(project_dir: &str, project_agent: &str, presets: &[String]) -> Self {
         let mut f = CreateForm::new(project_agent, presets);
         f.dir = collapse_home(project_dir);
         f.prefilled = true;
         f.field = CreateField::Name;
+        f.load_branches();
         f
     }
 
@@ -84,9 +102,9 @@ impl CreateForm {
         match self.field {
             CreateField::Name => &mut self.name,
             CreateField::Dir => &mut self.dir,
-            CreateField::Branch => &mut self.new_branch,
+            CreateField::Branch => &mut self.branch_input,
             CreateField::Agent => &mut self.agent,
-            CreateField::Worktree | CreateField::Base | CreateField::Terminal => &mut self.agent,
+            CreateField::Base | CreateField::Terminal => &mut self.agent,
         }
     }
 
@@ -99,10 +117,11 @@ impl CreateForm {
             v.push(CreateField::Dir);
         }
         v.push(CreateField::Terminal);
-        v.push(CreateField::Worktree);
-        if self.worktree {
-            v.push(CreateField::Base);
+        if !self.branches.is_empty() {
             v.push(CreateField::Branch);
+            if self.branch_is_new() {
+                v.push(CreateField::Base);
+            }
         }
         if !self.prefilled && !self.terminal {
             v.push(CreateField::Agent);
@@ -123,9 +142,15 @@ impl CreateForm {
         self.field_sequence().last() == Some(&self.field)
     }
 
-    /// Advance focus to the next field (used by Tab/Enter and tests).
+    /// Advance focus to the next field (used by Tab/Enter and tests). Loads
+    /// branches once when leaving the Dir step (the dir is then fixed for the
+    /// rest of the flow), so the Branch step appears only for git repos.
     pub fn advance(&mut self) {
+        let leaving_dir = self.field == CreateField::Dir;
         self.field = self.next_field();
+        if leaving_dir {
+            self.load_branches();
+        }
         if self.field == CreateField::Dir {
             self.refresh_dir_entries();
         }
@@ -148,27 +173,68 @@ impl CreateForm {
         }
     }
 
-    /// True when the current `dir` resolves inside a git repository.
-    pub fn dir_is_repo(&self) -> bool {
-        crate::git::repo_root(&expand_tilde(&self.dir)).is_some()
+    /// (Re)reads the dir's branches — called only at the moments the dir
+    /// becomes fixed (form creation for `N`; leaving the Dir step for `n`),
+    /// never per-keypress/render. Empty result ⇒ not a repo ⇒ no Branch step.
+    fn load_branches(&mut self) {
+        let dir = expand_tilde(&self.dir);
+        self.branches = crate::git::list_branches(&dir);
+        self.current_branch = crate::git::current_branch(&dir);
+        self.branch_input.clear();
+        self.base_index = 0;
+        self.refresh_branch_entries();
     }
 
-    /// Toggle the worktree option. On enabling, load branches and prefill the
-    /// new-branch name from the session name (only if still empty).
-    pub fn toggle_worktree(&mut self) {
-        if self.worktree {
-            self.worktree = false;
+    /// Recomputes the picker rows: case-insensitive substring matches of
+    /// `branch_input`, plus a `+ create` row when the input matches no branch
+    /// exactly. Resets the highlight to the first row.
+    pub fn refresh_branch_entries(&mut self) {
+        let q = self.branch_input.to_lowercase();
+        let mut entries: Vec<BranchEntry> = self
+            .branches
+            .iter()
+            .filter(|b| b.to_lowercase().contains(&q))
+            .cloned()
+            .map(BranchEntry::Existing)
+            .collect();
+        let input = self.branch_input.trim();
+        if !input.is_empty() && !self.branches.iter().any(|b| b == input) {
+            entries.push(BranchEntry::Create(input.to_string()));
+        }
+        self.branch_entries = entries;
+        self.branch_selected = 0;
+    }
+
+    /// True when the picker highlight is on the `+ create` row.
+    pub fn branch_is_new(&self) -> bool {
+        matches!(
+            self.branch_entries.get(self.branch_selected),
+            Some(BranchEntry::Create(_))
+        )
+    }
+
+    fn branch_select_next(&mut self) {
+        if self.branch_entries.is_empty() {
             return;
         }
-        if !self.dir_is_repo() {
-            return; // not a git repo — cannot enable
+        self.branch_selected = (self.branch_selected + 1) % self.branch_entries.len();
+    }
+
+    fn branch_select_prev(&mut self) {
+        if self.branch_entries.is_empty() {
+            return;
         }
-        self.worktree = true;
-        self.base_branches = crate::git::list_branches(&expand_tilde(&self.dir));
-        self.base_index = 0;
-        if self.new_branch.is_empty() {
-            self.new_branch = self.name.trim().to_string();
-        }
+        self.branch_selected = if self.branch_selected == 0 {
+            self.branch_entries.len() - 1
+        } else {
+            self.branch_selected - 1
+        };
+    }
+
+    /// Test accessor for the private sequence.
+    #[cfg(test)]
+    pub fn field_sequence_for_test(&self) -> Vec<CreateField> {
+        self.field_sequence()
     }
 
     /// Flip the plain-shell toggle. No branch/disk work needed (unlike worktree);
@@ -179,7 +245,7 @@ impl CreateForm {
 
     /// Move the base-branch selection by `delta` (wraps). No-op if no branches.
     pub fn cycle_base(&mut self, delta: isize) {
-        let n = self.base_branches.len() as isize;
+        let n = self.branches.len() as isize;
         if n == 0 {
             return;
         }
@@ -239,11 +305,15 @@ impl CreateForm {
         }
     }
 
-    /// Appends pasted text to the focused field (reloads dir listing if on Dir).
+    /// Appends pasted text to the focused field (reloads dir listing if on Dir,
+    /// or the branch picker rows if on Branch).
     pub fn paste(&mut self, text: &str) {
         self.current_mut().push_str(text);
         if self.field == CreateField::Dir {
             self.refresh_dir_entries();
+        }
+        if self.field == CreateField::Branch {
+            self.refresh_branch_entries();
         }
     }
 
@@ -1226,11 +1296,21 @@ impl App {
             return None;
         }
 
-        // Worktree toggle step.
-        if form.field == CreateField::Worktree {
+        // Branch step: typeahead picker over local branches (mirrors the Dir
+        // picker: type to filter, ↑/↓ to highlight, Enter accepts & advances).
+        if form.field == CreateField::Branch {
             match key.code {
                 KeyCode::Esc => return None,
-                KeyCode::Char(' ') => form.toggle_worktree(),
+                KeyCode::Backspace => {
+                    form.branch_input.pop();
+                    form.refresh_branch_entries();
+                }
+                KeyCode::Char(c) => {
+                    form.branch_input.push(c);
+                    form.refresh_branch_entries();
+                }
+                KeyCode::Up => form.branch_select_prev(),
+                KeyCode::Down => form.branch_select_next(),
                 KeyCode::Tab => form.advance(),
                 KeyCode::Enter => {
                     if form.is_last_step() {
@@ -1247,19 +1327,29 @@ impl App {
 
         // Base-branch picker step. h/l mirror ←/→ (vim-style) — it's a pure
         // selection step with no free text, so the letters are unambiguous.
+        // Base is the last step in the prefilled `+ create` flow (Agent skipped),
+        // so Enter there submits rather than wrapping.
         if form.field == CreateField::Base {
             match key.code {
                 KeyCode::Esc => return None,
                 KeyCode::Left | KeyCode::Char('h') => form.cycle_base(-1),
                 KeyCode::Right | KeyCode::Char('l') => form.cycle_base(1),
-                KeyCode::Tab | KeyCode::Enter => form.advance(),
+                KeyCode::Tab => form.advance(),
+                KeyCode::Enter => {
+                    if form.is_last_step() {
+                        return self.submit_create(form);
+                    } else {
+                        form.advance();
+                    }
+                }
                 _ => {}
             }
             self.mode = Mode::Create(form);
             return None;
         }
 
-        // Name / agent / branch steps: plain text fields.
+        // Name / agent steps: plain text fields (Branch/Base/Terminal/Dir all
+        // returned earlier above).
         match key.code {
             KeyCode::Esc => return None,
             KeyCode::Left if form.field == CreateField::Agent => form.cycle_agent(-1),
@@ -1879,23 +1969,30 @@ pub fn abbreviate_path(path: &str) -> String {
 }
 
 /// Builds the create action from a completed form, or an error string if the
-/// name/dir fail validation. Shared by the Agent-step submit (non-prefilled)
-/// and the Worktree/Branch submit (prefilled) so the assembly lives in one place.
+/// name/dir fail validation. The highlighted branch picker row decides the
+/// worktree: the dir's own branch → plain session; another existing branch →
+/// `Existing`; a `+ create` row → `New { base, branch }` (the branch name is
+/// validated). Shared by every submit path so the assembly lives in one place.
 pub fn build_create_action(form: &CreateForm, existing: &[String]) -> Result<Action, String> {
     validate_create(&form.name, &form.dir, existing)?;
-    let worktree = if form.worktree {
-        let branch = form.new_branch.trim().to_string();
-        validate_branch(&branch)?;
-        Some(WorktreeSpec::New {
-            base: form
-                .base_branches
-                .get(form.base_index)
-                .cloned()
-                .unwrap_or_default(),
-            branch,
-        })
-    } else {
-        None
+    let worktree = match form.branch_entries.get(form.branch_selected) {
+        // No Branch step (non-repo dir) → plain session.
+        None => None,
+        // The dir's own branch → plain session in the dir, no worktree.
+        Some(BranchEntry::Existing(b)) if Some(b) == form.current_branch.as_ref() => None,
+        Some(BranchEntry::Existing(b)) => Some(WorktreeSpec::Existing { branch: b.clone() }),
+        Some(BranchEntry::Create(name)) => {
+            let branch = name.trim().to_string();
+            validate_branch(&branch)?;
+            Some(WorktreeSpec::New {
+                base: form
+                    .branches
+                    .get(form.base_index)
+                    .cloned()
+                    .unwrap_or_default(),
+                branch,
+            })
+        }
     };
     Ok(Action::Create {
         name: form.name.trim().to_string(),
@@ -2498,16 +2595,6 @@ mod tests {
     }
 
     #[test]
-    fn build_create_rejects_unsafe_branch() {
-        let mut form = CreateForm::new("claude", &[]);
-        form.name = "ok".into();
-        form.dir = "/tmp".into();
-        form.worktree = true;
-        form.new_branch = "../escape".into();
-        assert!(build_create_action(&form, &[]).is_err());
-    }
-
-    #[test]
     fn dir_list_navigation_wraps() {
         let mut form = CreateForm::new("claude", &[]);
         form.dir_entries = vec!["a".into(), "b".into(), "c".into()];
@@ -2557,6 +2644,226 @@ mod tests {
         }
     }
 
+    /// Form with `branches` seeded as if the dir were a git repo (no git calls).
+    fn form_with_branches(branches: &[&str], current: Option<&str>) -> CreateForm {
+        let mut f = CreateForm::new("claude", &[]);
+        f.branches = branches.iter().map(|s| s.to_string()).collect();
+        f.current_branch = current.map(str::to_string);
+        f.refresh_branch_entries();
+        f
+    }
+
+    #[test]
+    fn branch_entries_filter_is_case_insensitive_substring() {
+        let mut f = form_with_branches(&["main", "feature-x", "Feature-y", "fix"], Some("main"));
+        f.branch_input = "FEAT".into();
+        f.refresh_branch_entries();
+        assert_eq!(
+            f.branch_entries,
+            vec![
+                BranchEntry::Existing("feature-x".into()),
+                BranchEntry::Existing("Feature-y".into()),
+                BranchEntry::Create("FEAT".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn branch_entries_empty_input_lists_all_without_create() {
+        let f = form_with_branches(&["main", "dev"], Some("main"));
+        assert_eq!(
+            f.branch_entries,
+            vec![
+                BranchEntry::Existing("main".into()),
+                BranchEntry::Existing("dev".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn branch_entries_exact_match_suppresses_create() {
+        let mut f = form_with_branches(&["main", "dev"], Some("main"));
+        f.branch_input = "dev".into();
+        f.refresh_branch_entries();
+        assert_eq!(f.branch_entries, vec![BranchEntry::Existing("dev".into())]);
+    }
+
+    #[test]
+    fn branch_entries_no_match_leaves_only_create() {
+        let mut f = form_with_branches(&["main"], Some("main"));
+        f.branch_input = "brand-new".into();
+        f.refresh_branch_entries();
+        assert_eq!(
+            f.branch_entries,
+            vec![BranchEntry::Create("brand-new".into())]
+        );
+    }
+
+    #[test]
+    fn sequence_skips_branch_without_repo() {
+        let f = CreateForm::new("claude", &[]); // branches empty
+        assert_eq!(
+            f.field_sequence_for_test(),
+            vec![
+                CreateField::Name,
+                CreateField::Dir,
+                CreateField::Terminal,
+                CreateField::Agent
+            ]
+        );
+    }
+
+    #[test]
+    fn sequence_includes_branch_with_repo_and_base_only_for_create() {
+        let mut f = form_with_branches(&["main", "dev"], Some("main"));
+        assert_eq!(
+            f.field_sequence_for_test(),
+            vec![
+                CreateField::Name,
+                CreateField::Dir,
+                CreateField::Terminal,
+                CreateField::Branch,
+                CreateField::Agent
+            ]
+        );
+        // Select the Create entry → Base appears after Branch.
+        f.branch_input = "new-one".into();
+        f.refresh_branch_entries();
+        assert!(f.branch_is_new());
+        assert_eq!(
+            f.field_sequence_for_test(),
+            vec![
+                CreateField::Name,
+                CreateField::Dir,
+                CreateField::Terminal,
+                CreateField::Branch,
+                CreateField::Base,
+                CreateField::Agent
+            ]
+        );
+    }
+
+    #[test]
+    fn build_create_maps_current_branch_to_plain_session() {
+        let mut f = form_with_branches(&["main", "dev"], Some("main"));
+        f.name = "s1".into();
+        f.dir = "/tmp".into();
+        // entry 0 is "main" (current).
+        assert_eq!(f.branch_selected, 0);
+        match build_create_action(&f, &[]) {
+            Ok(Action::Create { worktree, .. }) => assert_eq!(worktree, None),
+            other => panic!("expected Create, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_create_maps_other_existing_branch_to_existing_spec() {
+        let mut f = form_with_branches(&["main", "dev"], Some("main"));
+        f.name = "s1".into();
+        f.dir = "/tmp".into();
+        f.branch_selected = 1; // "dev"
+        match build_create_action(&f, &[]) {
+            Ok(Action::Create {
+                worktree: Some(WorktreeSpec::Existing { branch }),
+                ..
+            }) => assert_eq!(branch, "dev"),
+            other => panic!("expected Existing spec, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_create_maps_create_entry_to_new_spec_with_base() {
+        let mut f = form_with_branches(&["main", "dev"], Some("main"));
+        f.name = "s1".into();
+        f.dir = "/tmp".into();
+        f.branch_input = "feat-z".into();
+        f.refresh_branch_entries();
+        f.branch_selected = f.branch_entries.len() - 1; // the Create entry
+        f.base_index = 1; // base = "dev"
+        match build_create_action(&f, &[]) {
+            Ok(Action::Create {
+                worktree: Some(WorktreeSpec::New { base, branch }),
+                ..
+            }) => {
+                assert_eq!(branch, "feat-z");
+                assert_eq!(base, "dev");
+            }
+            other => panic!("expected New spec, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_create_rejects_unsafe_new_branch_name() {
+        let mut f = form_with_branches(&["main"], Some("main"));
+        f.name = "ok".into();
+        f.dir = "/tmp".into();
+        f.branch_input = "../escape".into();
+        f.refresh_branch_entries();
+        assert!(f.branch_is_new());
+        assert!(build_create_action(&f, &[]).is_err());
+    }
+
+    #[test]
+    fn branch_step_typing_filters_and_arrows_move() {
+        let mut app = App::new(Config::default());
+        app.sessions = Vec::new();
+        let mut form = form_with_branches(&["main", "dev", "devops"], Some("main"));
+        form.name = "s".into();
+        form.dir = "/tmp".into();
+        form.field = CreateField::Branch;
+        app.mode = Mode::Create(form);
+        // Type "dev" → entries narrow to dev, devops (no create: "dev" is exact).
+        for c in ['d', 'e', 'v'] {
+            app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        let f = cform(&app);
+        assert_eq!(
+            f.branch_entries,
+            vec![
+                BranchEntry::Existing("dev".into()),
+                BranchEntry::Existing("devops".into()),
+            ]
+        );
+        // Down moves the selection.
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(cform(&app).branch_selected, 1);
+    }
+
+    #[test]
+    fn prefilled_form_with_repo_includes_branch_step() {
+        // for_project on a real repo dir picks up its branches.
+        if std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("cm_prefill_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let d = dir.to_str().unwrap();
+        let run = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(d)
+                .args(args)
+                .output()
+                .unwrap();
+        };
+        run(&["init", "-q", "-b", "main"]);
+        run(&["config", "user.email", "t@t"]);
+        run(&["config", "user.name", "t"]);
+        std::fs::write(dir.join("f.txt"), "a\n").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-qm", "init"]);
+
+        let f = CreateForm::for_project(d, "claude", &[]);
+        assert_eq!(f.branches.first().map(String::as_str), Some("main"));
+        assert!(f.field_sequence_for_test().contains(&CreateField::Branch));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn retreat_mirrors_advance_and_wraps_to_last() {
         let mut form = CreateForm::new("claude", &["claude".into()]);
@@ -2586,7 +2893,7 @@ mod tests {
         let mut app = App::new(Config::default());
         let mut form = CreateForm::new("claude", &["claude".into()]);
         form.field = CreateField::Base;
-        form.base_branches = vec!["main".into(), "dev".into(), "feat".into()];
+        form.branches = vec!["main".into(), "dev".into(), "feat".into()];
         form.base_index = 0;
         app.mode = Mode::Create(form);
         app.handle_key(key('l'));
@@ -2632,41 +2939,28 @@ mod tests {
 
     #[test]
     fn prefilled_flow_skips_dir_and_agent() {
+        // Non-repo dir → no Branch step: Name → Terminal → wrap to Name.
         let mut form = CreateForm::for_project("/home/u/proj", "claude", &[]);
-        // Name → Terminal → Worktree → wrap to Name (Dir and Agent skipped).
         form.advance();
         assert_eq!(form.field, CreateField::Terminal);
-        form.advance();
-        assert_eq!(form.field, CreateField::Worktree);
-        form.advance();
-        assert_eq!(form.field, CreateField::Name);
-    }
-
-    #[test]
-    fn prefilled_flow_with_worktree_walks_base_then_branch() {
-        let mut form = CreateForm::for_project("/home/u/proj", "claude", &[]);
-        form.field = CreateField::Worktree;
-        form.worktree = true;
-        form.advance();
-        assert_eq!(form.field, CreateField::Base);
-        form.advance();
-        assert_eq!(form.field, CreateField::Branch);
         form.advance();
         assert_eq!(form.field, CreateField::Name);
     }
 
     #[test]
     fn default_flow_counts_after_refactor() {
+        // Non-repo dir (no branches loaded) → Name, Dir, Terminal, Agent.
         let mut form = CreateForm::new("claude", &[]);
-        assert_eq!(form.total_steps(), 5); // Name, Dir, Terminal, Worktree, Agent
+        assert_eq!(form.total_steps(), 4);
         assert_eq!(form.step(), 1);
         form.field = CreateField::Agent;
-        assert_eq!(form.step(), 5);
+        assert_eq!(form.step(), 4);
         assert!(form.is_last_step());
     }
 
     #[test]
     fn terminal_flow_skips_agent_step() {
+        // Non-repo dir → no Branch step: Name → Dir → Terminal → wrap to Name.
         let mut form = CreateForm::new("claude", &[]);
         form.terminal = true;
         assert_eq!(form.field, CreateField::Name);
@@ -2675,19 +2969,18 @@ mod tests {
         form.advance();
         assert_eq!(form.field, CreateField::Terminal);
         form.advance();
-        assert_eq!(form.field, CreateField::Worktree);
-        form.advance();
         assert_eq!(form.field, CreateField::Name);
     }
 
     #[test]
     fn terminal_step_counts_and_last_step() {
+        // Non-repo dir → Name, Dir, Terminal (Terminal is the last step).
         let mut form = CreateForm::new("claude", &[]);
         form.terminal = true;
-        assert_eq!(form.total_steps(), 4); // Name, Dir, Terminal, Worktree
-        form.field = CreateField::Worktree;
-        assert!(form.is_last_step());
+        assert_eq!(form.total_steps(), 3);
         form.field = CreateField::Terminal;
+        assert!(form.is_last_step());
+        form.field = CreateField::Dir;
         assert!(!form.is_last_step());
     }
 
@@ -2723,7 +3016,8 @@ mod tests {
         let mut app = app_with(vec![at("s", "/p")]);
         let mut form = CreateForm::for_project(&dir, "claude", &[]);
         form.name = "sess".into();
-        form.field = CreateField::Worktree; // worktree off
+        // Non-repo temp dir → no Branch step; Terminal is the last prefilled step.
+        form.field = CreateField::Terminal;
         app.mode = Mode::Create(form);
         let act = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         match act {
@@ -2744,16 +3038,18 @@ mod tests {
     }
 
     #[test]
-    fn prefilled_submit_with_worktree_carries_spec() {
+    fn prefilled_submit_with_new_branch_carries_spec() {
         let dir = std::env::temp_dir().to_string_lossy().to_string();
         let mut app = app_with(vec![at("s", "/p")]);
         let mut form = CreateForm::for_project(&dir, "claude", &[]);
         form.name = "sess".into();
-        form.worktree = true;
-        form.base_branches = vec!["main".into()];
+        // Seed branches as if the dir were a git repo, then pick the + create row.
+        form.branches = vec!["main".into()];
+        form.current_branch = Some("main".into());
         form.base_index = 0;
-        form.new_branch = "feat".into();
-        form.field = CreateField::Branch;
+        form.branch_input = "feat".into();
+        form.refresh_branch_entries(); // sole Create row, selected
+        form.field = CreateField::Base; // last step in the + create flow
         app.mode = Mode::Create(form);
         let act = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         match act {
@@ -2789,15 +3085,21 @@ mod tests {
 
     #[test]
     fn prefilled_step_indicator_counts() {
+        // Non-repo dir → no Branch step: name, terminal.
         let mut form = CreateForm::for_project("/home/u/proj", "claude", &[]);
-        assert_eq!(form.total_steps(), 3); // name, terminal, worktree
+        assert_eq!(form.total_steps(), 2);
         assert_eq!(form.step(), 1);
-        form.field = CreateField::Worktree;
-        assert_eq!(form.step(), 3);
-        form.worktree = true;
-        assert_eq!(form.total_steps(), 5); // name, terminal, worktree, base, branch
-        form.field = CreateField::Branch;
-        assert_eq!(form.step(), 5);
+        form.field = CreateField::Terminal;
+        assert_eq!(form.step(), 2);
+        // Seed branches + a + create row: name, terminal, branch, base.
+        form.branches = vec!["main".into()];
+        form.current_branch = Some("main".into());
+        form.branch_input = "new".into();
+        form.refresh_branch_entries();
+        assert!(form.branch_is_new());
+        assert_eq!(form.total_steps(), 4);
+        form.field = CreateField::Base;
+        assert_eq!(form.step(), 4);
     }
 
     #[test]
@@ -2899,12 +3201,13 @@ mod tests {
 
     #[test]
     fn step_tracks_focused_field() {
+        // Non-repo dir → Name, Dir, Terminal, Agent (Agent is step 4).
         let mut form = CreateForm::new("claude", &[]);
         assert_eq!(form.step(), 1);
         form.field = CreateField::Dir;
         assert_eq!(form.step(), 2);
         form.field = CreateField::Agent;
-        assert_eq!(form.step(), 5);
+        assert_eq!(form.step(), 4);
     }
 
     #[test]
@@ -2983,62 +3286,11 @@ mod tests {
         assert_eq!(abbreviate_path("/a/b/c"), "/\u{2026}/c");
     }
 
-    fn temp_git_repo(tag: &str) -> std::path::PathBuf {
-        use std::process::Command;
-        let dir = std::env::temp_dir().join(format!("am_app_wt_{}_{}", tag, std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let d = dir.to_str().unwrap();
-        let run = |a: &[&str]| {
-            Command::new("git")
-                .arg("-C")
-                .arg(d)
-                .args(a)
-                .output()
-                .unwrap();
-        };
-        run(&["init", "-q", "-b", "main"]);
-        run(&["config", "user.email", "t@t"]);
-        run(&["config", "user.name", "t"]);
-        std::fs::write(dir.join("f.txt"), "a\n").unwrap();
-        run(&["add", "."]);
-        run(&["commit", "-qm", "init"]);
-        dir
-    }
-
-    #[test]
-    fn space_toggles_worktree_on_worktree_step() {
-        if std::process::Command::new("git")
-            .arg("--version")
-            .output()
-            .is_err()
-        {
-            return;
-        }
-        let repo = temp_git_repo("space");
-        let mut app = App::new(Config::default());
-        let mut form = CreateForm::new("claude", &[]);
-        form.name = "s".into();
-        form.dir = repo.to_str().unwrap().to_string();
-        form.field = CreateField::Worktree;
-        app.mode = Mode::Create(form);
-        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
-        match &app.mode {
-            Mode::Create(f) => {
-                assert!(f.worktree);
-                assert_eq!(f.new_branch, "s"); // prefilled from name
-            }
-            _ => panic!("still in create mode"),
-        }
-        let _ = std::fs::remove_dir_all(&repo);
-    }
-
     #[test]
     fn left_right_cycles_base_branch() {
         let mut app = App::new(Config::default());
         let mut form = CreateForm::new("claude", &[]);
-        form.worktree = true;
-        form.base_branches = vec!["main".into(), "dev".into()];
+        form.branches = vec!["main".into(), "dev".into()];
         form.field = CreateField::Base;
         app.mode = Mode::Create(form);
         app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
@@ -3049,48 +3301,7 @@ mod tests {
     }
 
     #[test]
-    fn worktree_off_skips_base_and_branch() {
-        let mut form = CreateForm::new("claude", &[]);
-        form.field = CreateField::Worktree;
-        assert!(!form.worktree);
-        form.advance(); // toggle off -> straight to Agent
-        assert_eq!(form.field, CreateField::Agent);
-    }
-
-    #[test]
-    fn worktree_on_visits_base_and_branch() {
-        if std::process::Command::new("git")
-            .arg("--version")
-            .output()
-            .is_err()
-        {
-            return;
-        }
-        let repo = temp_git_repo("visits");
-        let mut form = CreateForm::new("claude", &[]);
-        form.field = CreateField::Worktree;
-        form.dir = repo.to_str().unwrap().to_string();
-        form.toggle_worktree(); // turn on
-        assert!(form.worktree);
-        form.advance();
-        assert_eq!(form.field, CreateField::Base);
-        form.advance();
-        assert_eq!(form.field, CreateField::Branch);
-        form.advance();
-        assert_eq!(form.field, CreateField::Agent);
-        let _ = std::fs::remove_dir_all(&repo);
-    }
-
-    #[test]
-    fn step_count_grows_with_worktree() {
-        let mut form = CreateForm::new("claude", &[]);
-        assert_eq!(form.total_steps(), 5);
-        form.worktree = true;
-        assert_eq!(form.total_steps(), 7);
-    }
-
-    #[test]
-    fn dir_enter_advances_to_worktree_step() {
+    fn dir_enter_advances_to_terminal_step() {
         let mut app = App::new(Config::default());
         app.mode = Mode::Create(CreateForm::new("claude", &[]));
         // Name step: type a name, Enter -> Dir.
@@ -3119,14 +3330,17 @@ mod tests {
 
     #[test]
     fn create_action_carries_worktree_spec() {
+        // The + create row (selected on the Branch step) → New spec; Agent is the
+        // last step for a non-prefilled repo dir, so Enter there submits.
         let mut app = App::new(Config::default());
         let mut form = CreateForm::new("claude", &[]);
         form.name = "iso".into();
         form.dir = "/tmp".into(); // exists as a dir
-        form.worktree = true;
-        form.base_branches = vec!["main".into()];
+        form.branches = vec!["main".into()];
+        form.current_branch = Some("main".into());
         form.base_index = 0;
-        form.new_branch = "iso-branch".into();
+        form.branch_input = "iso-branch".into();
+        form.refresh_branch_entries(); // sole Create row, selected
         form.field = CreateField::Agent;
         app.mode = Mode::Create(form);
         let action = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -3150,7 +3364,8 @@ mod tests {
         form.name = "sh".into();
         form.dir = dir;
         form.terminal = true;
-        form.field = CreateField::Worktree; // last step when terminal & no worktree
+        // Non-repo dir → Terminal is the last step when terminal is on.
+        form.field = CreateField::Terminal;
         app.mode = Mode::Create(form);
         match app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)) {
             Some(Action::Create { terminal, .. }) => assert!(terminal),
