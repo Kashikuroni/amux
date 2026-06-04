@@ -183,3 +183,71 @@ fn worktree_session_reports_repo_and_cleans_up() {
     am::git::remove_worktree(&repo_s, &wt_str).expect("remove_worktree");
     assert!(!wt_path.exists(), "worktree dir removed");
 }
+
+/// Existing-branch worktree flow against real git + tmux: a branch that is not
+/// checked out anywhere gets a worktree under .worktrees/<branch> (no new
+/// branch created); a second session for the same branch reuses that worktree.
+/// Skipped if tmux or git is unavailable.
+#[test]
+fn existing_branch_worktree_create_and_reuse() {
+    if !tmux::is_available() || Command::new("git").arg("--version").output().is_err() {
+        eprintln!("skipping: tmux or git not available");
+        return;
+    }
+
+    let repo = std::env::temp_dir().join(format!("am_exwt_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&repo);
+    std::fs::create_dir_all(&repo).unwrap();
+    let repo_s = repo.to_str().unwrap().to_string();
+    let git = |args: &[&str]| {
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_s)
+            .args(args)
+            .output()
+            .unwrap();
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["config", "user.email", "t@t"]);
+    git(&["config", "user.name", "t"]);
+    std::fs::write(repo.join("f.txt"), "a\n").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-qm", "init"]);
+    git(&["branch", "feat"]); // exists, not checked out anywhere
+
+    let name = format!("am_exwt_s_{}", std::process::id());
+    struct Guard {
+        name: String,
+        repo: std::path::PathBuf,
+    }
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            let _ = tmux::kill_session(&self.name);
+            let _ = std::fs::remove_dir_all(&self.repo);
+        }
+    }
+    let _guard = Guard {
+        name: name.clone(),
+        repo: repo.clone(),
+    };
+
+    // First resolution: branch has no worktree → prepare one (no -b).
+    assert_eq!(am::git::worktree_for_branch(&repo_s, "feat"), None);
+    let wt = repo.join(".worktrees").join("feat");
+    let wt_s = wt.to_str().unwrap().to_string();
+    am::git::prepare_worktree_existing(&repo_s, &wt_s, "feat").expect("prepare existing");
+    assert!(wt.join("f.txt").exists(), "branch content checked out");
+    tmux::new_worktree_session(&name, &wt_s, "bash", "bash", &repo_s)
+        .expect("session in existing-branch worktree");
+    let sessions = tmux::list_sessions().expect("list");
+    let s = sessions.iter().find(|s| s.name == name).expect("present");
+    assert_eq!(s.worktree_repo.as_deref(), Some(repo_s.as_str()));
+
+    // Second resolution: the worktree is now registered → reuse its path.
+    let found = am::git::worktree_for_branch(&repo_s, "feat").expect("registered now");
+    assert_eq!(
+        std::fs::canonicalize(&found).unwrap(),
+        std::fs::canonicalize(&wt_s).unwrap(),
+        "same worktree is reused"
+    );
+}
