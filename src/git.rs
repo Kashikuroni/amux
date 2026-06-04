@@ -212,6 +212,30 @@ pub fn prepare_worktree(
     add_worktree(repo_root, wt_path, new_branch, base)
 }
 
+/// [`prepare_worktree`]'s twin for an EXISTING branch: same stale-state
+/// handling (prune + orphan-dir cleanup), but checks the branch *exists* and
+/// runs `git worktree add` without `-b` so no new branch is created.
+pub fn prepare_worktree_existing(
+    repo_root: &str,
+    wt_path: &str,
+    branch: &str,
+) -> std::io::Result<()> {
+    if !branch_exists(repo_root, branch) {
+        return Err(std::io::Error::other(format!(
+            "branch '{branch}' does not exist"
+        )));
+    }
+    let _ = git_run(repo_root, &["worktree", "prune"]);
+    let path = std::path::Path::new(wt_path);
+    let non_empty = std::fs::read_dir(path)
+        .map(|mut it| it.next().is_some())
+        .unwrap_or(false);
+    if non_empty && !is_registered_worktree(repo_root, wt_path) {
+        std::fs::remove_dir_all(path)?;
+    }
+    git_run(repo_root, &["worktree", "add", wt_path, branch])
+}
+
 /// Removes the worktree at `wt_path`. No `--force`: a dirty worktree errors
 /// instead of silently discarding work. The branch itself is left intact.
 pub fn remove_worktree(repo_root: &str, wt_path: &str) -> std::io::Result<()> {
@@ -241,6 +265,28 @@ pub fn ensure_gitignore(repo_root: &str, entry: &str) -> std::io::Result<()> {
 /// Absolute path of the repository containing `dir`, or None if `dir` is not in a repo.
 pub fn repo_root(dir: &str) -> Option<String> {
     git_out(dir, &["rev-parse", "--show-toplevel"])
+}
+
+/// Branch currently checked out in `dir`, or None (detached HEAD / not a repo).
+pub fn current_branch(dir: &str) -> Option<String> {
+    git_out(dir, &["symbolic-ref", "--short", "HEAD"])
+}
+
+/// Path of the worktree (including the main one) where `branch` is checked out,
+/// or None if the branch is not checked out anywhere. Parses
+/// `git worktree list --porcelain` stanzas: `worktree <path>` … `branch refs/heads/<name>`.
+pub fn worktree_for_branch(repo_root: &str, branch: &str) -> Option<String> {
+    let out = git_out(repo_root, &["worktree", "list", "--porcelain"])?;
+    let needle = format!("branch refs/heads/{branch}");
+    let mut current_path: Option<&str> = None;
+    for line in out.lines() {
+        if let Some(p) = line.strip_prefix("worktree ") {
+            current_path = Some(p);
+        } else if line == needle {
+            return current_path.map(str::to_string);
+        }
+    }
+    None
 }
 
 /// Local branch names for `dir`, with the current branch first.
@@ -532,6 +578,119 @@ mod tests {
             "expected at least one insertion, got {info:?}"
         );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn current_branch_reports_checked_out_branch() {
+        if Command::new("git").arg("--version").output().is_err() {
+            return;
+        }
+        let dir = temp_repo("curbranch");
+        let d = dir.to_str().unwrap();
+        assert_eq!(current_branch(d).as_deref(), Some("main"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn current_branch_none_for_non_repo() {
+        let dir = std::env::temp_dir().join(format!("cm_cb_none_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(current_branch(dir.to_str().unwrap()), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn worktree_for_branch_finds_main_and_linked() {
+        if Command::new("git").arg("--version").output().is_err() {
+            return;
+        }
+        let dir = temp_repo("wtfind");
+        let root = dir.to_str().unwrap();
+        let wt = dir.join(".worktrees").join("feat");
+        let wt_s = wt.to_str().unwrap();
+        add_worktree(root, wt_s, "feat", "main").expect("add");
+
+        // The current branch lives in the main worktree (paths may differ by
+        // symlink, e.g. /var vs /private/var — compare canonicalized).
+        let canon = |p: &str| std::fs::canonicalize(p).unwrap();
+        let main_path = worktree_for_branch(root, "main").expect("main found");
+        assert_eq!(canon(&main_path), canon(root));
+        // The linked worktree's branch resolves to its path.
+        let feat_path = worktree_for_branch(root, "feat").expect("feat found");
+        assert_eq!(canon(&feat_path), canon(wt_s));
+        // A branch not checked out anywhere → None.
+        Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["branch", "loose"])
+            .output()
+            .unwrap();
+        assert_eq!(worktree_for_branch(root, "loose"), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prepare_worktree_existing_creates_for_existing_branch() {
+        if Command::new("git").arg("--version").output().is_err() {
+            return;
+        }
+        let dir = temp_repo("wtexist");
+        let root = dir.to_str().unwrap();
+        // An existing branch with NO worktree.
+        Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["branch", "feat"])
+            .output()
+            .unwrap();
+        let wt = dir.join(".worktrees").join("feat");
+        prepare_worktree_existing(root, wt.to_str().unwrap(), "feat").expect("create");
+        assert!(wt.join("f.txt").exists(), "branch content checked out");
+        // No second branch appeared (no -b): still exactly main + feat.
+        let branches = list_branches(root);
+        assert_eq!(branches.len(), 2, "no extra branch created: {branches:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prepare_worktree_existing_rejects_missing_branch() {
+        if Command::new("git").arg("--version").output().is_err() {
+            return;
+        }
+        let dir = temp_repo("wtmissing");
+        let root = dir.to_str().unwrap();
+        let wt = dir.join(".worktrees").join("nope");
+        let err = prepare_worktree_existing(root, wt.to_str().unwrap(), "nope")
+            .expect_err("missing branch must error");
+        assert!(
+            err.to_string().contains("does not exist"),
+            "clear message, got: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prepare_worktree_existing_clears_orphan_dir() {
+        if Command::new("git").arg("--version").output().is_err() {
+            return;
+        }
+        let dir = temp_repo("wtorphan");
+        let root = dir.to_str().unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["branch", "feat"])
+            .output()
+            .unwrap();
+        let wt = dir.join(".worktrees").join("feat");
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::write(wt.join("stale.txt"), "junk").unwrap();
+        prepare_worktree_existing(root, wt.to_str().unwrap(), "feat")
+            .expect("orphan cleared, worktree created");
+        assert!(wt.join("f.txt").exists());
+        assert!(!wt.join("stale.txt").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
