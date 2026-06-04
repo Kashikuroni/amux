@@ -7,6 +7,15 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 /// Sentinel label for the free-text agent slot in `CreateForm::agent_choices`.
 pub const CUSTOM_AGENT_SLOT: &str = "custom\u{2026}"; // "custom…"
 
+/// Claude Code model aliases offered under the agent row. Aliases (not full
+/// names) so claude itself resolves them to the current model versions.
+pub const CLAUDE_MODELS: [&str; 3] = ["opus", "sonnet", "haiku"];
+/// Effort slider positions per model; index 0 is "auto" (no --effort flag).
+/// Sonnet 4.6 has no xhigh; haiku does not support effort at all.
+const EFFORTS_OPUS: &[&str] = &["auto", "low", "medium", "high", "xhigh", "max"];
+const EFFORTS_SONNET: &[&str] = &["auto", "low", "medium", "high", "max"];
+const EFFORTS_HAIKU: &[&str] = &["auto"];
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CreateField {
     Name,
@@ -28,6 +37,11 @@ pub struct CreateForm {
     pub dir_selected: usize,
     pub agent_choices: Vec<String>,
     pub agent_index: usize,
+    /// Cursor/selection in the claude model list; `None` = the agent row is
+    /// focused and no --model flag will be passed (claude picks its default).
+    pub model_index: Option<usize>,
+    /// Effort slider position for the highlighted model; 0 = auto (no flag).
+    pub effort_index: usize,
     pub worktree: bool,
     pub base_branches: Vec<String>,
     pub base_index: usize,
@@ -59,6 +73,8 @@ impl CreateForm {
             dir_selected: 0,
             agent_choices: choices,
             agent_index: 0,
+            model_index: None,
+            effort_index: 0,
             worktree: false,
             base_branches: Vec::new(),
             base_index: 0,
@@ -237,6 +253,111 @@ impl CreateForm {
         } else {
             self.agent = self.agent_choices[self.agent_index].clone();
         }
+        // A different agent invalidates any claude model/effort choice.
+        self.model_index = None;
+        self.effort_index = 0;
+    }
+
+    /// True when the agent command's binary is claude (covers presets and
+    /// custom commands like `claude --some-flag`).
+    pub fn agent_is_claude(&self) -> bool {
+        self.agent.split_whitespace().next() == Some("claude")
+    }
+
+    /// True when the model list renders under the agent row.
+    pub fn model_list_visible(&self) -> bool {
+        !self.terminal && self.agent_is_claude()
+    }
+
+    /// Effort slider positions for the highlighted model (auto-only for haiku
+    /// and while on the agent row).
+    /// Indices follow CLAUDE_MODELS order: 0 = opus, 1 = sonnet, 2+ = haiku.
+    pub fn effort_levels(&self) -> &'static [&'static str] {
+        match self.model_index {
+            Some(0) => EFFORTS_OPUS,
+            Some(1) => EFFORTS_SONNET,
+            _ => EFFORTS_HAIKU,
+        }
+    }
+
+    /// Move the model cursor down: the agent row enters the list, models walk
+    /// toward haiku. Returns false when the cursor should leave the list (the
+    /// caller advances to the next field; the selection survives).
+    pub fn model_down(&mut self) -> bool {
+        if !self.model_list_visible() {
+            return false;
+        }
+        match self.model_index {
+            None => {
+                self.model_index = Some(0);
+                self.effort_index = 0;
+                true
+            }
+            Some(i) if i + 1 < CLAUDE_MODELS.len() => {
+                self.model_index = Some(i + 1);
+                self.effort_index = 0;
+                true
+            }
+            Some(_) => false,
+        }
+    }
+
+    /// Move the model cursor up; every move resets effort to auto. From the
+    /// first model returns to the agent row. False when already on the agent row.
+    pub fn model_up(&mut self) -> bool {
+        // No visibility guard needed: model_index is always None off-claude.
+        match self.model_index {
+            Some(0) => {
+                self.model_index = None;
+                self.effort_index = 0;
+                true
+            }
+            Some(i) => {
+                self.model_index = Some(i - 1);
+                self.effort_index = 0;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Move the effort slider by `delta`, clamped to the model's levels (a
+    /// slider, not a carousel — no wrap). No-op for haiku (auto only).
+    pub fn cycle_effort(&mut self, delta: isize) {
+        let n = self.effort_levels().len() as isize;
+        let i = self.effort_index as isize + delta;
+        self.effort_index = i.clamp(0, n - 1) as usize;
+    }
+
+    /// The highlighted model's alias, if the cursor is in the list.
+    pub fn selected_model(&self) -> Option<&'static str> {
+        self.model_index.map(|i| CLAUDE_MODELS[i])
+    }
+
+    /// The slider's effort level; None at the auto position.
+    pub fn selected_effort(&self) -> Option<&'static str> {
+        match self.effort_index {
+            0 => None,
+            i => self.effort_levels().get(i).copied(),
+        }
+    }
+
+    /// (--model, --effort) values exactly as they will be submitted: empty
+    /// unless a claude model is selected; effort never without a model.
+    pub fn model_flags(&self) -> (Option<&'static str>, Option<&'static str>) {
+        if self.terminal || !self.agent_is_claude() {
+            return (None, None);
+        }
+        let model = self.selected_model();
+        (model, model.and(self.selected_effort()))
+    }
+
+    /// Jump to the custom… slot for free typing (typing/Backspace on a preset).
+    pub fn switch_to_custom(&mut self) {
+        self.agent_index = self.agent_choices.len().saturating_sub(1);
+        self.agent.clear();
+        self.model_index = None;
+        self.effort_index = 0;
     }
 
     /// Appends pasted text to the focused field (reloads dir listing if on Dir).
@@ -1275,15 +1396,13 @@ impl App {
             KeyCode::Backspace => {
                 if form.field == CreateField::Agent && !form.agent_is_custom() {
                     // Backspace off a preset: jump to custom and start fresh (matches Char).
-                    form.agent_index = form.agent_choices.len().saturating_sub(1);
-                    form.agent.clear();
+                    form.switch_to_custom();
                 }
                 form.current_mut().pop();
             }
             KeyCode::Char(c) => {
                 if form.field == CreateField::Agent && !form.agent_is_custom() {
-                    form.agent_index = form.agent_choices.len().saturating_sub(1);
-                    form.agent.clear();
+                    form.switch_to_custom();
                 }
                 form.current_mut().push(c);
             }
@@ -3419,5 +3538,106 @@ mod tests {
             Mode::Note(ns) => assert_eq!(ns.editor.buffer, "a\nb"),
             _ => panic!("still editing"),
         }
+    }
+
+    #[test]
+    fn model_list_visible_only_for_claude_agent() {
+        let mut form = CreateForm::new("claude", &["codex".into()]);
+        assert!(form.model_list_visible());
+        form.cycle_agent(1); // codex
+        assert!(!form.model_list_visible());
+        // A custom command whose binary is claude still gets the list.
+        form.agent = "claude --dangerously-skip-permissions".into();
+        assert!(form.model_list_visible());
+        form.terminal = true;
+        assert!(!form.model_list_visible());
+    }
+
+    #[test]
+    fn model_down_enters_walks_and_exits_list() {
+        let mut form = CreateForm::new("claude", &[]);
+        assert!(form.model_down()); // agent row → opus
+        assert_eq!(form.model_index, Some(0));
+        assert!(form.model_down()); // opus → sonnet
+        assert!(form.model_down()); // sonnet → haiku
+        assert_eq!(form.model_index, Some(2));
+        // Past the last model: false → caller advances; selection survives.
+        assert!(!form.model_down());
+        assert_eq!(form.model_index, Some(2));
+    }
+
+    #[test]
+    fn model_down_is_noop_for_non_claude() {
+        let mut form = CreateForm::new("codex", &[]);
+        assert!(!form.model_down());
+        assert_eq!(form.model_index, None);
+    }
+
+    #[test]
+    fn model_up_returns_to_agent_row_and_resets() {
+        let mut form = CreateForm::new("claude", &[]);
+        form.model_index = Some(1);
+        form.effort_index = 2;
+        assert!(form.model_up()); // sonnet → opus, effort resets
+        assert_eq!(form.model_index, Some(0));
+        assert_eq!(form.effort_index, 0);
+        assert!(form.model_up()); // opus → agent row (auto)
+        assert_eq!(form.model_index, None);
+        assert!(!form.model_up()); // already on the agent row
+    }
+
+    #[test]
+    fn effort_slider_clamps_per_model() {
+        let mut form = CreateForm::new("claude", &[]);
+        form.model_index = Some(0); // opus: auto low medium high xhigh max
+        form.cycle_effort(-1);
+        assert_eq!(form.effort_index, 0); // clamped at auto
+        for _ in 0..10 {
+            form.cycle_effort(1);
+        }
+        assert_eq!(form.effort_index, 5); // clamped at max
+        form.model_index = Some(1); // sonnet: no xhigh → top index 4
+        form.effort_index = 0;
+        for _ in 0..10 {
+            form.cycle_effort(1);
+        }
+        assert_eq!(form.effort_index, 4);
+        assert_eq!(form.selected_effort(), Some("max"));
+        form.model_index = Some(2); // haiku: only auto, slider is a no-op
+        form.effort_index = 0;
+        form.cycle_effort(1);
+        assert_eq!(form.effort_index, 0);
+    }
+
+    #[test]
+    fn selected_model_and_effort_map_to_flags() {
+        let mut form = CreateForm::new("claude", &[]);
+        assert_eq!(form.model_flags(), (None, None)); // agent row = auto
+        form.model_index = Some(0);
+        assert_eq!(form.model_flags(), (Some("opus"), None)); // auto effort
+        form.effort_index = 3;
+        assert_eq!(form.model_flags(), (Some("opus"), Some("high")));
+        form.terminal = true;
+        assert_eq!(form.model_flags(), (None, None)); // terminal drops flags
+    }
+
+    #[test]
+    fn cycle_agent_resets_model_selection() {
+        let mut form = CreateForm::new("claude", &["codex".into()]);
+        form.model_index = Some(1);
+        form.effort_index = 2;
+        form.cycle_agent(1);
+        assert_eq!(form.model_index, None);
+        assert_eq!(form.effort_index, 0);
+    }
+
+    #[test]
+    fn switch_to_custom_clears_agent_and_model() {
+        let mut form = CreateForm::new("claude", &[]);
+        form.model_index = Some(0);
+        form.switch_to_custom();
+        assert!(form.agent_is_custom());
+        assert_eq!(form.agent, "");
+        assert_eq!(form.model_index, None);
     }
 }
