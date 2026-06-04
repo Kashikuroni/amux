@@ -52,6 +52,17 @@ impl State {
             .unwrap_or_default()
     }
 
+    /// Drops entries keyed by a project root whose directory no longer exists
+    /// (per `exists`) — notes, display names, and ordering of dead projects.
+    /// Returns true when anything was removed, so the caller can re-save.
+    pub fn prune_missing_projects(&mut self, exists: impl Fn(&str) -> bool) -> bool {
+        let before = self.project_notes.len() + self.project_names.len() + self.project_order.len();
+        self.project_notes.retain(|root, _| exists(root));
+        self.project_names.retain(|root, _| exists(root));
+        self.project_order.retain(|root| exists(root));
+        before != self.project_notes.len() + self.project_names.len() + self.project_order.len()
+    }
+
     /// Writes the state to disk, creating the directory if needed. Best-effort:
     /// any failure (no HOME, unwritable dir) is silently ignored.
     pub fn save(&self) {
@@ -129,5 +140,37 @@ mod tests {
         let s: State = toml::from_str("inbox = \"- [ ] old\"\nsplit_pct = 40").unwrap();
         assert_eq!(s.split_pct, Some(40));
         assert!(s.project_notes.is_empty());
+    }
+
+    #[test]
+    fn prune_drops_entries_for_missing_roots() {
+        let mut s = State {
+            project_order: vec!["/alive".into(), "/dead".into()],
+            project_names: BTreeMap::from([
+                ("/alive".to_string(), "A".to_string()),
+                ("/dead".to_string(), "D".to_string()),
+            ]),
+            project_notes: BTreeMap::from([
+                ("/alive".to_string(), "- [ ] keep".to_string()),
+                ("/dead".to_string(), "- [ ] gone".to_string()),
+            ]),
+            ..Default::default()
+        };
+        assert!(s.prune_missing_projects(|root| root == "/alive"));
+        assert_eq!(s.project_order, vec!["/alive".to_string()]);
+        assert!(s.project_names.contains_key("/alive"));
+        assert!(!s.project_names.contains_key("/dead"));
+        assert!(s.project_notes.contains_key("/alive"));
+        assert!(!s.project_notes.contains_key("/dead"));
+    }
+
+    #[test]
+    fn prune_reports_no_change_when_all_roots_exist() {
+        let mut s = State {
+            project_notes: BTreeMap::from([("/p".to_string(), "x".to_string())]),
+            ..Default::default()
+        };
+        assert!(!s.prune_missing_projects(|_| true));
+        assert!(s.project_notes.contains_key("/p"));
     }
 }
