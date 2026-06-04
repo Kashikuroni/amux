@@ -22,8 +22,10 @@ pub struct State {
     /// against two projects sharing a folder name). Value is the shown name; the
     /// directory itself is never renamed. BTreeMap → deterministic file output.
     pub project_names: BTreeMap<String, String>,
-    /// Global "Inbox" note (markdown). Empty by default.
-    pub inbox: String,
+    /// Per-project notes (markdown), keyed by project root path — the same
+    /// stable key `project_names` uses, so a note survives amux restarts and
+    /// the death of every session of its project.
+    pub project_notes: BTreeMap<String, String>,
     /// Per-session notes (markdown), keyed by tmux session name. BTreeMap →
     /// deterministic file output.
     pub notes: BTreeMap<String, String>,
@@ -78,7 +80,7 @@ mod tests {
             order: vec!["a".into(), "b".into()],
             project_order: vec!["/home/u/p".into()],
             project_names: names,
-            inbox: String::new(),
+            project_notes: BTreeMap::new(),
             notes: BTreeMap::new(),
         };
         let toml = toml::to_string(&s).unwrap();
@@ -96,13 +98,16 @@ mod tests {
     #[test]
     fn notes_round_trip_through_toml() {
         let s = State {
-            inbox: "# today\n- [ ] ship".into(),
+            project_notes: BTreeMap::from([("/p".to_string(), "# today\n- [ ] ship".to_string())]),
             notes: BTreeMap::from([("proj".to_string(), "- [x] done".to_string())]),
             ..Default::default()
         };
         let text = toml::to_string(&s).unwrap();
         let back: State = toml::from_str(&text).unwrap();
-        assert_eq!(back.inbox, s.inbox);
+        assert_eq!(
+            back.project_notes.get("/p").map(String::as_str),
+            Some("# today\n- [ ] ship")
+        );
         assert_eq!(
             back.notes.get("proj").map(String::as_str),
             Some("- [x] done")
@@ -111,9 +116,18 @@ mod tests {
 
     #[test]
     fn missing_notes_fields_default_empty() {
-        // An old state file with no inbox/notes keys still loads.
+        // An old state file with no project_notes/notes keys still loads.
         let s: State = toml::from_str("split_pct = 40").unwrap();
-        assert_eq!(s.inbox, "");
+        assert!(s.project_notes.is_empty());
         assert!(s.notes.is_empty());
+    }
+
+    #[test]
+    fn old_state_with_inbox_key_still_loads() {
+        // Pre-project-notes files carried a global `inbox` string; serde drops
+        // unknown keys, so the file loads and the old text is discarded.
+        let s: State = toml::from_str("inbox = \"- [ ] old\"\nsplit_pct = 40").unwrap();
+        assert_eq!(s.split_pct, Some(40));
+        assert!(s.project_notes.is_empty());
     }
 }

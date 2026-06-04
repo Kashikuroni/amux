@@ -389,7 +389,8 @@ pub enum Mode {
 /// Which note `Mode::Note` is editing.
 #[derive(Debug, Clone, PartialEq)]
 pub enum NoteTarget {
-    Inbox,
+    /// A project's note, keyed by its root path.
+    Project(String),
     Session(String),
 }
 
@@ -484,12 +485,12 @@ enum ModeKind {
 }
 
 /// What the right pane renders: the live session preview, the selected session's
-/// note, or the global Inbox note.
+/// note, or the selected session's project note.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RightPane {
     Preview,
     SessionNote,
-    Inbox,
+    ProjectNote,
 }
 
 pub struct App {
@@ -549,8 +550,8 @@ pub struct App {
     /// Set when persisted state (split width / order / names) changed and needs
     /// saving. The event loop saves and clears it; keeps `App` itself IO-free.
     pub dirty: bool,
-    /// Global Inbox note (markdown).
-    pub inbox: String,
+    /// Per-project notes (markdown), keyed by project root path.
+    pub project_notes: std::collections::BTreeMap<String, String>,
     /// Per-session notes (markdown), keyed by tmux session name.
     pub notes: std::collections::BTreeMap<String, String>,
     /// Which content the right pane shows.
@@ -589,7 +590,7 @@ impl App {
             project_order: Vec::new(),
             project_names: std::collections::BTreeMap::new(),
             dirty: false,
-            inbox: String::new(),
+            project_notes: std::collections::BTreeMap::new(),
             notes: std::collections::BTreeMap::new(),
             right_pane: RightPane::Preview,
         }
@@ -603,7 +604,7 @@ impl App {
         self.order = state.order;
         self.project_order = state.project_order;
         self.project_names = state.project_names;
-        self.inbox = state.inbox;
+        self.project_notes = state.project_notes;
         self.notes = state.notes;
     }
 
@@ -614,7 +615,7 @@ impl App {
             order: self.order.clone(),
             project_order: self.project_order.clone(),
             project_names: self.project_names.clone(),
-            inbox: self.inbox.clone(),
+            project_notes: self.project_notes.clone(),
             notes: self.notes.clone(),
         }
     }
@@ -998,14 +999,20 @@ impl App {
                 };
             }
             KeyCode::Char('T') => {
-                self.right_pane = match self.right_pane {
-                    RightPane::Inbox => RightPane::Preview,
-                    _ => RightPane::Inbox,
-                };
+                // Project note of the selected session; no-op with nothing selected.
+                if self.selected_session().is_some() {
+                    self.right_pane = match self.right_pane {
+                        RightPane::ProjectNote => RightPane::Preview,
+                        _ => RightPane::ProjectNote,
+                    };
+                }
             }
             KeyCode::Tab if self.right_pane != RightPane::Preview => {
                 let target = match self.right_pane {
-                    RightPane::Inbox => NoteTarget::Inbox,
+                    RightPane::ProjectNote => match self.selected_session() {
+                        Some(s) => NoteTarget::Project(session_root(s).to_string()),
+                        None => return None,
+                    },
                     _ => match self.selected_name() {
                         Some(name) => NoteTarget::Session(name),
                         None => return None,
@@ -1389,18 +1396,22 @@ impl App {
         None
     }
 
-    /// The markdown text for a note target (read-only). Missing session = "".
+    /// The markdown text for a note target (read-only). Missing entry = "".
     pub fn note_text(&self, target: &NoteTarget) -> &str {
         match target {
-            NoteTarget::Inbox => &self.inbox,
+            NoteTarget::Project(root) => self
+                .project_notes
+                .get(root)
+                .map(String::as_str)
+                .unwrap_or(""),
             NoteTarget::Session(name) => self.notes.get(name).map(String::as_str).unwrap_or(""),
         }
     }
 
-    /// Mutable handle to a note target, creating an empty session entry if needed.
+    /// Mutable handle to a note target, creating an empty entry if needed.
     pub fn note_text_mut(&mut self, target: &NoteTarget) -> &mut String {
         match target {
-            NoteTarget::Inbox => &mut self.inbox,
+            NoteTarget::Project(root) => self.project_notes.entry(root.clone()).or_default(),
             NoteTarget::Session(name) => self.notes.entry(name.clone()).or_default(),
         }
     }
@@ -3181,12 +3192,42 @@ mod tests {
     }
 
     #[test]
-    fn shift_t_toggles_inbox_pane() {
+    fn shift_t_toggles_project_note_pane() {
         let mut app = app_with(vec![at("s", "/p")]);
+        app.selected = 0;
         app.handle_key(key('T'));
-        assert_eq!(app.right_pane, RightPane::Inbox);
+        assert_eq!(app.right_pane, RightPane::ProjectNote);
         app.handle_key(key('T'));
         assert_eq!(app.right_pane, RightPane::Preview);
+    }
+
+    #[test]
+    fn shift_t_is_noop_without_sessions() {
+        let mut app = App::new(Config::default());
+        app.handle_key(key('T'));
+        assert_eq!(app.right_pane, RightPane::Preview);
+    }
+
+    #[test]
+    fn tab_focuses_the_shown_project_note() {
+        // Root session and a worktree session of the same project focus the
+        // SAME note (keyed by the project root, not the session).
+        let mut app = app_with(vec![at("a", "/p"), at("b", "/p/.worktrees/x")]);
+        app.selected = 0;
+        app.handle_key(key('T'));
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        match &app.mode {
+            Mode::Note(ns) => assert_eq!(ns.target, NoteTarget::Project("/p".into())),
+            other => panic!("expected Mode::Note, got {other:?}"),
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)); // exit note
+        app.selected = 1;
+        app.handle_key(key('T'));
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        match &app.mode {
+            Mode::Note(ns) => assert_eq!(ns.target, NoteTarget::Project("/p".into())),
+            other => panic!("expected Mode::Note, got {other:?}"),
+        }
     }
 
     #[test]
@@ -3222,9 +3263,9 @@ mod tests {
 
     fn note_app_with(text: &str) -> App {
         let mut app = App::new(Config::default());
-        app.inbox = text.into();
+        app.project_notes.insert("/p".into(), text.into());
         app.mode = Mode::Note(NoteState {
-            target: NoteTarget::Inbox,
+            target: NoteTarget::Project("/p".into()),
             sub: NoteSub::Render,
             cursor: 0,
             anchor: None,
@@ -3233,6 +3274,15 @@ mod tests {
         });
         app
     }
+
+    /// The "/p" project note's current text (the target `note_app_with` edits).
+    fn proj_note(app: &App) -> &str {
+        app.project_notes
+            .get("/p")
+            .map(String::as_str)
+            .unwrap_or("")
+    }
+
     fn note_state(app: &App) -> &NoteState {
         match &app.mode {
             Mode::Note(ns) => ns,
@@ -3257,7 +3307,7 @@ mod tests {
         let mut app = note_app_with("- [ ] a\n- [ ] b");
         app.handle_key(key('j')); // cursor on task 1
         app.handle_key(key(' '));
-        assert_eq!(app.inbox, "- [ ] a\n- [x] b");
+        assert_eq!(proj_note(&app), "- [ ] a\n- [x] b");
     }
 
     #[test]
@@ -3266,7 +3316,7 @@ mod tests {
         app.handle_key(key('V')); // anchor at 0
         app.handle_key(key('j')); // extend to 1
         app.handle_key(key(' ')); // toggle 0..=1
-        assert_eq!(app.inbox, "- [x] a\n- [x] b\n- [ ] c");
+        assert_eq!(proj_note(&app), "- [x] a\n- [x] b\n- [ ] c");
         assert!(
             note_state(&app).anchor.is_none(),
             "selection cleared after toggle"
@@ -3285,7 +3335,7 @@ mod tests {
     #[test]
     fn esc_from_render_exits_to_preview() {
         let mut app = note_app_with("- [ ] a");
-        app.right_pane = RightPane::Inbox;
+        app.right_pane = RightPane::ProjectNote;
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(matches!(app.mode, Mode::List), "focus dropped");
         assert_eq!(app.right_pane, RightPane::Preview, "pane closed to preview");
@@ -3294,12 +3344,12 @@ mod tests {
     #[test]
     fn tab_defocuses_but_keeps_note_pane() {
         let mut app = note_app_with("- [ ] a");
-        app.right_pane = RightPane::Inbox;
+        app.right_pane = RightPane::ProjectNote;
         app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert!(matches!(app.mode, Mode::List), "focus dropped");
         assert_eq!(
             app.right_pane,
-            RightPane::Inbox,
+            RightPane::ProjectNote,
             "note still shown after defocus"
         );
     }
@@ -3338,12 +3388,12 @@ mod tests {
     }
 
     #[test]
-    fn inbox_note_persists_to_snapshot() {
-        // Editing the Inbox note marks state dirty and snapshot_state carries it,
+    fn project_note_persists_to_snapshot() {
+        // Editing a project note marks state dirty and snapshot_state carries it,
         // so the autosave loop writes it to state.toml permanently.
         let mut app = App::new(Config::default());
         app.mode = Mode::Note(NoteState {
-            target: NoteTarget::Inbox,
+            target: NoteTarget::Project("/p".into()),
             sub: NoteSub::Edit,
             cursor: 0,
             anchor: None,
@@ -3351,9 +3401,15 @@ mod tests {
             confirm_clear: false,
         });
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)); // commit
-        assert_eq!(app.inbox, "- [ ] buy milk");
+        assert_eq!(proj_note(&app), "- [ ] buy milk");
         assert!(app.dirty, "edit must mark state dirty for autosave");
-        assert_eq!(app.snapshot_state().inbox, "- [ ] buy milk");
+        assert_eq!(
+            app.snapshot_state()
+                .project_notes
+                .get("/p")
+                .map(String::as_str),
+            Some("- [ ] buy milk")
+        );
     }
 
     #[test]
@@ -3361,9 +3417,13 @@ mod tests {
         let mut app = note_app_with("- [ ] a\n- [ ] b");
         app.handle_key(key('c'));
         assert!(note_state(&app).confirm_clear, "c arms the confirmation");
-        assert_eq!(app.inbox, "- [ ] a\n- [ ] b", "not cleared until confirmed");
+        assert_eq!(
+            proj_note(&app),
+            "- [ ] a\n- [ ] b",
+            "not cleared until confirmed"
+        );
         app.handle_key(key('y'));
-        assert_eq!(app.inbox, "");
+        assert_eq!(proj_note(&app), "");
         assert!(!note_state(&app).confirm_clear);
         assert!(app.dirty);
     }
@@ -3374,14 +3434,14 @@ mod tests {
         app.handle_key(key('c'));
         app.handle_key(key('n')); // anything but y cancels
         assert!(!note_state(&app).confirm_clear);
-        assert_eq!(app.inbox, "- [ ] keep", "note untouched on cancel");
+        assert_eq!(proj_note(&app), "- [ ] keep", "note untouched on cancel");
     }
 
     fn note_app_editing(text: &str) -> App {
         let mut app = App::new(Config::default());
-        app.inbox = text.into();
+        app.project_notes.insert("/p".into(), text.into());
         app.mode = Mode::Note(NoteState {
-            target: NoteTarget::Inbox,
+            target: NoteTarget::Project("/p".into()),
             sub: NoteSub::Edit,
             cursor: 0,
             anchor: None,
@@ -3396,7 +3456,7 @@ mod tests {
         let mut app = note_app_editing("- [ ] a");
         app.handle_key(key('!')); // appended at end (cursor at end)
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)); // esc commits
-        assert_eq!(app.inbox, "- [ ] a!");
+        assert_eq!(proj_note(&app), "- [ ] a!");
         assert_eq!(note_state(&app).sub, NoteSub::Render);
     }
 

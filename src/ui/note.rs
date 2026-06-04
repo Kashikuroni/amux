@@ -14,7 +14,9 @@ fn shown_target(app: &App) -> Option<NoteTarget> {
         return Some(ns.target.clone());
     }
     match app.right_pane {
-        RightPane::Inbox => Some(NoteTarget::Inbox),
+        RightPane::ProjectNote => app
+            .selected_session()
+            .map(|s| NoteTarget::Project(crate::app::session_root(s).to_string())),
         RightPane::SessionNote => app.selected_name().map(NoteTarget::Session),
         RightPane::Preview => None,
     }
@@ -34,7 +36,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let text = app.note_text(&target).to_string();
     let (done, total) = note::counts(&text);
     let title = match &target {
-        NoteTarget::Inbox => "Inbox".to_string(),
+        NoteTarget::Project(root) => app.project_display_name(root),
         NoteTarget::Session(name) => name.clone(),
     };
     let hint = match &app.mode {
@@ -130,8 +132,9 @@ fn render_line(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::*; // brings in App, RightPane, render, …
     use crate::config::Config;
+    use crate::tmux::{Session, Status};
     use crate::ui::testutil::buf_to_string;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
@@ -139,12 +142,26 @@ mod tests {
     #[test]
     fn renders_checkboxes_and_counter() {
         let mut app = App::new(Config::default());
-        app.inbox = "# Today\n- [ ] open\n- [x] done".into();
-        app.right_pane = RightPane::Inbox;
+        app.sessions = vec![Session {
+            name: "s".into(),
+            dir: "/home/u/proj".into(),
+            cwd: "/home/u/proj".into(),
+            created: 0,
+            agent: "claude".into(),
+            status: Status::Idle,
+            attached: false,
+            git: None,
+            worktree_repo: None,
+        }];
+        app.project_notes.insert(
+            "/home/u/proj".into(),
+            "# Today\n- [ ] open\n- [x] done".into(),
+        );
+        app.right_pane = RightPane::ProjectNote;
         let mut t = Terminal::new(TestBackend::new(40, 10)).unwrap();
         t.draw(|f| render(f, f.area(), &app)).unwrap();
         let s = buf_to_string(t.backend().buffer());
-        assert!(s.contains("Inbox"), "title:\n{s}");
+        assert!(s.contains("proj"), "title is the project name:\n{s}");
         assert!(s.contains("1/2"), "counter:\n{s}");
         assert!(s.contains("☐ open"), "open box:\n{s}");
         assert!(s.contains("☑ done"), "done box:\n{s}");
