@@ -144,7 +144,7 @@ impl CreateForm {
         self.field_sequence().last() == Some(&self.field)
     }
 
-    /// Advance focus to the next field (used by Tab/Enter and tests).
+    /// Advance focus to the next field (used by ↓/j and tests).
     pub fn advance(&mut self) {
         self.field = self.next_field();
         if self.field == CreateField::Dir {
@@ -161,7 +161,7 @@ impl CreateForm {
         }
     }
 
-    /// Move focus to the previous field (Shift+Tab). Mirror of `advance`.
+    /// Move focus to the previous field (↑/k). Mirror of `advance`.
     pub fn retreat(&mut self) {
         self.field = self.prev_field();
         if self.field == CreateField::Dir {

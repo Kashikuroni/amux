@@ -622,7 +622,7 @@ mod tests {
         form.field = CreateField::Agent;
         form.model_index = Some(1); // sonnet highlighted
         form.effort_index = 3; // high
-        // Wide enough that the command preview doesn't clip mid-flag.
+                               // Wide enough that the command preview doesn't clip mid-flag.
         let mut t = Terminal::new(TestBackend::new(110, 36)).unwrap();
         t.draw(|f| render(f, &form, None)).unwrap();
         let s = buf_to_string(t.backend().buffer());
