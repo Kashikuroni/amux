@@ -45,6 +45,9 @@ pub struct CreateForm {
     pub worktree: bool,
     pub base_branches: Vec<String>,
     pub base_index: usize,
+    /// Typed filter for the base-branch search; matches are a substring filter
+    /// over `base_branches`, `base_index` highlights within the matches.
+    pub base_filter: String,
     pub new_branch: String,
     /// True when opened pre-filled for an existing project (`N`): `dir` is
     /// fixed, so the flow skips the Dir step (agent is still selectable).
@@ -78,6 +81,7 @@ impl CreateForm {
             worktree: false,
             base_branches: Vec::new(),
             base_index: 0,
+            base_filter: String::new(),
             new_branch: String::new(),
             prefilled: false,
             terminal: false,
@@ -102,7 +106,8 @@ impl CreateForm {
             CreateField::Dir => &mut self.dir,
             CreateField::Branch => &mut self.new_branch,
             CreateField::Agent => &mut self.agent,
-            CreateField::Worktree | CreateField::Base | CreateField::Terminal => &mut self.agent,
+            CreateField::Base => &mut self.base_filter,
+            CreateField::Worktree | CreateField::Terminal => &mut self.agent,
         }
     }
 
@@ -182,6 +187,7 @@ impl CreateForm {
         self.worktree = true;
         self.base_branches = crate::git::list_branches(&expand_tilde(&self.dir));
         self.base_index = 0;
+        self.base_filter.clear();
         if self.new_branch.is_empty() {
             self.new_branch = self.name.trim().to_string();
         }
@@ -193,13 +199,41 @@ impl CreateForm {
         self.terminal = !self.terminal;
     }
 
-    /// Move the base-branch selection by `delta` (wraps). No-op if no branches.
-    pub fn cycle_base(&mut self, delta: isize) {
-        let n = self.base_branches.len() as isize;
+    /// Branches matching the typed filter (case-insensitive substring); the
+    /// full list when the filter is empty. Order follows `base_branches`
+    /// (current branch first — see git::list_branches).
+    pub fn base_matches(&self) -> Vec<String> {
+        let f = self.base_filter.to_lowercase();
+        self.base_branches
+            .iter()
+            .filter(|b| b.to_lowercase().contains(&f))
+            .cloned()
+            .collect()
+    }
+
+    /// The highlighted match — what submit uses as the worktree base.
+    pub fn selected_base(&self) -> Option<String> {
+        self.base_matches().get(self.base_index).cloned()
+    }
+
+    /// Move the match highlight by `delta` (wraps). No-op without matches.
+    pub fn base_select(&mut self, delta: isize) {
+        let n = self.base_matches().len() as isize;
         if n == 0 {
             return;
         }
         self.base_index = (((self.base_index as isize + delta) % n + n) % n) as usize;
+    }
+
+    /// Edit the filter; the highlight resets to the first match.
+    pub fn base_filter_push(&mut self, c: char) {
+        self.base_filter.push(c);
+        self.base_index = 0;
+    }
+
+    pub fn base_filter_pop(&mut self) {
+        self.base_filter.pop();
+        self.base_index = 0;
     }
 
     /// Total number of steps shown in the `N of M` indicator.
@@ -365,6 +399,9 @@ impl CreateForm {
         self.current_mut().push_str(text);
         if self.field == CreateField::Dir {
             self.refresh_dir_entries();
+        }
+        if self.field == CreateField::Base {
+            self.base_index = 0;
         }
     }
 
@@ -1371,8 +1408,8 @@ impl App {
         if form.field == CreateField::Base {
             match key.code {
                 KeyCode::Esc => return None,
-                KeyCode::Left | KeyCode::Char('h') => form.cycle_base(-1),
-                KeyCode::Right | KeyCode::Char('l') => form.cycle_base(1),
+                KeyCode::Left | KeyCode::Char('h') => form.base_select(-1),
+                KeyCode::Right | KeyCode::Char('l') => form.base_select(1),
                 KeyCode::Tab | KeyCode::Enter => form.advance(),
                 _ => {}
             }
@@ -2005,14 +2042,13 @@ pub fn build_create_action(form: &CreateForm, existing: &[String]) -> Result<Act
     let worktree = if form.worktree {
         let branch = form.new_branch.trim().to_string();
         validate_branch(&branch)?;
-        Some(WorktreeSpec::New {
-            base: form
-                .base_branches
-                .get(form.base_index)
-                .cloned()
-                .unwrap_or_default(),
-            branch,
-        })
+        let base = match form.selected_base() {
+            Some(b) => b,
+            // Parity with the old picker: an empty repo submits an empty base.
+            None if form.base_branches.is_empty() => String::new(),
+            None => return Err(format!("no branch matches '{}'", form.base_filter)),
+        };
+        Some(WorktreeSpec::New { base, branch })
     } else {
         None
     };
@@ -3639,5 +3675,75 @@ mod tests {
         assert!(form.agent_is_custom());
         assert_eq!(form.agent, "");
         assert_eq!(form.model_index, None);
+    }
+
+    #[test]
+    fn base_matches_filters_case_insensitive_substring() {
+        let mut form = CreateForm::new("claude", &[]);
+        form.base_branches = vec!["main".into(), "dev".into(), "Feature/X".into()];
+        assert_eq!(form.base_matches().len(), 3); // empty filter = all
+        form.base_filter = "Eat".into();
+        assert_eq!(form.base_matches(), vec!["Feature/X".to_string()]);
+        form.base_filter = "zzz".into();
+        assert!(form.base_matches().is_empty());
+    }
+
+    #[test]
+    fn base_select_wraps_over_matches() {
+        let mut form = CreateForm::new("claude", &[]);
+        form.base_branches = vec!["main".into(), "dev".into(), "feature".into()];
+        form.base_filter = "e".into(); // dev, feature
+        form.base_select(1);
+        assert_eq!(form.selected_base().as_deref(), Some("feature"));
+        form.base_select(1); // wraps
+        assert_eq!(form.selected_base().as_deref(), Some("dev"));
+        form.base_select(-1);
+        assert_eq!(form.selected_base().as_deref(), Some("feature"));
+    }
+
+    #[test]
+    fn base_filter_edit_resets_highlight() {
+        let mut form = CreateForm::new("claude", &[]);
+        form.base_branches = vec!["main".into(), "dev".into()];
+        form.base_select(1);
+        assert_eq!(form.base_index, 1);
+        form.base_filter_push('d');
+        assert_eq!(form.base_index, 0);
+        form.base_select(1);
+        form.base_filter_pop();
+        assert_eq!(form.base_index, 0); // pop resets the highlight too
+    }
+
+    #[test]
+    fn build_create_uses_highlighted_base_match() {
+        let mut form = CreateForm::new("claude", &[]);
+        form.name = "ok".into();
+        form.dir = "/tmp".into();
+        form.worktree = true;
+        form.new_branch = "feat-y".into();
+        form.base_branches = vec!["main".into(), "dev".into()];
+        form.base_filter = "de".into();
+        match build_create_action(&form, &[]) {
+            Ok(Action::Create {
+                worktree: Some(WorktreeSpec::New { base, branch }),
+                ..
+            }) => {
+                assert_eq!(base, "dev");
+                assert_eq!(branch, "feat-y");
+            }
+            other => panic!("expected worktree create, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_create_rejects_unmatched_base_filter() {
+        let mut form = CreateForm::new("claude", &[]);
+        form.name = "ok".into();
+        form.dir = "/tmp".into();
+        form.worktree = true;
+        form.new_branch = "feat-y".into();
+        form.base_branches = vec!["main".into()];
+        form.base_filter = "nope".into();
+        assert!(build_create_action(&form, &[]).is_err());
     }
 }
