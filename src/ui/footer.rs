@@ -13,9 +13,9 @@ fn items_for(mode: &Mode) -> Vec<Item> {
     match mode {
         Mode::Create(_) => vec![
             ("enter", "create", true),
-            ("tab", "next field", false),
-            ("shift+tab", "prev", false),
+            ("↑↓ j/k", "move", false),
             ("←→ h/l", "pick", false),
+            ("tab", "complete", false),
             ("esc", "cancel", false),
         ],
         Mode::ConfirmDelete(_) => vec![
@@ -143,6 +143,19 @@ mod tests {
         for glyph in ["⇧", "⇥", "↵"] {
             assert!(!s.contains(glyph), "stale key glyph {glyph}:\n{s}");
         }
+    }
+
+    #[test]
+    fn create_footer_lists_form_navigation() {
+        let mut app = App::new(Config::default());
+        app.mode = Mode::Create(crate::app::CreateForm::new("claude", &[]));
+        let mut t = Terminal::new(TestBackend::new(120, 6)).unwrap();
+        t.draw(|f| render(f, f.area(), &app)).unwrap();
+        let s = buf_to_string(t.backend().buffer());
+        assert!(s.contains("enter create"), "enter hint:\n{s}");
+        assert!(s.contains("move"), "j/k move hint:\n{s}");
+        assert!(s.contains("tab complete"), "tab hint:\n{s}");
+        assert!(!s.contains("next field"), "old wizard hint gone:\n{s}");
     }
 
     #[test]
