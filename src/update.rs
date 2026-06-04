@@ -3,6 +3,11 @@
 //! running binary. All network IO shells out to curl (same as usage.rs);
 //! App stays IO-free — main.rs drives these via background threads.
 
+use std::path::Path;
+use std::process::Command;
+use std::sync::mpsc;
+use std::thread;
+
 const REPO: &str = "Kashikuroni/amux";
 
 /// Shown when self-update cannot proceed (no write access etc.).
@@ -44,6 +49,7 @@ pub fn parse_tag(tag: &str) -> Option<(u32, u32, u32)> {
 }
 
 /// True when the `vX.Y.Z` tag is strictly newer than the local "X.Y.Z".
+/// `local` must be bare (no 'v' prefix) — a prefixed value yields a silent false.
 pub fn is_newer(remote_tag: &str, local: &str) -> bool {
     match (parse_tag(remote_tag), parse_tag(&format!("v{local}"))) {
         (Some(r), Some(l)) => r > l,
@@ -82,6 +88,197 @@ pub fn parse_latest_release(body: &str, local: &str) -> Option<UpdateInfo> {
     })
 }
 
+/// One-shot background release check (the usage-poller pattern). Sends at most
+/// one UpdateInfo; any failure — net, parse, already current — ends the thread
+/// silently. Disabled in debug builds (dev runs from target/).
+pub fn spawn_check() -> mpsc::Receiver<UpdateInfo> {
+    let (tx, rx) = mpsc::channel();
+    if cfg!(debug_assertions) {
+        return rx;
+    }
+    thread::spawn(move || {
+        let Ok(out) = Command::new("curl")
+            .args([
+                "-sS",
+                "--max-time",
+                "10",
+                &format!("https://api.github.com/repos/{REPO}/releases/latest"),
+                "-H",
+                "User-Agent: amux",
+            ])
+            .output()
+        else {
+            return;
+        };
+        if !out.status.success() {
+            return;
+        }
+        let body = String::from_utf8_lossy(&out.stdout);
+        if let Some(info) = parse_latest_release(&body, env!("CARGO_PKG_VERSION")) {
+            let _ = tx.send(info);
+        }
+    });
+    rx
+}
+
+/// Atomically replaces `dest` with `new_bin`: stage a copy next to the
+/// destination (same volume, so rename can't cross devices), swap via rename,
+/// drop the old file. `dest` is untouched until the final rename; if that
+/// fails the original is put back.
+pub fn swap_binary(new_bin: &Path, dest: &Path) -> Result<(), String> {
+    let dir = dest.parent().ok_or("destination has no parent dir")?;
+    let staged = dir.join("amux.new");
+    let old = dir.join("amux.old");
+    std::fs::copy(new_bin, &staged).map_err(|e| format!("copy: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))
+            .map_err(|e| format!("chmod: {e}"))?;
+    }
+    std::fs::rename(dest, &old).map_err(|e| format!("rename old: {e}"))?;
+    if let Err(e) = std::fs::rename(&staged, dest) {
+        // Put the original back: the update failed but amux still works.
+        let _ = std::fs::rename(&old, dest);
+        return Err(format!("rename new: {e}"));
+    }
+    let _ = std::fs::remove_file(&old);
+    Ok(())
+}
+
+/// `curl -f`: non-2xx → nonzero exit (detects a missing .sha256 asset);
+/// `-L` follows GitHub's redirect to the CDN.
+fn curl_to(url: &str, dest: &Path) -> bool {
+    Command::new("curl")
+        .args(["-sSfL", "--max-time", "120", "-o"])
+        .arg(dest)
+        .arg(url)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Compares the file's sha256 against the first token of the `.sha256` file.
+fn sha256_matches(file: &Path, sha_file: &Path) -> Result<bool, String> {
+    let expected = std::fs::read_to_string(sha_file).map_err(|e| format!("read checksum: {e}"))?;
+    let expected = expected.split_whitespace().next().unwrap_or("").to_lowercase();
+    if expected.len() != 64 {
+        return Err("malformed checksum file".into());
+    }
+    let out = Command::new("shasum")
+        .args(["-a", "256"])
+        .arg(file)
+        .output()
+        .map_err(|e| format!("shasum: {e}"))?;
+    let actual = String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_lowercase();
+    Ok(actual == expected)
+}
+
+/// Downloads, verifies and installs `info` in a background thread, streaming
+/// progress. The running binary is only touched in the final swap; every
+/// failure path leaves it as-is and removes the temp dir.
+pub fn spawn_install(info: UpdateInfo) -> mpsc::Receiver<UpdateStage> {
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let send = |s: UpdateStage| {
+            let _ = tx.send(s);
+        };
+        let Ok(exe) = std::env::current_exe() else {
+            send(UpdateStage::Failed(format!(
+                "cannot locate the running binary — {MANUAL_HINT}"
+            )));
+            return;
+        };
+        let Some(exe_dir) = exe.parent().map(Path::to_path_buf) else {
+            send(UpdateStage::Failed(format!(
+                "binary has no parent dir — {MANUAL_HINT}"
+            )));
+            return;
+        };
+        // Writability probe up front, before downloading anything.
+        let probe = exe_dir.join(".amux.update.probe");
+        if std::fs::write(&probe, b"").is_err() {
+            send(UpdateStage::Failed(format!(
+                "no write access to {} — {MANUAL_HINT}",
+                exe_dir.display()
+            )));
+            return;
+        }
+        let _ = std::fs::remove_file(&probe);
+
+        let work = std::env::temp_dir().join(format!("amux-update-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&work);
+        if std::fs::create_dir_all(&work).is_err() {
+            send(UpdateStage::Failed("cannot create temp dir".into()));
+            return;
+        }
+        let fail = |reason: String| {
+            let _ = std::fs::remove_dir_all(&work);
+            let _ = tx.send(UpdateStage::Failed(reason));
+        };
+
+        send(UpdateStage::Downloading);
+        let tgz = work.join("amux.tar.gz");
+        if !curl_to(&info.url, &tgz) {
+            fail("download failed".into());
+            return;
+        }
+
+        send(UpdateStage::Verifying);
+        let sha = work.join("amux.tar.gz.sha256");
+        if curl_to(&format!("{}.sha256", info.url), &sha) {
+            match sha256_matches(&tgz, &sha) {
+                Ok(true) => {}
+                Ok(false) => {
+                    fail("checksum mismatch".into());
+                    return;
+                }
+                Err(e) => {
+                    fail(e);
+                    return;
+                }
+            }
+        }
+        // No .sha256 asset (pre-checksum release) → skip verification.
+
+        send(UpdateStage::Installing);
+        let untar = Command::new("tar")
+            .arg("-xzf")
+            .arg(&tgz)
+            .arg("-C")
+            .arg(&work)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        let new_bin = work.join("amux");
+        if !untar || !new_bin.exists() {
+            fail("archive did not contain amux".into());
+            return;
+        }
+        match swap_binary(&new_bin, &exe) {
+            Ok(()) => send(UpdateStage::Done(info.version.clone())),
+            Err(e) => send(UpdateStage::Failed(e)),
+        }
+        let _ = std::fs::remove_dir_all(&work);
+    });
+    rx
+}
+
+/// Replaces this process with the (just-updated) binary at the same path.
+/// Only returns on failure. tmux sessions live in the tmux server and are
+/// unaffected.
+pub fn restart() -> std::io::Error {
+    use std::os::unix::process::CommandExt;
+    match std::env::current_exe() {
+        Ok(exe) => Command::new(exe).exec(),
+        Err(e) => e,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -115,6 +312,30 @@ mod tests {
             "https://github.com/Kashikuroni/amux/releases/download/v0.3.0/amux-v0.3.0-"
         ));
         assert!(url.ends_with("-apple-darwin.tar.gz"));
+    }
+
+    #[test]
+    fn swap_binary_replaces_dest_and_cleans_up() {
+        let dir = std::env::temp_dir().join(format!("amux_swap_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("amux");
+        let new_bin = dir.join("downloaded");
+        std::fs::write(&dest, b"old").unwrap();
+        std::fs::write(&new_bin, b"new").unwrap();
+
+        swap_binary(&new_bin, &dest).expect("swap should succeed");
+
+        assert_eq!(std::fs::read(&dest).unwrap(), b"new");
+        assert!(!dir.join("amux.old").exists(), "old binary cleaned up");
+        assert!(!dir.join("amux.new").exists(), "staging cleaned up");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&dest).unwrap().permissions().mode();
+            assert_eq!(mode & 0o111, 0o111, "must be executable");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
