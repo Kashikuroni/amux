@@ -3,7 +3,7 @@ use crate::theme as th;
 use crate::timeutil;
 use ansi_to_tui::IntoText;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::Style;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::Frame;
@@ -33,7 +33,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(th::AMBER),
         ),
         Span::styled(title.to_string(), Style::default().fg(th::TEXT_BOLD)),
-        Span::styled(format!("  {age}"), Style::default().fg(th::DIM)),
+        Span::styled(format!("  {age}"), Style::default().add_modifier(Modifier::DIM)),
     ];
     let right = if sel.is_some_and(|s| is_claude(&s.agent)) {
         crate::usage::account_right_spans(
@@ -64,12 +64,12 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let indent = " ".repeat(th::PREVIEW_MARK.chars().count() + 1);
     let mut sub = vec![
         Span::raw(indent),
-        Span::styled(project_name, Style::default().fg(th::DIM)),
+        Span::styled(project_name, Style::default().add_modifier(Modifier::DIM)),
     ];
     if let Some(g) = sel.and_then(|s| s.git.as_ref()) {
         sub.push(Span::styled(
             format!(" · {} {}", th::BRANCH, g.branch),
-            Style::default().fg(th::DIM),
+            Style::default().add_modifier(Modifier::DIM),
         ));
     }
     f.render_widget(Paragraph::new(Line::from(sub)), rows[1]);
