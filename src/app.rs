@@ -1654,7 +1654,8 @@ impl App {
                 self.sessions = apply_grouped_order(&self.project_order, &self.order, sessions);
                 // A draft lives exactly as long as its session: drop entries for
                 // sessions that no longer exist (covers ones that died while
-                // amux wasn't running).
+                // amux wasn't running). Session notes are deliberately NOT pruned
+                // here — they're user knowledge, dropped only on explicit kill.
                 self.prune_dead_drafts();
                 self.clamp_selection();
                 if let Some(p) = new_preview {

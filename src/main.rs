@@ -276,6 +276,12 @@ fn run(
             break;
         }
     }
+    // Flush state changed by background ticks (e.g. pruned drafts): the in-loop
+    // save only runs on a keypress, so a quit right after a tick would lose it.
+    if app.dirty {
+        app.snapshot_state().save();
+        app.dirty = false;
+    }
     Ok(())
 }
 
