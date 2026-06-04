@@ -23,6 +23,11 @@ fn items_for(mode: &Mode) -> Vec<Item> {
             ("n", "no", false),
             ("esc", "cancel", false),
         ],
+        Mode::ConfirmRestart(_) => vec![
+            ("yes", "type to confirm", true),
+            ("enter", "restart", false),
+            ("esc", "cancel", false),
+        ],
         Mode::Help => vec![("esc", "close", true), ("q", "quit", false)],
         Mode::Rename(_) => vec![("enter", "rename", true), ("esc", "cancel", false)],
         Mode::RenameProject(_) => {

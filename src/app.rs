@@ -370,6 +370,10 @@ pub enum Mode {
     Create(CreateForm),
     Rename(RenameForm),
     ConfirmDelete(KillForm),
+    /// Typed confirmation before restarting all Claude sessions (entered with
+    /// `u`, which is easy to hit by accident). Holds the text typed so far;
+    /// Enter fires only when it spells a confirmation word (`confirms_restart`).
+    ConfirmRestart(String),
     Help,
     Filter,
     Reply(ReplyForm),
@@ -470,6 +474,7 @@ enum ModeKind {
     Create,
     Rename,
     ConfirmDelete,
+    ConfirmRestart,
     Help,
     Filter,
     Reply,
@@ -789,6 +794,7 @@ impl App {
             Mode::Create(_) => ModeKind::Create,
             Mode::Rename(_) => ModeKind::Rename,
             Mode::ConfirmDelete(_) => ModeKind::ConfirmDelete,
+            Mode::ConfirmRestart(_) => ModeKind::ConfirmRestart,
             Mode::Help => ModeKind::Help,
             Mode::Filter => ModeKind::Filter,
             Mode::Reply(_) => ModeKind::Reply,
@@ -809,6 +815,7 @@ impl App {
                 None
             }
             ModeKind::ConfirmDelete => self.handle_confirm_key(key),
+            ModeKind::ConfirmRestart => self.handle_confirm_restart_key(key),
             ModeKind::Create => self.handle_create_key(key),
             ModeKind::Rename => self.handle_rename_key(key),
             ModeKind::Filter => self.handle_filter_key(key),
@@ -908,9 +915,9 @@ impl App {
                 }
             }
             // u: restart all Claude sessions (double Ctrl+C, then auto-resume).
-            KeyCode::Char('u') => {
-                return Some(Action::RestartAllClaude);
-            }
+            // Destructive and adjacent to plain typing (e.g. a reply started
+            // without `i`), so it asks for a typed confirmation first.
+            KeyCode::Char('u') => self.mode = Mode::ConfirmRestart(String::new()),
             KeyCode::Char('r') => {
                 if let Some(name) = self.selected_name() {
                     self.mode = Mode::Rename(RenameForm::new(name));
@@ -1104,6 +1111,29 @@ impl App {
             KeyCode::Char('n') | KeyCode::Esc => {}
             _ => self.mode = Mode::ConfirmDelete(form),
         }
+        None
+    }
+
+    /// Typed confirmation for `u` (restart all Claude sessions). Characters are
+    /// taken raw — not layout-mapped via `latin_code` — so the word can be typed
+    /// on any layout. Enter fires only on a full match; otherwise the dialog
+    /// stays open for editing. Esc cancels.
+    fn handle_confirm_restart_key(&mut self, key: KeyEvent) -> Option<Action> {
+        let Mode::ConfirmRestart(mut buffer) = std::mem::replace(&mut self.mode, Mode::List) else {
+            return None;
+        };
+        match key.code {
+            KeyCode::Esc => return None,
+            KeyCode::Enter if confirms_restart(&buffer) => {
+                return Some(Action::RestartAllClaude);
+            }
+            KeyCode::Backspace => {
+                buffer.pop();
+            }
+            KeyCode::Char(c) => buffer.push(c),
+            _ => {}
+        }
+        self.mode = Mode::ConfirmRestart(buffer);
         None
     }
 
@@ -1603,6 +1633,15 @@ pub fn latin_code(code: KeyCode) -> KeyCode {
         KeyCode::Char(c) => KeyCode::Char(latinize(c)),
         other => other,
     }
+}
+
+/// True when the confirm-restart buffer spells out an accepted confirmation
+/// word: "yes" (the documented one) or "да" (undocumented alias so the confirm
+/// works without leaving a Russian layout). Case-insensitive, surrounding
+/// whitespace ignored — but the word must be complete.
+fn confirms_restart(buffer: &str) -> bool {
+    let t = buffer.trim().to_lowercase();
+    t == "yes" || t == "да"
 }
 
 /// Removes ANSI/CSI escape sequences so captured pane text can be matched.
@@ -2117,15 +2156,98 @@ mod tests {
         assert!(matches!(act, Some(Action::SendShiftTab { name }) if name == "s"));
     }
 
+    /// Types `s` into the app one char at a time (raw codes, layout preserved).
+    fn type_str(app: &mut App, s: &str) {
+        for c in s.chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+    }
+
+    fn enter() -> KeyEvent {
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
+    }
+
     #[test]
-    fn u_key_returns_restart_all_claude_action() {
+    fn u_key_opens_restart_confirmation_instead_of_acting() {
         let mut app = App::new(Config::default());
-        let key = KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE);
-        let action = app.handle_key(key);
+        let action = app.handle_key(key('u'));
+        assert!(action.is_none(), "u must not restart directly: {action:?}");
+        assert!(matches!(app.mode, Mode::ConfirmRestart(_)));
+    }
+
+    #[test]
+    fn restart_confirmation_accepts_full_yes() {
+        let mut app = App::new(Config::default());
+        app.handle_key(key('u'));
+        type_str(&mut app, "yes");
+        let action = app.handle_key(enter());
         assert!(
             matches!(action, Some(Action::RestartAllClaude)),
             "expected RestartAllClaude, got {action:?}"
         );
+        assert!(matches!(app.mode, Mode::List));
+    }
+
+    #[test]
+    fn restart_confirmation_accepts_russian_da() {
+        let mut app = App::new(Config::default());
+        app.handle_key(key('u'));
+        type_str(&mut app, "да");
+        let action = app.handle_key(enter());
+        assert!(
+            matches!(action, Some(Action::RestartAllClaude)),
+            "expected RestartAllClaude, got {action:?}"
+        );
+    }
+
+    #[test]
+    fn restart_confirmation_is_case_insensitive() {
+        for word in ["YES", "Yes", "ДА", "Да"] {
+            let mut app = App::new(Config::default());
+            app.handle_key(key('u'));
+            type_str(&mut app, word);
+            let action = app.handle_key(enter());
+            assert!(
+                matches!(action, Some(Action::RestartAllClaude)),
+                "{word:?} must confirm, got {action:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn restart_confirmation_rejects_partial_or_wrong_text() {
+        for text in ["", "y", "ye", "yess", "no", "д"] {
+            let mut app = App::new(Config::default());
+            app.handle_key(key('u'));
+            type_str(&mut app, text);
+            let action = app.handle_key(enter());
+            assert!(action.is_none(), "{text:?} must not confirm: {action:?}");
+            assert!(
+                matches!(app.mode, Mode::ConfirmRestart(_)),
+                "{text:?}: dialog must stay open"
+            );
+        }
+    }
+
+    #[test]
+    fn restart_confirmation_supports_backspace_editing() {
+        let mut app = App::new(Config::default());
+        app.handle_key(key('u'));
+        type_str(&mut app, "yex");
+        app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        type_str(&mut app, "s");
+        let action = app.handle_key(enter());
+        assert!(matches!(action, Some(Action::RestartAllClaude)));
+    }
+
+    #[test]
+    fn restart_confirmation_esc_cancels() {
+        let mut app = App::new(Config::default());
+        app.handle_key(key('u'));
+        type_str(&mut app, "yes");
+        let action = app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(action.is_none());
+        assert!(matches!(app.mode, Mode::List));
     }
 
     #[test]

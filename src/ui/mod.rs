@@ -50,6 +50,7 @@ pub fn draw(f: &mut Frame, app: &App) {
             let s = app.sessions.iter().find(|s| s.name == form.name);
             modal_kill::render(f, form, s);
         }
+        Mode::ConfirmRestart(buffer) => draw_confirm_restart_modal(f, buffer),
         Mode::Help => modal_help::render(f),
         Mode::Reply(form) => draw_reply_modal(f, form),
         Mode::RenameProject(form) => draw_project_rename_modal(f, form),
@@ -112,6 +113,58 @@ fn draw_reply_modal(f: &mut Frame, form: &ReplyForm) {
             hint_label(" cancel"),
         ])),
         hint_area,
+    );
+}
+
+/// Typed confirmation before restarting every Claude session: the user must
+/// spell out the word, so a stray `u` in list mode can't drop all sessions.
+fn draw_confirm_restart_modal(f: &mut Frame, buffer: &str) {
+    let area = centered(56, 36, f.area());
+    f.render_widget(Clear, area);
+    let lines = vec![
+        Line::from(vec![
+            Span::styled(
+                "↻ ",
+                Style::default().fg(th::RED).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "Restart all Claude sessions?",
+                Style::default()
+                    .fg(th::TEXT_BOLD)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Sends double Ctrl+C to every Claude session, then auto-resumes each one.",
+            Style::default().fg(th::DIM),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("type yes to confirm: ", Style::default().fg(th::MUTED)),
+            Span::styled(
+                buffer.to_string(),
+                Style::default()
+                    .fg(th::TEXT_BOLD)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            hint_key("enter"),
+            hint_label(" restart   "),
+            hint_key("esc"),
+            hint_label(" cancel"),
+        ]),
+    ];
+    f.render_widget(
+        Paragraph::new(lines).block(
+            th::panel()
+                .border_style(th::chrome(th::RED))
+                .title(" confirm ")
+                .style(Style::default().bg(th::BG_RAISED)),
+        ),
+        area,
     );
 }
 
@@ -379,6 +432,30 @@ mod tests {
         let text = buf_to_string(terminal.backend().buffer());
         assert!(text.contains("New session"), "create modal must be visible");
         assert!(text.contains("create"), "footer must show create key hint");
+    }
+
+    #[test]
+    fn renders_confirm_restart_modal_with_english_only_hints() {
+        let mut app = App::new(Config::default());
+        app.mode = crate::app::Mode::ConfirmRestart("ye".into());
+
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+
+        let text = buf_to_string(terminal.backend().buffer());
+        assert!(
+            text.contains("Restart all Claude sessions?"),
+            "modal title missing:\n{text}"
+        );
+        assert!(
+            text.contains("type yes to confirm: ye"),
+            "typed buffer must be echoed:\n{text}"
+        );
+        assert!(
+            !text.contains("да"),
+            "hints must stay English-only:\n{text}"
+        );
     }
 
     #[test]
