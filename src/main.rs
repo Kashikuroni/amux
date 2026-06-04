@@ -306,13 +306,20 @@ fn handle_action(terminal: &mut Term, app: &mut App, action: Action) -> io::Resu
             agent,
             worktree,
             terminal,
+            model,
+            effort,
         } => {
             let (command, label) = if terminal {
                 let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
                 let label = tmux::shell_basename(&shell).to_string();
                 (shell, label)
             } else {
-                (agent.clone(), agent.clone())
+                // Flags go into the command only; the label (@cm_agent, the
+                // session list) stays the bare agent.
+                (
+                    am::app::compose_agent_command(&agent, model.as_deref(), effort.as_deref()),
+                    agent.clone(),
+                )
             };
             let result = match worktree {
                 None => tmux::new_session(&name, &dir, &command, &label),

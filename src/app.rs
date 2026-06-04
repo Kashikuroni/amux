@@ -601,6 +601,10 @@ pub enum Action {
         agent: String,
         worktree: Option<WorktreeSpec>,
         terminal: bool,
+        /// Claude model alias for --model; None = claude picks its default.
+        model: Option<String>,
+        /// Effort level for --effort; never Some without `model`.
+        effort: Option<String>,
     },
     Kill {
         name: String,
@@ -2052,13 +2056,29 @@ pub fn build_create_action(form: &CreateForm, existing: &[String]) -> Result<Act
     } else {
         None
     };
+    let (model, effort) = form.model_flags();
     Ok(Action::Create {
         name: form.name.trim().to_string(),
         dir: expand_tilde(&form.dir),
         agent: form.agent.clone(),
         worktree,
         terminal: form.terminal,
+        model: model.map(str::to_string),
+        effort: effort.map(str::to_string),
     })
+}
+
+/// The final command a create runs: the agent plus claude model/effort flags.
+/// Shared by the submit path (main.rs) and the modal's command preview.
+pub fn compose_agent_command(agent: &str, model: Option<&str>, effort: Option<&str>) -> String {
+    let mut cmd = agent.to_string();
+    if let Some(m) = model {
+        cmd.push_str(&format!(" --model {m}"));
+    }
+    if let Some(e) = effort {
+        cmd.push_str(&format!(" --effort {e}"));
+    }
+    cmd
 }
 
 /// Validates create-form input. `dir` is checked after tilde expansion.
@@ -2894,7 +2914,7 @@ mod tests {
                 dir: d,
                 agent,
                 worktree,
-                terminal: _,
+                ..
             }) => {
                 assert_eq!(name, "sess");
                 assert_eq!(d, dir);
@@ -3745,5 +3765,52 @@ mod tests {
         form.base_branches = vec!["main".into()];
         form.base_filter = "nope".into();
         assert!(build_create_action(&form, &[]).is_err());
+    }
+
+    #[test]
+    fn compose_agent_command_appends_flags() {
+        assert_eq!(compose_agent_command("claude", None, None), "claude");
+        assert_eq!(
+            compose_agent_command("claude", Some("opus"), None),
+            "claude --model opus"
+        );
+        assert_eq!(
+            compose_agent_command("claude", Some("sonnet"), Some("high")),
+            "claude --model sonnet --effort high"
+        );
+        assert_eq!(
+            compose_agent_command("claude --dangerously-skip-permissions", Some("haiku"), None),
+            "claude --dangerously-skip-permissions --model haiku"
+        );
+    }
+
+    #[test]
+    fn build_create_carries_model_and_effort() {
+        let mut form = CreateForm::new("claude", &[]);
+        form.name = "ok".into();
+        form.dir = "/tmp".into();
+        form.model_index = Some(0); // opus
+        form.effort_index = 3; // high
+        match build_create_action(&form, &[]) {
+            Ok(Action::Create { model, effort, .. }) => {
+                assert_eq!(model.as_deref(), Some("opus"));
+                assert_eq!(effort.as_deref(), Some("high"));
+            }
+            other => panic!("expected Create, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_create_auto_model_has_no_flags() {
+        let mut form = CreateForm::new("claude", &[]);
+        form.name = "ok".into();
+        form.dir = "/tmp".into();
+        match build_create_action(&form, &[]) {
+            Ok(Action::Create { model, effort, .. }) => {
+                assert_eq!(model, None);
+                assert_eq!(effort, None);
+            }
+            other => panic!("expected Create, got {other:?}"),
+        }
     }
 }
