@@ -302,6 +302,8 @@ pub struct ReplyForm {
 }
 
 impl ReplyForm {
+    /// Fresh empty composer — used by tests within this module.
+    #[cfg(test)]
     fn new(name: String) -> Self {
         Self::with_draft(name, String::new())
     }
