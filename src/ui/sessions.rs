@@ -244,14 +244,22 @@ fn paint_prompt_frame(buf: &mut ratatui::buffer::Buffer, area: Rect) {
         .set_style(Style::default().bg(th::SEL_BG).add_modifier(Modifier::DIM));
 }
 
-/// Project group header: the display name (bold) with the shared path beneath it
-/// in DIM. Inter-group spacing is handled by the caller's spacer items.
-fn project_header(name: &str, root: &str) -> ListItem<'static> {
+/// Project group header: the display name (bold) with the project note's task
+/// counter beside it (hidden when the note has no tasks), and the shared path
+/// beneath in DIM. Inter-group spacing is handled by the caller's spacer items.
+fn project_header(name: &str, root: &str, done: u32, total: u32) -> ListItem<'static> {
+    let mut top = vec![Span::styled(
+        name.to_string(),
+        Style::default().add_modifier(Modifier::BOLD),
+    )];
+    if total > 0 {
+        top.push(Span::styled(
+            format!("   {done}/{total}"),
+            Style::default().add_modifier(Modifier::DIM),
+        ));
+    }
     ListItem::new(vec![
-        Line::from(Span::styled(
-            name.to_string(),
-            Style::default().add_modifier(Modifier::BOLD),
-        )),
+        Line::from(top),
         Line::from(Span::styled(
             collapse_home(root),
             Style::default().add_modifier(Modifier::DIM),
@@ -353,7 +361,18 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             } else {
                 SPACER_TOP
             }));
-            items.push(project_header(&app.project_display_name(&root), &root));
+            // Task progress from the project's note (hidden when it has no tasks).
+            let (pdone, ptotal) = app
+                .project_notes
+                .get(&root)
+                .map(|t| crate::note::counts(t))
+                .unwrap_or((0, 0));
+            items.push(project_header(
+                &app.project_display_name(&root),
+                &root,
+                pdone,
+                ptotal,
+            ));
             items.extend(spacer(SPACER_PATH_TO_FIRST));
             prev_root = Some(root);
         } else {
@@ -863,5 +882,29 @@ mod tests {
             !s.contains("restarting"),
             "must not show 'restarting':\n{s}"
         );
+    }
+
+    #[test]
+    fn project_header_shows_task_counter() {
+        let mut app = App::new(Config::default());
+        app.sessions = vec![sess("a", Status::Idle, None)];
+        app.project_notes
+            .insert("~/work/x".into(), "- [ ] a\n- [x] b".into());
+        let mut t = Terminal::new(TestBackend::new(60, 16)).unwrap();
+        t.draw(|f| render(f, f.area(), &app)).unwrap();
+        let s = buf_to_string(t.backend().buffer());
+        assert!(s.contains("x   1/2"), "header counter:\n{s}");
+    }
+
+    #[test]
+    fn project_header_hides_counter_without_tasks() {
+        let mut app = App::new(Config::default());
+        app.sessions = vec![sess("a", Status::Idle, None)];
+        app.project_notes
+            .insert("~/work/x".into(), "just text".into());
+        let mut t = Terminal::new(TestBackend::new(60, 16)).unwrap();
+        t.draw(|f| render(f, f.area(), &app)).unwrap();
+        let s = buf_to_string(t.backend().buffer());
+        assert!(!s.contains("0/0"), "no counter for a taskless note:\n{s}");
     }
 }

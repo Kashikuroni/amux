@@ -36,7 +36,13 @@ fn main() -> io::Result<()> {
     let config = Config::load();
     let refresh = Duration::from_millis(config.refresh_interval_ms.max(100));
     let mut app = App::new(config);
-    app.apply_state(State::load());
+    let mut state = State::load();
+    // Dead-project GC: a root whose directory is gone can never host a session
+    // again — drop its note/name/order entries and persist the cleaned file.
+    if state.prune_missing_projects(|root| std::path::Path::new(root).is_dir()) {
+        state.save();
+    }
+    app.apply_state(state);
     // Read git off the UI thread so large/slow repos never stall rendering.
     app.attach_git_worker();
     if !tmux::is_available() {
@@ -270,6 +276,12 @@ fn run(
             break;
         }
     }
+    // Flush state changed by background ticks (e.g. pruned drafts): the in-loop
+    // save only runs on a keypress, so a quit right after a tick would lose it.
+    if app.dirty {
+        app.snapshot_state().save();
+        app.dirty = false;
+    }
     Ok(())
 }
 
@@ -345,6 +357,7 @@ fn handle_action(terminal: &mut Term, app: &mut App, action: Action) -> io::Resu
                     }
                 }
                 app.notes.remove(&name);
+                app.drafts.remove(&name);
                 app.dirty = true;
             }
             app.refresh();
@@ -355,6 +368,10 @@ fn handle_action(terminal: &mut Term, app: &mut App, action: Action) -> io::Resu
             } else {
                 if let Some(text) = app.notes.remove(&old) {
                     app.notes.insert(new.clone(), text);
+                    app.dirty = true;
+                }
+                if let Some(draft) = app.drafts.remove(&old) {
+                    app.drafts.insert(new.clone(), draft);
                     app.dirty = true;
                 }
             }

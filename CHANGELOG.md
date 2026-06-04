@@ -6,6 +6,21 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- The `i` composer keeps a per‑session **draft**: Esc closes and saves, `i`
+  restores it; the draft survives amux restarts and dies with its session.
+  `Ctrl‑y` copies the whole message, `Ctrl‑x` clears it.
+- `done/total` task counter on the project group header, fed by the project note.
+
+### Changed
+- `T` now opens the selected session's **project note** — keyed by the project
+  root path, so it survives restarts and session kills — instead of the global
+  Inbox. At startup, state entries of projects whose directory no longer exists
+  are pruned (note: a project on an unmounted volume counts as deleted).
+
+### Removed
+- The global Inbox note; an existing `inbox` value in `state.toml` is ignored.
+
 ## [0.1.0] - 2026-06-03
 
 Initial public release.

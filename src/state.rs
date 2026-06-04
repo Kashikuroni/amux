@@ -22,11 +22,16 @@ pub struct State {
     /// against two projects sharing a folder name). Value is the shown name; the
     /// directory itself is never renamed. BTreeMap → deterministic file output.
     pub project_names: BTreeMap<String, String>,
-    /// Global "Inbox" note (markdown). Empty by default.
-    pub inbox: String,
+    /// Per-project notes (markdown), keyed by project root path — the same
+    /// stable key `project_names` uses, so a note survives amux restarts and
+    /// the death of every session of its project.
+    pub project_notes: BTreeMap<String, String>,
     /// Per-session notes (markdown), keyed by tmux session name. BTreeMap →
     /// deterministic file output.
     pub notes: BTreeMap<String, String>,
+    /// In-progress reply drafts (the `i` composer), keyed by tmux session
+    /// name. A draft lives exactly as long as its session.
+    pub drafts: BTreeMap<String, String>,
 }
 
 fn state_path() -> Option<PathBuf> {
@@ -48,6 +53,17 @@ impl State {
             .ok()
             .and_then(|s| toml::from_str(&s).ok())
             .unwrap_or_default()
+    }
+
+    /// Drops entries keyed by a project root whose directory no longer exists
+    /// (per `exists`) — notes, display names, and ordering of dead projects.
+    /// Returns true when anything was removed, so the caller can re-save.
+    pub fn prune_missing_projects(&mut self, exists: impl Fn(&str) -> bool) -> bool {
+        let before = self.project_notes.len() + self.project_names.len() + self.project_order.len();
+        self.project_notes.retain(|root, _| exists(root));
+        self.project_names.retain(|root, _| exists(root));
+        self.project_order.retain(|root| exists(root));
+        before != self.project_notes.len() + self.project_names.len() + self.project_order.len()
     }
 
     /// Writes the state to disk, creating the directory if needed. Best-effort:
@@ -78,8 +94,9 @@ mod tests {
             order: vec!["a".into(), "b".into()],
             project_order: vec!["/home/u/p".into()],
             project_names: names,
-            inbox: String::new(),
+            project_notes: BTreeMap::new(),
             notes: BTreeMap::new(),
+            drafts: BTreeMap::new(),
         };
         let toml = toml::to_string(&s).unwrap();
         let back: State = toml::from_str(&toml).unwrap();
@@ -96,24 +113,73 @@ mod tests {
     #[test]
     fn notes_round_trip_through_toml() {
         let s = State {
-            inbox: "# today\n- [ ] ship".into(),
+            project_notes: BTreeMap::from([("/p".to_string(), "# today\n- [ ] ship".to_string())]),
             notes: BTreeMap::from([("proj".to_string(), "- [x] done".to_string())]),
+            drafts: BTreeMap::from([("sess".to_string(), "half-written".to_string())]),
             ..Default::default()
         };
         let text = toml::to_string(&s).unwrap();
         let back: State = toml::from_str(&text).unwrap();
-        assert_eq!(back.inbox, s.inbox);
+        assert_eq!(
+            back.project_notes.get("/p").map(String::as_str),
+            Some("# today\n- [ ] ship")
+        );
         assert_eq!(
             back.notes.get("proj").map(String::as_str),
             Some("- [x] done")
+        );
+        assert_eq!(
+            back.drafts.get("sess").map(String::as_str),
+            Some("half-written")
         );
     }
 
     #[test]
     fn missing_notes_fields_default_empty() {
-        // An old state file with no inbox/notes keys still loads.
+        // An old state file with no project_notes/notes keys still loads.
         let s: State = toml::from_str("split_pct = 40").unwrap();
-        assert_eq!(s.inbox, "");
+        assert!(s.project_notes.is_empty());
         assert!(s.notes.is_empty());
+    }
+
+    #[test]
+    fn old_state_with_inbox_key_still_loads() {
+        // Pre-project-notes files carried a global `inbox` string; serde drops
+        // unknown keys, so the file loads and the old text is discarded.
+        let s: State = toml::from_str("inbox = \"- [ ] old\"\nsplit_pct = 40").unwrap();
+        assert_eq!(s.split_pct, Some(40));
+        assert!(s.project_notes.is_empty());
+    }
+
+    #[test]
+    fn prune_drops_entries_for_missing_roots() {
+        let mut s = State {
+            project_order: vec!["/alive".into(), "/dead".into()],
+            project_names: BTreeMap::from([
+                ("/alive".to_string(), "A".to_string()),
+                ("/dead".to_string(), "D".to_string()),
+            ]),
+            project_notes: BTreeMap::from([
+                ("/alive".to_string(), "- [ ] keep".to_string()),
+                ("/dead".to_string(), "- [ ] gone".to_string()),
+            ]),
+            ..Default::default()
+        };
+        assert!(s.prune_missing_projects(|root| root == "/alive"));
+        assert_eq!(s.project_order, vec!["/alive".to_string()]);
+        assert!(s.project_names.contains_key("/alive"));
+        assert!(!s.project_names.contains_key("/dead"));
+        assert!(s.project_notes.contains_key("/alive"));
+        assert!(!s.project_notes.contains_key("/dead"));
+    }
+
+    #[test]
+    fn prune_reports_no_change_when_all_roots_exist() {
+        let mut s = State {
+            project_notes: BTreeMap::from([("/p".to_string(), "x".to_string())]),
+            ..Default::default()
+        };
+        assert!(!s.prune_missing_projects(|_| true));
+        assert!(s.project_notes.contains_key("/p"));
     }
 }

@@ -372,10 +372,17 @@ pub struct ReplyForm {
 }
 
 impl ReplyForm {
+    /// Fresh empty composer — used by tests within this module.
+    #[cfg(test)]
     fn new(name: String) -> Self {
+        Self::with_draft(name, String::new())
+    }
+
+    /// Composer pre-filled with a saved draft, cursor at the end.
+    fn with_draft(name: String, draft: String) -> Self {
         Self {
             name,
-            area: crate::editor::TextArea::default(),
+            area: crate::editor::TextArea::new(draft),
         }
     }
 
@@ -459,7 +466,8 @@ pub enum Mode {
 /// Which note `Mode::Note` is editing.
 #[derive(Debug, Clone, PartialEq)]
 pub enum NoteTarget {
-    Inbox,
+    /// A project's note, keyed by its root path.
+    Project(String),
     Session(String),
 }
 
@@ -557,12 +565,12 @@ enum ModeKind {
 }
 
 /// What the right pane renders: the live session preview, the selected session's
-/// note, or the global Inbox note.
+/// note, or the selected session's project note.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RightPane {
     Preview,
     SessionNote,
-    Inbox,
+    ProjectNote,
 }
 
 pub struct App {
@@ -622,10 +630,12 @@ pub struct App {
     /// Set when persisted state (split width / order / names) changed and needs
     /// saving. The event loop saves and clears it; keeps `App` itself IO-free.
     pub dirty: bool,
-    /// Global Inbox note (markdown).
-    pub inbox: String,
+    /// Per-project notes (markdown), keyed by project root path.
+    pub project_notes: std::collections::BTreeMap<String, String>,
     /// Per-session notes (markdown), keyed by tmux session name.
     pub notes: std::collections::BTreeMap<String, String>,
+    /// In-progress reply drafts, keyed by tmux session name.
+    pub drafts: std::collections::BTreeMap<String, String>,
     /// Which content the right pane shows.
     pub right_pane: RightPane,
 }
@@ -662,8 +672,9 @@ impl App {
             project_order: Vec::new(),
             project_names: std::collections::BTreeMap::new(),
             dirty: false,
-            inbox: String::new(),
+            project_notes: std::collections::BTreeMap::new(),
             notes: std::collections::BTreeMap::new(),
+            drafts: std::collections::BTreeMap::new(),
             right_pane: RightPane::Preview,
         }
     }
@@ -676,8 +687,9 @@ impl App {
         self.order = state.order;
         self.project_order = state.project_order;
         self.project_names = state.project_names;
-        self.inbox = state.inbox;
+        self.project_notes = state.project_notes;
         self.notes = state.notes;
+        self.drafts = state.drafts;
     }
 
     /// Snapshots the persistable UI state for saving to disk.
@@ -687,8 +699,9 @@ impl App {
             order: self.order.clone(),
             project_order: self.project_order.clone(),
             project_names: self.project_names.clone(),
-            inbox: self.inbox.clone(),
+            project_notes: self.project_notes.clone(),
             notes: self.notes.clone(),
+            drafts: self.drafts.clone(),
         }
     }
 
@@ -1058,10 +1071,11 @@ impl App {
                     }
                 }
             }
-            // Free-text reply to the selected session.
+            // Free-text reply to the selected session, restoring its draft.
             KeyCode::Char('i') => {
                 if let Some(name) = self.selected_name() {
-                    self.mode = Mode::Reply(ReplyForm::new(name));
+                    let draft = self.drafts.get(&name).cloned().unwrap_or_default();
+                    self.mode = Mode::Reply(ReplyForm::with_draft(name, draft));
                 }
             }
             KeyCode::Char('t') => {
@@ -1071,14 +1085,20 @@ impl App {
                 };
             }
             KeyCode::Char('T') => {
-                self.right_pane = match self.right_pane {
-                    RightPane::Inbox => RightPane::Preview,
-                    _ => RightPane::Inbox,
-                };
+                // Project note of the selected session; no-op with nothing selected.
+                if self.selected_session().is_some() {
+                    self.right_pane = match self.right_pane {
+                        RightPane::ProjectNote => RightPane::Preview,
+                        _ => RightPane::ProjectNote,
+                    };
+                }
             }
             KeyCode::Tab if self.right_pane != RightPane::Preview => {
                 let target = match self.right_pane {
-                    RightPane::Inbox => NoteTarget::Inbox,
+                    RightPane::ProjectNote => match self.selected_session() {
+                        Some(s) => NoteTarget::Project(session_root(s).to_string()),
+                        None => return None,
+                    },
                     _ => match self.selected_name() {
                         Some(name) => NoteTarget::Session(name),
                         None => return None,
@@ -1121,6 +1141,20 @@ impl App {
         None
     }
 
+    /// Persists the composer buffer as the session's draft — an empty buffer
+    /// removes the entry. Marks state dirty so the autosave loop writes it.
+    fn save_draft(&mut self, form: &ReplyForm) {
+        if form.area.buffer.is_empty() {
+            if self.drafts.remove(&form.name).is_some() {
+                self.dirty = true;
+            }
+        } else {
+            self.drafts
+                .insert(form.name.clone(), form.area.buffer.clone());
+            self.dirty = true;
+        }
+    }
+
     fn handle_reply_key(&mut self, key: KeyEvent) -> Option<Action> {
         let Mode::Reply(mut form) = std::mem::replace(&mut self.mode, Mode::List) else {
             return None;
@@ -1129,23 +1163,38 @@ impl App {
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         match key.code {
-            KeyCode::Esc => return None, // mode already reset to List → cancels
+            // Esc closes the composer but keeps the message as the session's draft.
+            KeyCode::Esc => {
+                self.save_draft(&form);
+                return None; // mode already reset to List
+            }
             // Newline on Shift+Enter; plain Enter sends (see below). Shift+Enter
             // requires the kitty keyboard protocol to be reported distinctly
             // (enabled in main); Alt+Enter is a fallback on terminals without it.
             KeyCode::Enter if shift || alt => form.insert_char('\n'),
-            // Editing chords (readline-ish).
-            KeyCode::Char('w') if ctrl => form.delete_word(),
-            KeyCode::Char('u') if ctrl => form.delete_to_line_start(),
-            KeyCode::Char('a') if ctrl => form.home(),
-            KeyCode::Char('e') if ctrl => form.end(),
+            // Editing chords (readline-ish), layout-independent via latin_code.
+            KeyCode::Char(_) if ctrl => match latin_code(key.code) {
+                KeyCode::Char('w') => form.delete_word(),
+                KeyCode::Char('u') => form.delete_to_line_start(),
+                KeyCode::Char('a') => form.home(),
+                KeyCode::Char('e') => form.end(),
+                // "copy all": the whole buffer to the system clipboard.
+                KeyCode::Char('y') => crate::clip::copy(&form.area.buffer),
+                // "clear all": wipe the buffer (Esc then drops the draft too).
+                KeyCode::Char('x') => form.area = crate::editor::TextArea::default(),
+                _ => {}
+            },
             // Plain text entry — guard against control chords leaking through.
             KeyCode::Char(c) if !ctrl => form.insert_char(c),
-            // Plain Enter sends the composed message.
+            // Plain Enter sends the composed message and drops the draft.
             KeyCode::Enter => {
                 let text = form.area.buffer.trim().to_string();
                 if text.is_empty() {
+                    self.save_draft(&form); // nothing to send — close like Esc
                     return None;
+                }
+                if self.drafts.remove(&form.name).is_some() {
+                    self.dirty = true;
                 }
                 return Some(Action::SendText {
                     name: form.name,
@@ -1482,18 +1531,22 @@ impl App {
         None
     }
 
-    /// The markdown text for a note target (read-only). Missing session = "".
+    /// The markdown text for a note target (read-only). Missing entry = "".
     pub fn note_text(&self, target: &NoteTarget) -> &str {
         match target {
-            NoteTarget::Inbox => &self.inbox,
+            NoteTarget::Project(root) => self
+                .project_notes
+                .get(root)
+                .map(String::as_str)
+                .unwrap_or(""),
             NoteTarget::Session(name) => self.notes.get(name).map(String::as_str).unwrap_or(""),
         }
     }
 
-    /// Mutable handle to a note target, creating an empty session entry if needed.
+    /// Mutable handle to a note target, creating an empty entry if needed.
     pub fn note_text_mut(&mut self, target: &NoteTarget) -> &mut String {
         match target {
-            NoteTarget::Inbox => &mut self.inbox,
+            NoteTarget::Project(root) => self.project_notes.entry(root.clone()).or_default(),
             NoteTarget::Session(name) => self.notes.entry(name.clone()).or_default(),
         }
     }
@@ -1692,6 +1745,11 @@ impl App {
                 self.snapshots = new_snaps;
                 self.prompts = new_prompts;
                 self.sessions = apply_grouped_order(&self.project_order, &self.order, sessions);
+                // A draft lives exactly as long as its session: drop entries for
+                // sessions that no longer exist (covers ones that died while
+                // amux wasn't running). Session notes are deliberately NOT pruned
+                // here — they're user knowledge, dropped only on explicit kill.
+                self.prune_dead_drafts();
                 self.clamp_selection();
                 if let Some(p) = new_preview {
                     self.preview = p;
@@ -1701,6 +1759,19 @@ impl App {
                 }
             }
             Err(e) => self.error = Some(e.to_string()),
+        }
+    }
+
+    /// Removes drafts whose session is gone. Only called from `refresh` with a
+    /// freshly fetched session list — never after a failed tmux read (which
+    /// must not wipe drafts).
+    fn prune_dead_drafts(&mut self) {
+        let sessions = &self.sessions;
+        let before = self.drafts.len();
+        self.drafts
+            .retain(|name, _| sessions.iter().any(|s| s.name == *name));
+        if self.drafts.len() != before {
+            self.dirty = true;
         }
     }
 }
@@ -2091,6 +2162,62 @@ mod tests {
             }
             other => panic!("expected SendText, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn esc_saves_reply_draft_and_i_restores_it() {
+        let mut app = app_with_two_sessions();
+        app.selected = 0; // session "a"
+        app.handle_key(key('i'));
+        app.handle_key(key('h'));
+        app.handle_key(key('i'));
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(matches!(app.mode, Mode::List));
+        assert_eq!(app.drafts.get("a").map(String::as_str), Some("hi"));
+        assert!(app.dirty, "draft must persist via autosave");
+        // Reopen: buffer restored with the cursor at the end (typing appends).
+        app.handle_key(key('i'));
+        app.handle_key(key('!'));
+        match &app.mode {
+            Mode::Reply(f) => assert_eq!(f.area.buffer, "hi!"),
+            other => panic!("expected Reply, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn drafts_are_per_session() {
+        let mut app = app_with_two_sessions();
+        app.drafts.insert("b".into(), "for b".into());
+        app.selected = 0; // session "a"
+        app.handle_key(key('i'));
+        match &app.mode {
+            Mode::Reply(f) => assert_eq!(f.area.buffer, "", "a has no draft"),
+            other => panic!("expected Reply, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sending_clears_the_draft() {
+        let mut app = app_with_two_sessions();
+        app.drafts.insert("a".into(), "hello".into());
+        app.dirty = false;
+        app.selected = 0;
+        app.handle_key(key('i'));
+        let act = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(act, Some(Action::SendText { .. })));
+        assert!(!app.drafts.contains_key("a"));
+        assert!(app.dirty);
+    }
+
+    #[test]
+    fn esc_with_emptied_buffer_removes_the_draft() {
+        let mut app = app_with_two_sessions();
+        app.drafts.insert("a".into(), "x".into());
+        app.selected = 0;
+        app.handle_key(key('i')); // restores "x", cursor at end
+        app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!app.drafts.contains_key("a"));
     }
 
     fn app_with_two_sessions() -> App {
@@ -3399,12 +3526,42 @@ mod tests {
     }
 
     #[test]
-    fn shift_t_toggles_inbox_pane() {
+    fn shift_t_toggles_project_note_pane() {
         let mut app = app_with(vec![at("s", "/p")]);
+        app.selected = 0;
         app.handle_key(key('T'));
-        assert_eq!(app.right_pane, RightPane::Inbox);
+        assert_eq!(app.right_pane, RightPane::ProjectNote);
         app.handle_key(key('T'));
         assert_eq!(app.right_pane, RightPane::Preview);
+    }
+
+    #[test]
+    fn shift_t_is_noop_without_sessions() {
+        let mut app = App::new(Config::default());
+        app.handle_key(key('T'));
+        assert_eq!(app.right_pane, RightPane::Preview);
+    }
+
+    #[test]
+    fn tab_focuses_the_shown_project_note() {
+        // Root session and a worktree session of the same project focus the
+        // SAME note (keyed by the project root, not the session).
+        let mut app = app_with(vec![at("a", "/p"), at("b", "/p/.worktrees/x")]);
+        app.selected = 0;
+        app.handle_key(key('T'));
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        match &app.mode {
+            Mode::Note(ns) => assert_eq!(ns.target, NoteTarget::Project("/p".into())),
+            other => panic!("expected Mode::Note, got {other:?}"),
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)); // exit note
+        app.selected = 1;
+        app.handle_key(key('T'));
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        match &app.mode {
+            Mode::Note(ns) => assert_eq!(ns.target, NoteTarget::Project("/p".into())),
+            other => panic!("expected Mode::Note, got {other:?}"),
+        }
     }
 
     #[test]
@@ -3438,11 +3595,50 @@ mod tests {
         assert!(!app.notes.contains_key("old"));
     }
 
+    #[test]
+    fn killing_a_session_drops_its_draft() {
+        let mut app = App::new(Config::default());
+        app.drafts.insert("s".into(), "draft".into());
+        app.drafts.remove("s"); // mirrors the Kill handler
+        assert!(!app.drafts.contains_key("s"));
+    }
+
+    #[test]
+    fn renaming_moves_the_draft() {
+        let mut app = App::new(Config::default());
+        app.drafts.insert("old".into(), "draft".into());
+        // Mirrors the Rename handler.
+        if let Some(d) = app.drafts.remove("old") {
+            app.drafts.insert("new".into(), d);
+        }
+        assert_eq!(app.drafts.get("new").map(String::as_str), Some("draft"));
+        assert!(!app.drafts.contains_key("old"));
+    }
+
+    #[test]
+    fn prune_dead_drafts_drops_only_dead_sessions() {
+        let mut app = app_with_two_sessions(); // sessions "a" and "b"
+        app.drafts.insert("a".into(), "keep".into());
+        app.drafts.insert("dead".into(), "drop".into());
+        app.prune_dead_drafts();
+        assert_eq!(app.drafts.get("a").map(String::as_str), Some("keep"));
+        assert!(!app.drafts.contains_key("dead"));
+        assert!(app.dirty, "removal must be persisted");
+    }
+
+    #[test]
+    fn prune_dead_drafts_without_removals_keeps_state_clean() {
+        let mut app = app_with_two_sessions();
+        app.drafts.insert("a".into(), "keep".into());
+        app.prune_dead_drafts();
+        assert!(!app.dirty, "no removal → nothing to save");
+    }
+
     fn note_app_with(text: &str) -> App {
         let mut app = App::new(Config::default());
-        app.inbox = text.into();
+        app.project_notes.insert("/p".into(), text.into());
         app.mode = Mode::Note(NoteState {
-            target: NoteTarget::Inbox,
+            target: NoteTarget::Project("/p".into()),
             sub: NoteSub::Render,
             cursor: 0,
             anchor: None,
@@ -3451,6 +3647,15 @@ mod tests {
         });
         app
     }
+
+    /// The "/p" project note's current text (the target `note_app_with` edits).
+    fn proj_note(app: &App) -> &str {
+        app.project_notes
+            .get("/p")
+            .map(String::as_str)
+            .unwrap_or("")
+    }
+
     fn note_state(app: &App) -> &NoteState {
         match &app.mode {
             Mode::Note(ns) => ns,
@@ -3475,7 +3680,7 @@ mod tests {
         let mut app = note_app_with("- [ ] a\n- [ ] b");
         app.handle_key(key('j')); // cursor on task 1
         app.handle_key(key(' '));
-        assert_eq!(app.inbox, "- [ ] a\n- [x] b");
+        assert_eq!(proj_note(&app), "- [ ] a\n- [x] b");
     }
 
     #[test]
@@ -3484,7 +3689,7 @@ mod tests {
         app.handle_key(key('V')); // anchor at 0
         app.handle_key(key('j')); // extend to 1
         app.handle_key(key(' ')); // toggle 0..=1
-        assert_eq!(app.inbox, "- [x] a\n- [x] b\n- [ ] c");
+        assert_eq!(proj_note(&app), "- [x] a\n- [x] b\n- [ ] c");
         assert!(
             note_state(&app).anchor.is_none(),
             "selection cleared after toggle"
@@ -3503,7 +3708,7 @@ mod tests {
     #[test]
     fn esc_from_render_exits_to_preview() {
         let mut app = note_app_with("- [ ] a");
-        app.right_pane = RightPane::Inbox;
+        app.right_pane = RightPane::ProjectNote;
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(matches!(app.mode, Mode::List), "focus dropped");
         assert_eq!(app.right_pane, RightPane::Preview, "pane closed to preview");
@@ -3512,12 +3717,12 @@ mod tests {
     #[test]
     fn tab_defocuses_but_keeps_note_pane() {
         let mut app = note_app_with("- [ ] a");
-        app.right_pane = RightPane::Inbox;
+        app.right_pane = RightPane::ProjectNote;
         app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert!(matches!(app.mode, Mode::List), "focus dropped");
         assert_eq!(
             app.right_pane,
-            RightPane::Inbox,
+            RightPane::ProjectNote,
             "note still shown after defocus"
         );
     }
@@ -3556,12 +3761,12 @@ mod tests {
     }
 
     #[test]
-    fn inbox_note_persists_to_snapshot() {
-        // Editing the Inbox note marks state dirty and snapshot_state carries it,
+    fn project_note_persists_to_snapshot() {
+        // Editing a project note marks state dirty and snapshot_state carries it,
         // so the autosave loop writes it to state.toml permanently.
         let mut app = App::new(Config::default());
         app.mode = Mode::Note(NoteState {
-            target: NoteTarget::Inbox,
+            target: NoteTarget::Project("/p".into()),
             sub: NoteSub::Edit,
             cursor: 0,
             anchor: None,
@@ -3569,9 +3774,15 @@ mod tests {
             confirm_clear: false,
         });
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)); // commit
-        assert_eq!(app.inbox, "- [ ] buy milk");
+        assert_eq!(proj_note(&app), "- [ ] buy milk");
         assert!(app.dirty, "edit must mark state dirty for autosave");
-        assert_eq!(app.snapshot_state().inbox, "- [ ] buy milk");
+        assert_eq!(
+            app.snapshot_state()
+                .project_notes
+                .get("/p")
+                .map(String::as_str),
+            Some("- [ ] buy milk")
+        );
     }
 
     #[test]
@@ -3579,9 +3790,13 @@ mod tests {
         let mut app = note_app_with("- [ ] a\n- [ ] b");
         app.handle_key(key('c'));
         assert!(note_state(&app).confirm_clear, "c arms the confirmation");
-        assert_eq!(app.inbox, "- [ ] a\n- [ ] b", "not cleared until confirmed");
+        assert_eq!(
+            proj_note(&app),
+            "- [ ] a\n- [ ] b",
+            "not cleared until confirmed"
+        );
         app.handle_key(key('y'));
-        assert_eq!(app.inbox, "");
+        assert_eq!(proj_note(&app), "");
         assert!(!note_state(&app).confirm_clear);
         assert!(app.dirty);
     }
@@ -3592,14 +3807,14 @@ mod tests {
         app.handle_key(key('c'));
         app.handle_key(key('n')); // anything but y cancels
         assert!(!note_state(&app).confirm_clear);
-        assert_eq!(app.inbox, "- [ ] keep", "note untouched on cancel");
+        assert_eq!(proj_note(&app), "- [ ] keep", "note untouched on cancel");
     }
 
     fn note_app_editing(text: &str) -> App {
         let mut app = App::new(Config::default());
-        app.inbox = text.into();
+        app.project_notes.insert("/p".into(), text.into());
         app.mode = Mode::Note(NoteState {
-            target: NoteTarget::Inbox,
+            target: NoteTarget::Project("/p".into()),
             sub: NoteSub::Edit,
             cursor: 0,
             anchor: None,
@@ -3614,7 +3829,7 @@ mod tests {
         let mut app = note_app_editing("- [ ] a");
         app.handle_key(key('!')); // appended at end (cursor at end)
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)); // esc commits
-        assert_eq!(app.inbox, "- [ ] a!");
+        assert_eq!(proj_note(&app), "- [ ] a!");
         assert_eq!(note_state(&app).sub, NoteSub::Render);
     }
 
@@ -3626,6 +3841,36 @@ mod tests {
         match &app.mode {
             Mode::Note(ns) => assert_eq!(ns.editor.buffer, "a\nb"),
             _ => panic!("still editing"),
+        }
+    }
+
+    #[test]
+    fn ctrl_x_clears_the_composer_buffer() {
+        let mut app = app_with_two_sessions();
+        app.drafts.insert("a".into(), "old draft".into());
+        app.selected = 0;
+        app.handle_key(key('i'));
+        app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+        match &app.mode {
+            Mode::Reply(f) => assert_eq!(f.area.buffer, ""),
+            other => panic!("expected Reply, got {other:?}"),
+        }
+        // Esc after the wipe drops the stored draft too.
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!app.drafts.contains_key("a"));
+    }
+
+    #[test]
+    fn reply_ctrl_chords_work_on_cyrillic_layout() {
+        // Physical 'x' emits 'ч' on a Russian layout; ctrl+ч must still clear.
+        let mut app = app_with_two_sessions();
+        app.selected = 0;
+        app.handle_key(key('i'));
+        app.handle_key(key('п'));
+        app.handle_key(KeyEvent::new(KeyCode::Char('ч'), KeyModifiers::CONTROL));
+        match &app.mode {
+            Mode::Reply(f) => assert_eq!(f.area.buffer, ""),
+            other => panic!("expected Reply, got {other:?}"),
         }
     }
 }

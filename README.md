@@ -30,9 +30,9 @@ git worktrees, and keep per‑session markdown to‑do notes.
   fresh branch + worktree. The branch marker (`⎇` repo / `⧉` worktree) is
   color‑coded.
 - **Per‑session notes & to‑do** — an Obsidian‑style markdown note per session,
-  plus a global **Inbox**, shown in place of the preview. Toggle checkboxes,
-  select tasks vim‑style and copy them as a numbered list. Progress (`3/5`)
-  shows right on the card.
+  plus a persistent **project note**, shown in place of the preview. Toggle
+  checkboxes, select tasks vim‑style and copy them as a numbered list. Progress
+  (`3/5`) shows right on the card and on the project header.
 - **Claude usage limits** — if you use Claude Code, the header shows your 5h / 7d
   limit windows (read from your local Claude credentials).
 - **Keyboard‑first & layout‑independent** — hotkeys work on non‑Latin keyboard
@@ -120,12 +120,12 @@ then watch it run in the list. `?` opens the full keybinding help at any time.
 | `g` / `G` | First session / jump preview to latest |
 | `n` / `N` | New session / new session in the selected project |
 | `Enter` / `o` | Attach to the selected session (`Ctrl‑q` detaches) |
-| `i` | Reply to the agent with free text |
+| `i` | Reply to the agent with free text (drafts persist per session; `Ctrl‑y` copy all, `Ctrl‑x` clear all) |
 | `1`–`9` | Answer a numbered prompt the agent is showing |
 | `d` / `r` / `R` | Kill / rename session / rename project |
 | `u` | Restart all Claude sessions (re-`--resume` after a CLI update) |
 | `J` / `K` | Reorder the selected session |
-| `t` / `T` / `Tab` | Session note / Inbox note / focus the note |
+| `t` / `T` / `Tab` | Session note / Project note / focus the note |
 | `Ctrl‑k`/`Ctrl‑j`, `PgUp`/`PgDn` | Scroll the preview |
 | `[` `]` `{` `}`, `Ctrl‑←/→` | Resize the split |
 | `/` | Filter sessions · `?` Help · `q` Quit (sessions keep running) |
