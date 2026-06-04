@@ -78,6 +78,7 @@ fn items_for(mode: &Mode) -> Vec<Item> {
                 ("esc", "exit", false),
             ],
         },
+        Mode::ConfirmUpdate(_) => vec![("esc", "close", false)], // full hints in Task 6
     }
 }
 

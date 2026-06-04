@@ -517,6 +517,15 @@ impl RenameForm {
     }
 }
 
+/// State of the self-update modal: the offered release and, after `y`,
+/// the install progress.
+#[derive(Debug, Clone)]
+pub struct UpdateModal {
+    pub info: crate::update::UpdateInfo,
+    /// None = still asking y/n; Some = install in flight (or finished).
+    pub stage: Option<crate::update::UpdateStage>,
+}
+
 /// Form carried by `Mode::ConfirmDelete`: the session to kill + worktree toggle.
 #[derive(Debug, Clone)]
 pub struct KillForm {
@@ -631,6 +640,9 @@ pub enum Mode {
     Note(NoteState),
     /// Full-screen log of recent OAuth calls (usage + profile endpoints).
     UsageLog,
+    /// Self-update offer / install progress (opened automatically when a
+    /// newer release is found and the app is idle in the list).
+    ConfirmUpdate(UpdateModal),
 }
 
 /// Which note `Mode::Note` is editing.
@@ -721,6 +733,11 @@ pub enum Action {
     /// Send double Ctrl+C to all Claude sessions and begin watching for
     /// their `claude --resume <uuid>` output so they can be restarted.
     RestartAllClaude,
+    /// Start downloading/installing the offered release (main spawns the
+    /// installer thread; progress comes back via `set_update_stage`).
+    StartUpdate(crate::update::UpdateInfo),
+    /// Restore the terminal and exec() the freshly installed binary.
+    RestartSelf,
 }
 
 #[derive(Copy, Clone)]
@@ -737,6 +754,7 @@ enum ModeKind {
     RenameProject,
     Note,
     UsageLog,
+    ConfirmUpdate,
 }
 
 /// What the right pane renders: the live session preview, the selected session's
@@ -796,6 +814,10 @@ pub struct App {
     pub usage_log: crate::usage::UsageLog,
     /// How many display-rows the usage-log modal is scrolled up from the top.
     pub usage_log_scroll: u16,
+    /// A newer release found by the startup check; renders the header badge.
+    pub update: Option<crate::update::UpdateInfo>,
+    /// The offer modal is shown at most once per run.
+    pub update_prompted: bool,
     /// Sessions that received double Ctrl+C and are waiting for a
     /// `claude --resume <uuid>` command to appear in their pane output.
     /// Maps session name → `now_unix` when the restart was initiated (for
@@ -849,6 +871,8 @@ impl App {
             usage_error: None,
             usage_log: crate::usage::new_log(),
             usage_log_scroll: 0,
+            update: None,
+            update_prompted: false,
             restarting: HashMap::new(),
             order: Vec::new(),
             project_order: Vec::new(),
@@ -1070,6 +1094,7 @@ impl App {
             Mode::RenameProject(_) => ModeKind::RenameProject,
             Mode::Note(_) => ModeKind::Note,
             Mode::UsageLog => ModeKind::UsageLog,
+            Mode::ConfirmUpdate(_) => ModeKind::ConfirmUpdate,
         }
     }
 
@@ -1092,6 +1117,7 @@ impl App {
             ModeKind::SelectSession => self.handle_select_session_key(key),
             ModeKind::RenameProject => self.handle_rename_project_key(key),
             ModeKind::Note => self.handle_note_key(key),
+            ModeKind::ConfirmUpdate => self.handle_confirm_update_key(key),
             ModeKind::UsageLog => {
                 let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
                 match latin_code(key.code) {
@@ -1118,6 +1144,30 @@ impl App {
                 }
                 None
             }
+        }
+    }
+
+    /// Opens the update offer when one is pending, the user is idle in the
+    /// list, and we haven't asked yet this run.
+    pub fn offer_update_if_idle(&mut self) {
+        if self.update_prompted || !matches!(self.mode, Mode::List) {
+            return;
+        }
+        let Some(info) = self.update.clone() else {
+            return;
+        };
+        self.update_prompted = true;
+        self.mode = Mode::ConfirmUpdate(UpdateModal { info, stage: None });
+    }
+
+    /// Feeds installer progress in. A hidden modal stays hidden; Done clears
+    /// the header badge either way (the binary on disk is current now).
+    pub fn set_update_stage(&mut self, stage: crate::update::UpdateStage) {
+        if matches!(stage, crate::update::UpdateStage::Done(_)) {
+            self.update = None;
+        }
+        if let Mode::ConfirmUpdate(m) = &mut self.mode {
+            m.stage = Some(stage);
         }
     }
 
@@ -1426,6 +1476,33 @@ impl App {
         }
         self.mode = Mode::Reply(form);
         None
+    }
+
+    fn handle_confirm_update_key(&mut self, key: KeyEvent) -> Option<Action> {
+        use crate::update::UpdateStage as S;
+        let Mode::ConfirmUpdate(m) = &self.mode else {
+            return None;
+        };
+        let (info, stage) = (m.info.clone(), m.stage.clone());
+        match (stage, latin_code(key.code)) {
+            (None, KeyCode::Char('y')) => {
+                if let Mode::ConfirmUpdate(m) = &mut self.mode {
+                    m.stage = Some(S::Downloading);
+                }
+                Some(Action::StartUpdate(info))
+            }
+            (None, KeyCode::Char('n') | KeyCode::Esc) => {
+                self.mode = Mode::List;
+                None
+            }
+            (Some(S::Done(_)), KeyCode::Char('r')) => Some(Action::RestartSelf),
+            // Failed: esc/n closes. In-flight: esc hides, install runs on.
+            (Some(_), KeyCode::Esc | KeyCode::Char('n')) => {
+                self.mode = Mode::List;
+                None
+            }
+            _ => None,
+        }
     }
 
     fn handle_confirm_key(&mut self, key: KeyEvent) -> Option<Action> {
@@ -4482,5 +4559,62 @@ mod tests {
             }
             other => panic!("expected Create, got {other:?}"),
         }
+    }
+
+    fn upd_info() -> crate::update::UpdateInfo {
+        crate::update::UpdateInfo {
+            version: "9.9.9".into(),
+            url: "https://example.invalid/amux.tar.gz".into(),
+        }
+    }
+
+    #[test]
+    fn update_modal_offered_once_and_only_from_list() {
+        let mut app = App::new(Config::default());
+        app.update = Some(upd_info());
+        app.mode = Mode::Help; // busy → no modal
+        app.offer_update_if_idle();
+        assert!(matches!(app.mode, Mode::Help));
+        app.mode = Mode::List;
+        app.offer_update_if_idle();
+        assert!(matches!(app.mode, Mode::ConfirmUpdate(_)));
+        // Declined → never offered again this run.
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(matches!(app.mode, Mode::List));
+        app.offer_update_if_idle();
+        assert!(matches!(app.mode, Mode::List));
+    }
+
+    #[test]
+    fn update_y_starts_install_and_r_restarts_when_done() {
+        use crate::update::UpdateStage as S;
+        let mut app = App::new(Config::default());
+        app.update = Some(upd_info());
+        app.offer_update_if_idle();
+        let act = app.handle_key(key('y'));
+        assert!(matches!(act, Some(Action::StartUpdate(_))));
+        match &app.mode {
+            Mode::ConfirmUpdate(m) => assert_eq!(m.stage, Some(S::Downloading)),
+            other => panic!("expected ConfirmUpdate, got {other:?}"),
+        }
+        app.set_update_stage(S::Done("9.9.9".into()));
+        assert!(app.update.is_none(), "badge cleared once installed");
+        let act = app.handle_key(key('r'));
+        assert!(matches!(act, Some(Action::RestartSelf)));
+    }
+
+    #[test]
+    fn update_esc_hides_progress_and_stage_updates_skip_closed_modal() {
+        use crate::update::UpdateStage as S;
+        let mut app = App::new(Config::default());
+        app.update = Some(upd_info());
+        app.offer_update_if_idle();
+        app.handle_key(key('y'));
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(matches!(app.mode, Mode::List), "install continues hidden");
+        app.set_update_stage(S::Installing); // must not panic / change mode
+        assert!(matches!(app.mode, Mode::List));
+        app.set_update_stage(S::Done("9.9.9".into()));
+        assert!(app.update.is_none(), "badge cleared even when hidden");
     }
 }

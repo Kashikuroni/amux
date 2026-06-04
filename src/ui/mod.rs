@@ -59,6 +59,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         // No modal: these render over the plain list (the SESSIONS label shows
         // the select-mode prompt).
         Mode::List | Mode::Filter | Mode::SelectSession | Mode::Note(_) => {}
+        Mode::ConfirmUpdate(_) => {} // modal rendered in Task 6
     }
 }
 

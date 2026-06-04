@@ -404,6 +404,12 @@ fn handle_action(terminal: &mut Term, app: &mut App, action: Action) -> io::Resu
             }
             app.refresh();
         }
+        Action::StartUpdate(_info) => {
+            // Wired in Task 5: spawn the installer thread.
+        }
+        Action::RestartSelf => {
+            // Wired in Task 5: exec() the new binary.
+        }
         Action::RestartAllClaude => {
             let now = app.now_unix;
             // is_claude: first whitespace token == "claude" (mirrors ui::preview::is_claude).
