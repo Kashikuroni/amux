@@ -116,11 +116,12 @@ fn segment_row(
 
 /// Max subdir rows shown in the live picker before it windows.
 const PICKER_MAX: usize = 8;
-/// Fixed content rows (header, rule, name, dir + validation, terminal, worktree,
-/// agent, rule, command, and the blanks between groups) when the worktree is off.
-const BASE_ROWS: u16 = 14;
-/// Extra rows when the worktree toggle is on (base picker + branch input).
-const WORKTREE_ROWS: u16 = 2;
+/// Fixed content rows (header, rule, name, dir + validation, terminal,
+/// agent, rule, command, and the blanks between groups) when no branch step shows.
+const BASE_ROWS: u16 = 13;
+
+/// Worktree-glyph tint — matches `ui::sessions::WORKTREE_FG`.
+const WORKTREE_FG: ratatui::style::Color = ratatui::style::Color::Indexed(173);
 
 pub fn render(f: &mut Frame, form: &CreateForm, error: Option<&str>) {
     let full = f.area();
@@ -135,10 +136,21 @@ pub fn render(f: &mut Frame, form: &CreateForm, error: Option<&str>) {
         !form.terminal && !form.agent.is_empty() && resolve_agent_path(&form.agent).is_none();
     let warn_extra = u16::from(agent_warn);
     // Panel hugs its content: border (2) + top/bottom inner padding (2) + rows.
-    let wt_extra = if form.worktree { WORKTREE_ROWS } else { 0 };
+    // Branch block: input row + (focused) windowed entries + conditional base row.
+    let branch_focused = form.field == CreateField::Branch;
+    let branch_extra: u16 = if form.branches.is_empty() {
+        0
+    } else {
+        let picker = if branch_focused {
+            form.branch_entries.len().min(PICKER_MAX) as u16
+        } else {
+            0
+        };
+        1 + picker + u16::from(form.branch_is_new())
+    };
     // One extra row for the validation error banner when present.
     let err_extra = u16::from(error.is_some());
-    let h = (BASE_ROWS + want_picker + wt_extra + warn_extra + err_extra + 4).min(full.height);
+    let h = (BASE_ROWS + want_picker + branch_extra + warn_extra + err_extra + 4).min(full.height);
     let w = ((full.width as u32 * 70 / 100) as u16).min(full.width);
     let area = Rect {
         x: full.x + (full.width.saturating_sub(w)) / 2,
@@ -298,53 +310,83 @@ pub fn render(f: &mut Frame, form: &CreateForm, error: Option<&str>) {
     }
     y += 1;
 
-    // worktree toggle.
-    if let Some(r) = row(x, y, w, bottom) {
-        let focused = form.field == CreateField::Worktree;
-        let line = if !form.dir_is_repo() {
-            Line::from(vec![
-                lbl("worktree"),
-                Span::styled(
-                    "[ ] needs a git repo",
-                    Style::default().add_modifier(Modifier::DIM),
-                ),
-            ])
-        } else {
-            let mark = if form.worktree { "[x]" } else { "[ ]" };
-            Line::from(vec![
-                lbl("worktree"),
-                Span::styled(format!("{mark} create worktree"), Style::default()),
-                Span::styled("   space", Style::default().add_modifier(Modifier::DIM)),
-            ])
-        };
-        f.render_widget(band(Paragraph::new(line), focused), r);
-    }
-    y += 1;
-
-    if form.worktree {
-        if let Some(r) = row(x, y, w, bottom) {
-            segment_row(
-                f,
-                r,
-                "base",
-                &form.base_branches,
-                form.base_index,
-                form.field == CreateField::Base,
-                "(no branches)",
-            );
-        }
-        y += 1;
+    // branch typeahead picker — only when the dir is inside a git repo.
+    if !form.branches.is_empty() {
         if let Some(r) = row(x, y, w, bottom) {
             input_row(
                 f,
                 r,
                 "branch",
-                &form.new_branch,
-                "new branch name",
-                form.field == CreateField::Branch,
+                &form.branch_input,
+                "filter branches or type a new name",
+                branch_focused,
             );
         }
         y += 1;
+        // Entry list (windowed like the dir picker), shown while the step is focused.
+        if branch_focused && !form.branch_entries.is_empty() {
+            let total = form.branch_entries.len();
+            let cap = total.min(PICKER_MAX);
+            let start = if form.branch_selected >= cap {
+                form.branch_selected + 1 - cap
+            } else {
+                0
+            };
+            let end = (start + cap).min(total);
+            for i in start..end {
+                let Some(r) = row(x + VALUE_INDENT, y, w.saturating_sub(VALUE_INDENT), bottom)
+                else {
+                    break;
+                };
+                let selected = i == form.branch_selected;
+                let marker = if selected { "‹ " } else { "  " };
+                let style = if selected {
+                    Style::default().add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().add_modifier(Modifier::DIM)
+                };
+                let line = match &form.branch_entries[i] {
+                    crate::app::BranchEntry::Existing(b) => {
+                        let is_current = form.current_branch.as_deref() == Some(b.as_str());
+                        if is_current {
+                            Line::from(Span::styled(format!("{marker}{b} (current)"), style))
+                        } else {
+                            // ⧉ — opens in a worktree (matches the session-list glyph).
+                            Line::from(vec![
+                                Span::styled(format!("{marker}{b} "), style),
+                                Span::styled(
+                                    th::WORKTREE,
+                                    Style::default()
+                                        .fg(WORKTREE_FG)
+                                        .add_modifier(Modifier::BOLD),
+                                ),
+                            ])
+                        }
+                    }
+                    crate::app::BranchEntry::Create(name) => Line::from(Span::styled(
+                        format!("{marker}+ create \"{name}\""),
+                        style.add_modifier(Modifier::BOLD),
+                    )),
+                };
+                f.render_widget(Paragraph::new(line), r);
+                y += 1;
+            }
+        }
+        // base picker — only when the highlighted row is `+ create`.
+        if form.branch_is_new() {
+            if let Some(r) = row(x, y, w, bottom) {
+                segment_row(
+                    f,
+                    r,
+                    "base",
+                    &form.branches,
+                    form.base_index,
+                    form.field == CreateField::Base,
+                    "(no branches)",
+                );
+            }
+            y += 1;
+        }
     }
     y += 1;
 
@@ -443,7 +485,7 @@ mod tests {
         t.draw(|f| render(f, &form, None)).unwrap();
         let s = buf_to_string(t.backend().buffer());
         assert!(s.contains("New session"), "header title");
-        assert!(s.contains("of 5"), "step indicator");
+        assert!(s.contains("of 4"), "step indicator");
         // Inline lowercase labels (no letter-spacing).
         assert!(s.contains("name"));
         assert!(s.contains("directory"));
@@ -469,29 +511,51 @@ mod tests {
         );
     }
 
-    #[test]
-    fn new_modal_shows_worktree_rows_when_enabled() {
-        let mut form = CreateForm::new("claude", &["claude".into()]);
-        form.worktree = true;
-        form.base_branches = vec!["main".into()];
-        form.new_branch = "feature-x".into();
-        let mut t = Terminal::new(TestBackend::new(90, 40)).unwrap();
-        t.draw(|f| render(f, &form, None)).unwrap();
-        let s = buf_to_string(t.backend().buffer());
-        assert!(s.contains("base"), "base label");
-        assert!(s.contains("branch"), "branch label");
-        assert!(s.contains("feature-x"));
-        assert!(s.contains("of 7"), "dynamic step total");
+    /// Form seeded as a git-repo dir without shelling out.
+    fn form_with_branches(branches: &[&str], current: Option<&str>) -> CreateForm {
+        let mut f = CreateForm::new("claude", &["claude".into()]);
+        f.branches = branches.iter().map(|s| s.to_string()).collect();
+        f.current_branch = current.map(str::to_string);
+        f.refresh_branch_entries();
+        f
     }
 
     #[test]
-    fn new_modal_hides_worktree_rows_by_default() {
-        let form = CreateForm::new("claude", &["claude".into()]);
-        let mut t = Terminal::new(TestBackend::new(90, 40)).unwrap();
+    fn new_modal_shows_branch_picker_for_repo_dir() {
+        let mut form = form_with_branches(&["main", "feature-x"], Some("main"));
+        form.field = crate::app::CreateField::Branch;
+        let mut t = Terminal::new(TestBackend::new(80, 36)).unwrap();
         t.draw(|f| render(f, &form, None)).unwrap();
         let s = buf_to_string(t.backend().buffer());
-        assert!(!s.contains("base"));
-        assert!(s.contains("of 5"));
+        assert!(s.contains("branch"), "branch label:\n{s}");
+        assert!(s.contains("main"), "current branch listed:\n{s}");
+        assert!(s.contains("(current)"), "current annotation:\n{s}");
+        assert!(s.contains("feature-x"), "other branch listed:\n{s}");
+        assert!(!s.contains("create worktree"), "old toggle gone:\n{s}");
+    }
+
+    #[test]
+    fn new_modal_shows_create_entry_and_base_for_new_name() {
+        let mut form = form_with_branches(&["main"], Some("main"));
+        form.field = crate::app::CreateField::Branch;
+        form.branch_input = "feat-z".into();
+        form.refresh_branch_entries(); // sole Create row, selected
+        let mut t = Terminal::new(TestBackend::new(80, 36)).unwrap();
+        t.draw(|f| render(f, &form, None)).unwrap();
+        let s = buf_to_string(t.backend().buffer());
+        assert!(s.contains("create"), "create entry:\n{s}");
+        assert!(s.contains("feat-z"), "typed name shown:\n{s}");
+        assert!(s.contains("base"), "base row appears for new branch:\n{s}");
+    }
+
+    #[test]
+    fn new_modal_hides_branch_picker_without_repo() {
+        let form = CreateForm::new("claude", &["claude".into()]); // branches empty
+        let mut t = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        t.draw(|f| render(f, &form, None)).unwrap();
+        let s = buf_to_string(t.backend().buffer());
+        assert!(!s.contains("branch "), "no branch row without a repo:\n{s}");
+        assert!(!s.contains("worktree"), "old worktree row gone:\n{s}");
     }
 
     #[test]
@@ -505,7 +569,7 @@ mod tests {
         assert!(s.contains("[x] plain shell"), "toggle checked:\n{s}");
         assert!(s.contains("(terminal session)"), "agent row disabled:\n{s}");
         assert!(s.contains("$SHELL"), "command preview shows shell:\n{s}");
-        assert!(s.contains("of 4"), "terminal flow step total:\n{s}");
+        assert!(s.contains("of 3"), "terminal flow step total:\n{s}");
     }
 
     #[test]
@@ -516,7 +580,7 @@ mod tests {
         let mut t = Terminal::new(TestBackend::new(80, 30)).unwrap();
         t.draw(|f| render(f, &form, None)).unwrap();
         let s = buf_to_string(t.backend().buffer());
-        assert!(s.contains("of 3"), "streamlined step total:\n{s}");
+        assert!(s.contains("of 2"), "streamlined step total:\n{s}");
         assert!(s.contains("proj"), "project path on directory row:\n{s}");
         assert!(s.contains("codex"), "project agent shown:\n{s}");
     }
