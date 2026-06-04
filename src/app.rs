@@ -423,11 +423,14 @@ pub struct ProjectRenameForm {
     pub buffer: String,
 }
 
-/// Worktree parameters carried by `Action::Create` when the worktree toggle is on.
+/// Worktree parameters carried by `Action::Create` when the chosen branch
+/// requires one (any branch other than the directory's current branch).
 #[derive(Debug, Clone, PartialEq)]
-pub struct WorktreeSpec {
-    pub base: String,
-    pub new_branch: String,
+pub enum WorktreeSpec {
+    /// Fork a new branch from `base` (the `+ create` picker entry).
+    New { base: String, branch: String },
+    /// Check out an existing branch — reuse its registered worktree or add one.
+    Existing { branch: String },
 }
 
 /// Side effects the event loop must perform (kept out of `App` so it stays IO-free).
@@ -1881,15 +1884,15 @@ pub fn abbreviate_path(path: &str) -> String {
 pub fn build_create_action(form: &CreateForm, existing: &[String]) -> Result<Action, String> {
     validate_create(&form.name, &form.dir, existing)?;
     let worktree = if form.worktree {
-        let new_branch = form.new_branch.trim().to_string();
-        validate_branch(&new_branch)?;
-        Some(WorktreeSpec {
+        let branch = form.new_branch.trim().to_string();
+        validate_branch(&branch)?;
+        Some(WorktreeSpec::New {
             base: form
                 .base_branches
                 .get(form.base_index)
                 .cloned()
                 .unwrap_or_default(),
-            new_branch,
+            branch,
         })
     } else {
         None
@@ -2755,11 +2758,11 @@ mod tests {
         let act = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         match act {
             Some(Action::Create {
-                worktree: Some(spec),
+                worktree: Some(WorktreeSpec::New { branch, base }),
                 ..
             }) => {
-                assert_eq!(spec.base, "main");
-                assert_eq!(spec.new_branch, "feat");
+                assert_eq!(branch, "feat");
+                assert_eq!(base, "main");
             }
             other => panic!("expected Action::Create with worktree, got {other:?}"),
         }
@@ -3129,11 +3132,11 @@ mod tests {
         let action = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         match action {
             Some(Action::Create {
-                worktree: Some(spec),
+                worktree: Some(WorktreeSpec::New { branch, base }),
                 ..
             }) => {
-                assert_eq!(spec.base, "main");
-                assert_eq!(spec.new_branch, "iso-branch");
+                assert_eq!(branch, "iso-branch");
+                assert_eq!(base, "main");
             }
             other => panic!("expected Create with worktree, got {other:?}"),
         }

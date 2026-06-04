@@ -409,8 +409,9 @@ fn handle_action(terminal: &mut Term, app: &mut App, action: Action) -> io::Resu
     Ok(())
 }
 
-/// Creates a git worktree under `<repo>/.worktrees/<branch>` then starts a tmux
-/// session in it. Any git step failing aborts before the session is created.
+/// Creates the session for a branch choice that needs a worktree. `New` forks
+/// a branch and adds a worktree (the original flow); `Existing` reuses the
+/// worktree where the branch is already checked out, or adds one for it.
 fn create_worktree_session(
     name: &str,
     dir: &str,
@@ -418,13 +419,52 @@ fn create_worktree_session(
     label: &str,
     spec: &am::app::WorktreeSpec,
 ) -> io::Result<()> {
+    use am::app::WorktreeSpec;
     let repo = am::git::repo_root(dir)
         .ok_or_else(|| io::Error::other(format!("not a git repo: {dir}")))?;
-    am::git::ensure_gitignore(&repo, ".worktrees/")?;
-    let wt_path = std::path::Path::new(&repo)
-        .join(".worktrees")
-        .join(&spec.new_branch);
-    let wt_str = wt_path.to_string_lossy().to_string();
-    am::git::prepare_worktree(&repo, &wt_str, &spec.new_branch, &spec.base)?;
-    tmux::new_worktree_session(name, &wt_str, command, label, &repo)
+    // .worktrees/<branch> path builder shared by both variants.
+    let wt_for = |branch: &str| {
+        std::path::Path::new(&repo)
+            .join(".worktrees")
+            .join(branch)
+            .to_string_lossy()
+            .to_string()
+    };
+    match spec {
+        WorktreeSpec::New { base, branch } => {
+            am::git::ensure_gitignore(&repo, ".worktrees/")?;
+            let wt = wt_for(branch);
+            am::git::prepare_worktree(&repo, &wt, branch, base)?;
+            tmux::new_worktree_session(name, &wt, command, label, &repo)
+        }
+        WorktreeSpec::Existing { branch } => {
+            match am::git::worktree_for_branch(&repo, branch) {
+                // Checked out in the repo's main worktree → a plain session
+                // there (not a removable worktree; no @cm_repo tag). Compare
+                // canonicalized: porcelain paths are real, repo may be symlinked.
+                Some(path) if same_dir(&path, &repo) => {
+                    tmux::new_session(name, &repo, command, label)
+                }
+                // Already checked out in a linked worktree → open right there.
+                Some(path) => tmux::new_worktree_session(name, &path, command, label, &repo),
+                // Not checked out anywhere → add a worktree for it (no -b).
+                None => {
+                    am::git::ensure_gitignore(&repo, ".worktrees/")?;
+                    let wt = wt_for(branch);
+                    am::git::prepare_worktree_existing(&repo, &wt, branch)?;
+                    tmux::new_worktree_session(name, &wt, command, label, &repo)
+                }
+            }
+        }
+    }
+}
+
+/// Path equality robust to symlinks (macOS /var → /private/var) and trailing slashes.
+fn same_dir(a: &str, b: &str) -> bool {
+    let canon = |p: &str| {
+        std::fs::canonicalize(p)
+            .map(|c| c.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| p.trim_end_matches('/').to_string())
+    };
+    canon(a) == canon(b)
 }
