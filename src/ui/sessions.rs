@@ -447,6 +447,7 @@ mod tests {
         Session {
             name: name.into(),
             dir: "~/work/x".into(),
+            cwd: "~/work/x".into(),
             created: 0,
             agent: "claude".into(),
             status,

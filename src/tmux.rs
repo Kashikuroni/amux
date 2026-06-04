@@ -2,9 +2,10 @@ use std::io;
 use std::process::Command;
 
 /// Tab-separated fields requested from `tmux list-sessions -F`.
-/// Order: name, path, created, @cm_managed, @cm_agent, attached-client-count, @cm_repo.
+/// Order: name, path, created, @cm_managed, @cm_agent, attached-client-count,
+/// @cm_repo, active-pane cwd (resolves via the session's current window).
 pub const LIST_FORMAT: &str =
-    "#{session_name}\t#{session_path}\t#{session_created}\t#{@cm_managed}\t#{@cm_agent}\t#{session_attached}\t#{@cm_repo}";
+    "#{session_name}\t#{session_path}\t#{session_created}\t#{@cm_managed}\t#{@cm_agent}\t#{session_attached}\t#{@cm_repo}\t#{pane_current_path}";
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Status {
@@ -18,7 +19,14 @@ pub enum Status {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Session {
     pub name: String,
+    /// Directory the session was created in (`#{session_path}`, never changes).
+    /// Keeps project grouping and worktree detection stable while the agent
+    /// `cd`s around.
     pub dir: String,
+    /// Live working directory of the active pane (`#{pane_current_path}`,
+    /// follows `cd`). Git branch/diff are read from here so they reflect where
+    /// the agent actually works. Falls back to `dir` when tmux reports nothing.
+    pub cwd: String,
     pub created: i64,
     pub agent: String,
     pub status: Status,
@@ -35,7 +43,7 @@ pub fn parse_sessions(output: &str) -> Vec<Session> {
 }
 
 fn parse_line(line: &str) -> Option<Session> {
-    let mut f = line.splitn(7, '\t');
+    let mut f = line.splitn(8, '\t');
     let name = f.next()?.to_string();
     let dir = f.next()?.to_string();
     let created = f.next()?.trim().parse::<i64>().ok()?;
@@ -53,9 +61,14 @@ fn parse_line(line: &str) -> Option<Session> {
         Some(r) if !r.is_empty() => Some(r.to_string()),
         _ => None,
     };
+    let cwd = match f.next().map(str::trim) {
+        Some(p) if !p.is_empty() => p.to_string(),
+        _ => dir.clone(),
+    };
     Some(Session {
         name,
         dir,
+        cwd,
         created,
         agent,
         status: Status::Idle,
@@ -387,6 +400,24 @@ mod tests {
         assert_eq!(sessions[0].status, Status::Idle);
         assert!(!sessions[0].attached);
         assert_eq!(sessions[0].worktree_repo, None);
+        // No pane path reported → cwd falls back to the session dir.
+        assert_eq!(sessions[0].cwd, "/home/u/proj-a");
+    }
+
+    #[test]
+    fn parses_pane_cwd_when_present() {
+        let out = "proj-a\t/home/u/proj-a\t1\t1\tclaude\t0\t\t/home/u/proj-a/sub";
+        let s = &parse_sessions(out)[0];
+        assert_eq!(s.dir, "/home/u/proj-a", "dir stays the start path");
+        assert_eq!(s.cwd, "/home/u/proj-a/sub", "cwd follows the active pane");
+    }
+
+    #[test]
+    fn empty_pane_cwd_falls_back_to_dir() {
+        let out = "proj-a\t/home/u/proj-a\t1\t1\tclaude\t0\t/r\t";
+        let s = &parse_sessions(out)[0];
+        assert_eq!(s.cwd, "/home/u/proj-a");
+        assert_eq!(s.worktree_repo.as_deref(), Some("/r"));
     }
 
     #[test]

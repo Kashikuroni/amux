@@ -402,6 +402,7 @@ mod tests {
         app.sessions = vec![Session {
             name: "project-a".into(),
             dir: "/work/a".into(),
+            cwd: "/work/a".into(),
             created: 1,
             agent: "claude".into(),
             status: Status::Running,

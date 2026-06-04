@@ -112,6 +112,7 @@ mod tests {
         app.sessions = vec![Session {
             name: "proj".into(),
             dir: "~/work/proj".into(),
+            cwd: "~/work/proj".into(),
             created: 0,
             agent: "claude".into(),
             status: Status::Idle,
@@ -137,6 +138,7 @@ mod tests {
         app.sessions = vec![Session {
             name: "proj".into(),
             dir: "~/work/proj".into(),
+            cwd: "~/work/proj".into(),
             created: 0,
             agent: "claude".into(),
             status: Status::Idle,
@@ -158,6 +160,7 @@ mod tests {
         app.sessions = vec![Session {
             name: "proj".into(),
             dir: "~/work/proj".into(),
+            cwd: "~/work/proj".into(),
             created: 0,
             agent: "claude".into(),
             status: Status::Idle,
@@ -182,6 +185,7 @@ mod tests {
         app.sessions = vec![Session {
             name: "work".into(),
             dir: "~/work".into(),
+            cwd: "~/work".into(),
             created: 0,
             agent: "claude".into(),
             status: crate::tmux::Status::Idle,
@@ -220,6 +224,7 @@ mod tests {
         app.sessions = vec![Session {
             name: "work".into(),
             dir: "~/work".into(),
+            cwd: "~/work".into(),
             created: 0,
             agent: "claude --dangerously-skip-permissions".into(),
             status: crate::tmux::Status::Idle,
@@ -256,6 +261,7 @@ mod tests {
         app.sessions = vec![Session {
             name: "work".into(),
             dir: "~/work".into(),
+            cwd: "~/work".into(),
             created: 0,
             agent: "codex".into(),
             status: crate::tmux::Status::Idle,
@@ -288,6 +294,7 @@ mod tests {
         app.sessions = vec![Session {
             name: "shell".into(),
             dir: "~/work".into(),
+            cwd: "~/work".into(),
             created: 0,
             agent: "$SHELL".into(),
             status: crate::tmux::Status::Idle,
@@ -319,6 +326,7 @@ mod tests {
         app.sessions = vec![Session {
             name: "proj".into(),
             dir: "~/work/proj".into(),
+            cwd: "~/work/proj".into(),
             created: 0,
             agent: "claude".into(),
             status: Status::Idle,

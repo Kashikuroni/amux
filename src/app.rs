@@ -1569,6 +1569,9 @@ impl App {
                 }
                 // Git info: served from the background reader's cache when a
                 // worker is attached (never blocks the UI), else read inline.
+                // Read from `cwd` (the active pane's live path), not `dir`: an
+                // agent that `cd`s into another repo/worktree and switches
+                // branches there must show that branch, not the start dir's.
                 if self.git_worker.is_some() {
                     // Apply the most recently received `dir → GitInfo` results.
                     let mut latest = None;
@@ -1581,16 +1584,16 @@ impl App {
                         self.git_cache = map;
                     }
                     for s in &mut sessions {
-                        s.git = self.git_cache.get(&s.dir).cloned();
+                        s.git = self.git_cache.get(&s.cwd).cloned();
                     }
                     // Ask the worker to refresh git for the current directories.
                     if let Some(w) = &self.git_worker {
-                        let dirs: Vec<String> = sessions.iter().map(|s| s.dir.clone()).collect();
+                        let dirs: Vec<String> = sessions.iter().map(|s| s.cwd.clone()).collect();
                         let _ = w.tx.send(dirs);
                     }
                 } else {
                     for s in &mut sessions {
-                        s.git = crate::git::read(&s.dir);
+                        s.git = crate::git::read(&s.cwd);
                     }
                 }
                 self.snapshots = new_snaps;
@@ -1996,6 +1999,7 @@ mod tests {
             Session {
                 name: "a".into(),
                 dir: "/a".into(),
+                cwd: "/a".into(),
                 created: 1,
                 agent: "claude".into(),
                 status: Status::Idle,
@@ -2006,6 +2010,7 @@ mod tests {
             Session {
                 name: "b".into(),
                 dir: "/b".into(),
+                cwd: "/b".into(),
                 created: 2,
                 agent: "claude".into(),
                 status: Status::Idle,
@@ -2021,6 +2026,7 @@ mod tests {
         Session {
             name: name.into(),
             dir: "/x".into(),
+            cwd: "/x".into(),
             created: 0,
             agent: "claude".into(),
             status: Status::Idle,
@@ -2033,6 +2039,7 @@ mod tests {
     fn at(name: &str, dir: &str) -> Session {
         Session {
             dir: dir.into(),
+            cwd: dir.into(),
             ..named(name)
         }
     }
