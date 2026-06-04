@@ -1,5 +1,6 @@
 use crate::app::{
-    abbreviate_path, expand_tilde, resolve_agent_path, CreateField, CreateForm, CUSTOM_AGENT_SLOT,
+    abbreviate_path, compose_agent_command, expand_tilde, resolve_agent_path, CreateField,
+    CreateForm, CLAUDE_MODELS, CUSTOM_AGENT_SLOT,
 };
 use crate::theme as th;
 use ratatui::layout::{Alignment, Rect};
@@ -150,7 +151,27 @@ pub fn render(f: &mut Frame, form: &CreateForm, error: Option<&str>) {
     };
     // One extra row for the validation error banner when present.
     let err_extra = u16::from(error.is_some());
-    let h = (BASE_ROWS + want_picker + branch_extra + warn_extra + err_extra + 4).min(full.height);
+    // The claude model list adds one row per model; the base-branch search adds
+    // its match list (or a "no match" row) only while the Base step is focused.
+    let model_rows = if form.model_list_visible() {
+        CLAUDE_MODELS.len() as u16
+    } else {
+        0
+    };
+    let base_picker = if form.field == CreateField::Base {
+        form.base_matches().len().clamp(1, PICKER_MAX) as u16
+    } else {
+        0
+    };
+    let h = (BASE_ROWS
+        + want_picker
+        + wt_extra
+        + warn_extra
+        + err_extra
+        + model_rows
+        + base_picker
+        + 4)
+    .min(full.height);
     let w = ((full.width as u32 * 70 / 100) as u16).min(full.width);
     let area = Rect {
         x: full.x + (full.width.saturating_sub(w)) / 2,
@@ -310,8 +331,83 @@ pub fn render(f: &mut Frame, form: &CreateForm, error: Option<&str>) {
     }
     y += 1;
 
-    // branch typeahead picker — only when the dir is inside a git repo.
-    if !form.branches.is_empty() {
+    // worktree toggle.
+    if let Some(r) = row(x, y, w, bottom) {
+        let focused = form.field == CreateField::Worktree;
+        let line = if !form.dir_is_repo() {
+            Line::from(vec![
+                lbl("worktree"),
+                Span::styled(
+                    "[ ] needs a git repo",
+                    Style::default().add_modifier(Modifier::DIM),
+                ),
+            ])
+        } else {
+            let mark = if form.worktree { "[x]" } else { "[ ]" };
+            Line::from(vec![
+                lbl("worktree"),
+                Span::styled(format!("{mark} create worktree"), Style::default()),
+                Span::styled("   space", Style::default().add_modifier(Modifier::DIM)),
+            ])
+        };
+        f.render_widget(band(Paragraph::new(line), focused), r);
+    }
+    y += 1;
+
+    if form.worktree {
+        // base: a search field — typing filters the branch list, Tab cycles the
+        // matches. Unfocused it shows the branch the submit would use.
+        let base_focused = form.field == CreateField::Base;
+        if let Some(r) = row(x, y, w, bottom) {
+            if base_focused {
+                input_row(f, r, "base", &form.base_filter, "filter branches", true);
+            } else {
+                let val = form
+                    .selected_base()
+                    .unwrap_or_else(|| "(no branches)".into());
+                input_row(f, r, "base", &val, "(no branches)", false);
+            }
+        }
+        y += 1;
+        // Match list under the filter, windowed like the dir picker.
+        if base_focused {
+            let matches = form.base_matches();
+            if matches.is_empty() {
+                if let Some(r) = row(x + VALUE_INDENT, y, w.saturating_sub(VALUE_INDENT), bottom) {
+                    f.render_widget(
+                        Paragraph::new(Line::from(Span::styled(
+                            "no match",
+                            Style::default().add_modifier(Modifier::DIM | Modifier::BOLD),
+                        ))),
+                        r,
+                    );
+                }
+                y += 1;
+            } else {
+                let cap = PICKER_MAX;
+                let start = if form.base_index >= cap {
+                    form.base_index + 1 - cap
+                } else {
+                    0
+                };
+                let end = (start + cap).min(matches.len());
+                for (i, m) in matches.iter().enumerate().take(end).skip(start) {
+                    let Some(r) = row(x + VALUE_INDENT, y, w.saturating_sub(VALUE_INDENT), bottom)
+                    else {
+                        break;
+                    };
+                    let selected = i == form.base_index;
+                    let text = format!("{}{}", if selected { "‹ " } else { "  " }, m);
+                    let style = if selected {
+                        Style::default().add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().add_modifier(Modifier::DIM)
+                    };
+                    f.render_widget(Paragraph::new(Line::from(Span::styled(text, style))), r);
+                    y += 1;
+                }
+            }
+        }
         if let Some(r) = row(x, y, w, bottom) {
             input_row(
                 f,
@@ -416,6 +512,38 @@ pub fn render(f: &mut Frame, form: &CreateForm, error: Option<&str>) {
         }
     }
     y += 1;
+    // Claude model list: one row per model under the agent row. The highlighted
+    // model carries the effort slider (haiku has none — effort unsupported).
+    if form.model_list_visible() {
+        for (i, m) in CLAUDE_MODELS.iter().enumerate() {
+            let Some(r) = row(x + VALUE_INDENT, y, w.saturating_sub(VALUE_INDENT), bottom) else {
+                break;
+            };
+            let on_row = form.model_index == Some(i);
+            let focused = on_row && form.field == CreateField::Agent;
+            let name_style = if on_row {
+                Style::default().add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().add_modifier(Modifier::DIM)
+            };
+            let mut spans = vec![Span::styled(
+                format!("{}{:<8}", if on_row { "‹ " } else { "  " }, m),
+                name_style,
+            )];
+            if on_row && form.effort_levels().len() > 1 {
+                for (ei, lvl) in form.effort_levels().iter().enumerate() {
+                    let st = if ei == form.effort_index {
+                        Style::default().add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().add_modifier(Modifier::DIM)
+                    };
+                    spans.push(Span::styled(format!(" {lvl} "), st));
+                }
+            }
+            f.render_widget(band(Paragraph::new(Line::from(spans)), focused), r);
+            y += 1;
+        }
+    }
     if agent_warn {
         if let Some(r) = row(x + VALUE_INDENT, y, w.saturating_sub(VALUE_INDENT), bottom) {
             f.render_widget(
@@ -454,11 +582,12 @@ pub fn render(f: &mut Frame, form: &CreateForm, error: Option<&str>) {
         } else {
             form.name.as_str()
         };
+        let (model, effort) = form.model_flags();
         let cmd = format!(
             "tmux new -s {} -c {} \"{}\"",
             name,
             abbreviate_path(&form.dir),
-            agent,
+            compose_agent_command(agent, model, effort),
         );
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
@@ -580,8 +709,102 @@ mod tests {
         let mut t = Terminal::new(TestBackend::new(80, 30)).unwrap();
         t.draw(|f| render(f, &form, None)).unwrap();
         let s = buf_to_string(t.backend().buffer());
-        assert!(s.contains("of 2"), "streamlined step total:\n{s}");
+        assert!(s.contains("of 4"), "streamlined step total:\n{s}");
         assert!(s.contains("proj"), "project path on directory row:\n{s}");
         assert!(s.contains("codex"), "project agent shown:\n{s}");
+    }
+
+    #[test]
+    fn model_list_renders_for_claude_with_effort_slider() {
+        let mut form = CreateForm::new("claude", &[]);
+        form.field = CreateField::Agent;
+        form.model_index = Some(1); // sonnet highlighted
+        form.effort_index = 3; // high
+                               // Wide enough that the command preview doesn't clip mid-flag.
+        let mut t = Terminal::new(TestBackend::new(110, 36)).unwrap();
+        t.draw(|f| render(f, &form, None)).unwrap();
+        let s = buf_to_string(t.backend().buffer());
+        assert!(s.contains("opus"), "model rows:\n{s}");
+        assert!(s.contains("sonnet"));
+        assert!(s.contains("haiku"));
+        // Slider only on the highlighted model; sonnet has no xhigh.
+        assert!(s.contains("auto"), "slider visible:\n{s}");
+        assert!(s.contains("medium"));
+        assert!(
+            !s.contains("xhigh"),
+            "sonnet slider must not offer xhigh:\n{s}"
+        );
+        assert!(
+            s.contains("--model sonnet --effort high"),
+            "preview carries flags:\n{s}"
+        );
+    }
+
+    #[test]
+    fn model_list_hidden_for_non_claude_and_terminal() {
+        let form = CreateForm::new("codex", &[]);
+        let mut t = Terminal::new(TestBackend::new(90, 36)).unwrap();
+        t.draw(|f| render(f, &form, None)).unwrap();
+        let s = buf_to_string(t.backend().buffer());
+        assert!(!s.contains("haiku"), "no model list for codex:\n{s}");
+
+        let mut form = CreateForm::new("claude", &[]);
+        form.terminal = true;
+        let mut t = Terminal::new(TestBackend::new(90, 36)).unwrap();
+        t.draw(|f| render(f, &form, None)).unwrap();
+        let s = buf_to_string(t.backend().buffer());
+        assert!(!s.contains("haiku"), "no model list for terminal:\n{s}");
+    }
+
+    #[test]
+    fn haiku_row_has_no_effort_slider() {
+        let mut form = CreateForm::new("claude", &[]);
+        form.field = CreateField::Agent;
+        form.model_index = Some(2); // haiku
+        let mut t = Terminal::new(TestBackend::new(90, 36)).unwrap();
+        t.draw(|f| render(f, &form, None)).unwrap();
+        let s = buf_to_string(t.backend().buffer());
+        assert!(!s.contains("auto"), "haiku has no slider:\n{s}");
+        assert!(
+            s.contains("--model haiku"),
+            "preview still flags model:\n{s}"
+        );
+    }
+
+    #[test]
+    fn auto_model_preview_has_no_flags() {
+        let form = CreateForm::new("claude", &[]);
+        let mut t = Terminal::new(TestBackend::new(90, 36)).unwrap();
+        t.draw(|f| render(f, &form, None)).unwrap();
+        let s = buf_to_string(t.backend().buffer());
+        assert!(!s.contains("--model"), "agent row = auto, no flags:\n{s}");
+    }
+
+    #[test]
+    fn base_search_renders_filter_and_matches() {
+        let mut form = CreateForm::new("claude", &[]);
+        form.worktree = true;
+        form.field = CreateField::Base;
+        form.base_branches = vec!["main".into(), "dev".into(), "feature".into()];
+        form.base_filter = "e".into(); // dev, feature
+        let mut t = Terminal::new(TestBackend::new(90, 40)).unwrap();
+        t.draw(|f| render(f, &form, None)).unwrap();
+        let s = buf_to_string(t.backend().buffer());
+        assert!(s.contains("dev"), "match list:\n{s}");
+        assert!(s.contains("feature"));
+        assert!(!s.contains("main"), "filtered out:\n{s}");
+    }
+
+    #[test]
+    fn base_unfocused_shows_selected_branch() {
+        let mut form = CreateForm::new("claude", &[]);
+        form.worktree = true;
+        form.field = CreateField::Branch;
+        form.base_branches = vec!["main".into(), "dev".into()];
+        let mut t = Terminal::new(TestBackend::new(90, 40)).unwrap();
+        t.draw(|f| render(f, &form, None)).unwrap();
+        let s = buf_to_string(t.backend().buffer());
+        assert!(s.contains("main"), "selected base shown:\n{s}");
+        assert!(!s.contains("dev"), "match list hidden when unfocused:\n{s}");
     }
 }

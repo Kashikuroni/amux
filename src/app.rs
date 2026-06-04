@@ -7,6 +7,15 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 /// Sentinel label for the free-text agent slot in `CreateForm::agent_choices`.
 pub const CUSTOM_AGENT_SLOT: &str = "custom\u{2026}"; // "custom…"
 
+/// Claude Code model aliases offered under the agent row. Aliases (not full
+/// names) so claude itself resolves them to the current model versions.
+pub const CLAUDE_MODELS: [&str; 3] = ["opus", "sonnet", "haiku"];
+/// Effort slider positions per model; index 0 is "auto" (no --effort flag).
+/// Sonnet 4.6 has no xhigh; haiku does not support effort at all.
+const EFFORTS_OPUS: &[&str] = &["auto", "low", "medium", "high", "xhigh", "max"];
+const EFFORTS_SONNET: &[&str] = &["auto", "low", "medium", "high", "max"];
+const EFFORTS_HAIKU: &[&str] = &["auto"];
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CreateField {
     Name,
@@ -35,19 +44,20 @@ pub struct CreateForm {
     pub dir_selected: usize,
     pub agent_choices: Vec<String>,
     pub agent_index: usize,
-    /// Typeahead filter text on the Branch step; doubles as the new-branch name.
-    pub branch_input: String,
-    /// All local branches (current first); empty ⇒ dir is not a git repo.
-    pub branches: Vec<String>,
-    /// Branch checked out in `dir`, if any (None on detached HEAD / non-repo).
-    pub current_branch: Option<String>,
-    /// Filtered picker rows (+ trailing Create entry when input is unmatched).
-    pub branch_entries: Vec<BranchEntry>,
-    pub branch_selected: usize,
-    /// Base selection (index into `branches`) for the `+ create` flow.
+    /// Cursor/selection in the claude model list; `None` = the agent row is
+    /// focused and no --model flag will be passed (claude picks its default).
+    pub model_index: Option<usize>,
+    /// Effort slider position for the highlighted model; 0 = auto (no flag).
+    pub effort_index: usize,
+    pub worktree: bool,
+    pub base_branches: Vec<String>,
     pub base_index: usize,
-    /// True when opened pre-filled for an existing project (`N`): `dir` and
-    /// `agent` are fixed and the flow only walks Name → Terminal → [Branch → Base].
+    /// Typed filter for the base-branch search; matches are a substring filter
+    /// over `base_branches`, `base_index` highlights within the matches.
+    pub base_filter: String,
+    pub new_branch: String,
+    /// True when opened pre-filled for an existing project (`N`): `dir` is
+    /// fixed, so the flow skips the Dir step (agent is still selectable).
     pub prefilled: bool,
     /// True when the session should run a plain shell instead of an agent.
     /// When set, the Agent step is skipped and `$SHELL` is launched.
@@ -73,22 +83,22 @@ impl CreateForm {
             dir_selected: 0,
             agent_choices: choices,
             agent_index: 0,
-            branch_input: String::new(),
-            branches: Vec::new(),
-            current_branch: None,
-            branch_entries: Vec::new(),
-            branch_selected: 0,
+            model_index: None,
+            effort_index: 0,
+            worktree: false,
+            base_branches: Vec::new(),
             base_index: 0,
+            base_filter: String::new(),
+            new_branch: String::new(),
             prefilled: false,
             terminal: false,
         }
     }
 
-    /// New-session form pre-filled for an existing project: `dir` and `agent`
-    /// are fixed, so the streamlined flow only walks Name → Terminal → [Branch →
-    /// Base]. `new(project_agent, ...)` already puts `project_agent` first in
-    /// `agent_choices` and selects it (index 0), so the agent is pre-chosen. The
-    /// dir is fixed here, so branches are loaded once up front.
+    /// New-session form pre-filled for an existing project: `dir` is fixed, so
+    /// the flow walks Name → Terminal → Worktree → [Base → Branch] → Agent.
+    /// `new(project_agent, ...)` already puts `project_agent` first in
+    /// `agent_choices` and selects it (index 0), so the agent is pre-chosen.
     pub fn for_project(project_dir: &str, project_agent: &str, presets: &[String]) -> Self {
         let mut f = CreateForm::new(project_agent, presets);
         f.dir = collapse_home(project_dir);
@@ -104,13 +114,14 @@ impl CreateForm {
             CreateField::Dir => &mut self.dir,
             CreateField::Branch => &mut self.branch_input,
             CreateField::Agent => &mut self.agent,
-            CreateField::Base | CreateField::Terminal => &mut self.agent,
+            CreateField::Base => &mut self.base_filter,
+            CreateField::Worktree | CreateField::Terminal => &mut self.agent,
         }
     }
 
     /// The ordered steps for the current configuration — the single source of
     /// truth for next_field / step / total_steps / is_last_step. Dir is dropped
-    /// when prefilled (`N`); Agent is dropped when prefilled or terminal.
+    /// when prefilled (`N`); Agent is dropped when terminal.
     fn field_sequence(&self) -> Vec<CreateField> {
         let mut v = vec![CreateField::Name];
         if !self.prefilled {
@@ -123,7 +134,7 @@ impl CreateForm {
                 v.push(CreateField::Base);
             }
         }
-        if !self.prefilled && !self.terminal {
+        if !self.terminal {
             v.push(CreateField::Agent);
         }
         v
@@ -142,9 +153,7 @@ impl CreateForm {
         self.field_sequence().last() == Some(&self.field)
     }
 
-    /// Advance focus to the next field (used by Tab/Enter and tests). Loads
-    /// branches once when leaving the Dir step (the dir is then fixed for the
-    /// rest of the flow), so the Branch step appears only for git repos.
+    /// Advance focus to the next field (used by ↓/j and tests).
     pub fn advance(&mut self) {
         let leaving_dir = self.field == CreateField::Dir;
         self.field = self.next_field();
@@ -165,7 +174,7 @@ impl CreateForm {
         }
     }
 
-    /// Move focus to the previous field (Shift+Tab). Mirror of `advance`.
+    /// Move focus to the previous field (↑/k). Mirror of `advance`.
     pub fn retreat(&mut self) {
         self.field = self.prev_field();
         if self.field == CreateField::Dir {
@@ -217,12 +226,15 @@ impl CreateForm {
         if self.branch_entries.is_empty() {
             return;
         }
-        self.branch_selected = (self.branch_selected + 1) % self.branch_entries.len();
-    }
-
-    fn branch_select_prev(&mut self) {
-        if self.branch_entries.is_empty() {
-            return;
+        if !self.dir_is_repo() {
+            return; // not a git repo — cannot enable
+        }
+        self.worktree = true;
+        self.base_branches = crate::git::list_branches(&expand_tilde(&self.dir));
+        self.base_index = 0;
+        self.base_filter.clear();
+        if self.new_branch.is_empty() {
+            self.new_branch = self.name.trim().to_string();
         }
         self.branch_selected = if self.branch_selected == 0 {
             self.branch_entries.len() - 1
@@ -243,13 +255,42 @@ impl CreateForm {
         self.terminal = !self.terminal;
     }
 
-    /// Move the base-branch selection by `delta` (wraps). No-op if no branches.
-    pub fn cycle_base(&mut self, delta: isize) {
-        let n = self.branches.len() as isize;
+    /// Branches matching the typed filter (case-insensitive substring); the
+    /// full list when the filter is empty. Order follows `base_branches`
+    /// (current branch first — see git::list_branches).
+    pub fn base_matches(&self) -> Vec<String> {
+        let f = self.base_filter.to_lowercase();
+        self.base_branches
+            .iter()
+            .filter(|b| b.to_lowercase().contains(&f))
+            .cloned()
+            .collect()
+    }
+
+    /// The highlighted match — what submit uses as the worktree base.
+    pub fn selected_base(&self) -> Option<String> {
+        self.base_matches().get(self.base_index).cloned()
+    }
+
+    /// Move the match highlight by `delta` (wraps). No-op without matches.
+    pub fn base_select(&mut self, delta: isize) {
+        let n = self.base_matches().len() as isize;
         if n == 0 {
             return;
         }
         self.base_index = (((self.base_index as isize + delta) % n + n) % n) as usize;
+    }
+
+    /// Edit the filter; the highlight resets to the first match.
+    pub fn base_filter_push(&mut self, c: char) {
+        self.base_filter.push(c);
+        self.base_index = 0;
+    }
+
+    /// Mirror of `base_filter_push`: shrink the filter; highlight resets too.
+    pub fn base_filter_pop(&mut self) {
+        self.base_filter.pop();
+        self.base_index = 0;
     }
 
     /// Total number of steps shown in the `N of M` indicator.
@@ -303,6 +344,111 @@ impl CreateForm {
         } else {
             self.agent = self.agent_choices[self.agent_index].clone();
         }
+        // A different agent invalidates any claude model/effort choice.
+        self.model_index = None;
+        self.effort_index = 0;
+    }
+
+    /// True when the agent command's binary is claude (covers presets and
+    /// custom commands like `claude --some-flag`).
+    pub fn agent_is_claude(&self) -> bool {
+        self.agent.split_whitespace().next() == Some("claude")
+    }
+
+    /// True when the model list renders under the agent row.
+    pub fn model_list_visible(&self) -> bool {
+        !self.terminal && self.agent_is_claude()
+    }
+
+    /// Effort slider positions for the highlighted model (auto-only for haiku
+    /// and while on the agent row).
+    /// Indices follow CLAUDE_MODELS order: 0 = opus, 1 = sonnet, 2+ = haiku.
+    pub fn effort_levels(&self) -> &'static [&'static str] {
+        match self.model_index {
+            Some(0) => EFFORTS_OPUS,
+            Some(1) => EFFORTS_SONNET,
+            _ => EFFORTS_HAIKU,
+        }
+    }
+
+    /// Move the model cursor down: the agent row enters the list, models walk
+    /// toward haiku. Returns false when the cursor should leave the list (the
+    /// caller advances to the next field; the selection survives).
+    pub fn model_down(&mut self) -> bool {
+        if !self.model_list_visible() {
+            return false;
+        }
+        match self.model_index {
+            None => {
+                self.model_index = Some(0);
+                self.effort_index = 0;
+                true
+            }
+            Some(i) if i + 1 < CLAUDE_MODELS.len() => {
+                self.model_index = Some(i + 1);
+                self.effort_index = 0;
+                true
+            }
+            Some(_) => false,
+        }
+    }
+
+    /// Move the model cursor up; every move resets effort to auto. From the
+    /// first model returns to the agent row. False when already on the agent row.
+    pub fn model_up(&mut self) -> bool {
+        // No visibility guard needed: model_index is always None off-claude.
+        match self.model_index {
+            Some(0) => {
+                self.model_index = None;
+                self.effort_index = 0;
+                true
+            }
+            Some(i) => {
+                self.model_index = Some(i - 1);
+                self.effort_index = 0;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Move the effort slider by `delta`, clamped to the model's levels (a
+    /// slider, not a carousel — no wrap). No-op for haiku (auto only).
+    pub fn cycle_effort(&mut self, delta: isize) {
+        let n = self.effort_levels().len() as isize;
+        let i = self.effort_index as isize + delta;
+        self.effort_index = i.clamp(0, n - 1) as usize;
+    }
+
+    /// The highlighted model's alias, if the cursor is in the list.
+    pub fn selected_model(&self) -> Option<&'static str> {
+        self.model_index.map(|i| CLAUDE_MODELS[i])
+    }
+
+    /// The slider's effort level; None at the auto position.
+    pub fn selected_effort(&self) -> Option<&'static str> {
+        match self.effort_index {
+            0 => None,
+            i => self.effort_levels().get(i).copied(),
+        }
+    }
+
+    /// (--model, --effort) values exactly as they will be submitted: empty
+    /// unless a claude model is selected; effort never without a model.
+    pub fn model_flags(&self) -> (Option<&'static str>, Option<&'static str>) {
+        if self.terminal || !self.agent_is_claude() {
+            return (None, None);
+        }
+        let model = self.selected_model();
+        (model, model.and(self.selected_effort()))
+    }
+
+    /// Jump to the custom… slot for free typing (typing/Backspace on a preset).
+    pub fn switch_to_custom(&mut self) {
+        self.agent_index = self.agent_choices.len().saturating_sub(1);
+        self.agent.clear();
+        self.model_index = None;
+        self.effort_index = 0;
     }
 
     /// Appends pasted text to the focused field (reloads dir listing if on Dir,
@@ -312,8 +458,8 @@ impl CreateForm {
         if self.field == CreateField::Dir {
             self.refresh_dir_entries();
         }
-        if self.field == CreateField::Branch {
-            self.refresh_branch_entries();
+        if self.field == CreateField::Base {
+            self.base_index = 0;
         }
     }
 
@@ -521,6 +667,10 @@ pub enum Action {
         agent: String,
         worktree: Option<WorktreeSpec>,
         terminal: bool,
+        /// Claude model alias for --model; None = claude picks its default.
+        model: Option<String>,
+        /// Effort level for --effort; never Some without `model`.
+        effort: Option<String>,
     },
     Kill {
         name: String,
@@ -976,8 +1126,8 @@ impl App {
                 ));
             }
             // Shift+N: new session pre-filled from the selected session's project
-            // (path + agent), streamlined to name + worktree. No-op if nothing
-            // is selected.
+            // (path pre-filled; agent still selectable in the form). No-op if
+            // nothing is selected.
             KeyCode::Char('N') => {
                 if let Some(s) = self.selected_session() {
                     let dir = session_root(s).to_string();
@@ -1287,17 +1437,34 @@ impl App {
         // key's submit still fails, so the banner always reflects the last action.
         self.error = None;
 
-        // Shift+Tab walks focus backwards from any step (mirror of Tab).
-        if key.code == KeyCode::BackTab {
-            form.retreat();
-            self.mode = Mode::Create(form);
-            return None;
+        // Keys with one meaning on every step: close, create, walk fields.
+        // (Tab never moves focus — it only cycles completion candidates below.)
+        match key.code {
+            KeyCode::Esc => return None, // mode already reset to List
+            KeyCode::Enter => return self.submit_create(form),
+            KeyCode::Up => {
+                // On the Agent step the model list is walked first; the agent
+                // row is the exit at the top.
+                if !(form.field == CreateField::Agent && form.model_up()) {
+                    form.retreat();
+                }
+                self.mode = Mode::Create(form);
+                return None;
+            }
+            KeyCode::Down => {
+                if !(form.field == CreateField::Agent && form.model_down()) {
+                    form.advance();
+                }
+                self.mode = Mode::Create(form);
+                return None;
+            }
+            _ => {}
         }
 
-        // Dir step: interactive picker (live subdir list).
-        if form.field == CreateField::Dir {
-            match key.code {
-                KeyCode::Esc => return None, // mode already reset to List
+        match form.field {
+            // Dir: free text + completion. Tab cycles the candidates, → descends
+            // into the highlighted one.
+            CreateField::Dir => match key.code {
                 KeyCode::Backspace => {
                     form.dir.pop();
                     form.refresh_dir_entries();
@@ -1306,137 +1473,89 @@ impl App {
                     form.dir.push(c);
                     form.refresh_dir_entries();
                 }
-                KeyCode::Up => form.dir_select_prev(),
-                KeyCode::Down => form.dir_select_next(),
-                KeyCode::Tab | KeyCode::Right => form.enter_selected_dir(),
-                KeyCode::Enter => {
-                    let existing: Vec<String> =
-                        self.sessions.iter().map(|s| s.name.clone()).collect();
-                    match validate_create(&form.name, &form.dir, &existing) {
-                        Ok(()) => {
-                            self.error = None;
-                            form.advance();
-                        }
-                        Err(e) => self.error = Some(e),
-                    }
-                }
+                KeyCode::Tab => form.dir_select_next(),
+                KeyCode::BackTab => form.dir_select_prev(),
+                KeyCode::Right => form.enter_selected_dir(),
                 _ => {}
-            }
-            self.mode = Mode::Create(form);
-            return None;
-        }
-
-        // Terminal toggle step.
-        if form.field == CreateField::Terminal {
-            match key.code {
-                KeyCode::Esc => return None,
-                KeyCode::Char(' ') => form.toggle_terminal(),
-                KeyCode::Tab => form.advance(),
-                KeyCode::Enter => {
-                    if form.is_last_step() {
-                        return self.submit_create(form);
-                    } else {
+            },
+            // Toggles: space/h/l/←/→ all flip; j/k mirror ↓/↑ (no free text here).
+            CreateField::Terminal => match key.code {
+                KeyCode::Char(' ' | 'h' | 'l') | KeyCode::Left | KeyCode::Right => {
+                    form.toggle_terminal()
+                }
+                KeyCode::Char('j') => form.advance(),
+                KeyCode::Char('k') => form.retreat(),
+                _ => {}
+            },
+            CreateField::Worktree => match key.code {
+                KeyCode::Char(' ' | 'h' | 'l') | KeyCode::Left | KeyCode::Right => {
+                    form.toggle_worktree()
+                }
+                KeyCode::Char('j') => form.advance(),
+                KeyCode::Char('k') => form.retreat(),
+                _ => {}
+            },
+            // Base: branch search. Typing filters, Tab cycles the matches.
+            CreateField::Base => match key.code {
+                KeyCode::Backspace => form.base_filter_pop(),
+                KeyCode::Char(c) => form.base_filter_push(c),
+                KeyCode::Tab => form.base_select(1),
+                KeyCode::BackTab => form.base_select(-1),
+                _ => {}
+            },
+            // Model list (the cursor is on a model row): j/k walk it, h/l slide
+            // the effort. Plain letters do nothing — it's not a text field.
+            CreateField::Agent if form.model_index.is_some() => match key.code {
+                KeyCode::Char('j') => {
+                    if !form.model_down() {
                         form.advance();
                     }
                 }
+                KeyCode::Char('k') => {
+                    form.model_up();
+                }
+                KeyCode::Left | KeyCode::Char('h') => form.cycle_effort(-1),
+                KeyCode::Right | KeyCode::Char('l') => form.cycle_effort(1),
                 _ => {}
-            }
-            self.mode = Mode::Create(form);
-            return None;
-        }
-
-        // Branch step: typeahead picker over local branches (mirrors the Dir
-        // picker: type to filter, ↑/↓ to highlight, Enter accepts & advances).
-        if form.field == CreateField::Branch {
-            match key.code {
-                KeyCode::Esc => return None,
+            },
+            // Agent row. h/l/j/k act as keys only while a preset is selected —
+            // on the custom slot they're typed so a command can contain them.
+            CreateField::Agent => match key.code {
+                KeyCode::Left => form.cycle_agent(-1),
+                KeyCode::Right => form.cycle_agent(1),
+                KeyCode::Char('h') if !form.agent_is_custom() => form.cycle_agent(-1),
+                KeyCode::Char('l') if !form.agent_is_custom() => form.cycle_agent(1),
+                KeyCode::Char('j') if !form.agent_is_custom() => {
+                    if !form.model_down() {
+                        form.advance();
+                    }
+                }
+                KeyCode::Char('k') if !form.agent_is_custom() => form.retreat(),
                 KeyCode::Backspace => {
-                    form.branch_input.pop();
-                    form.refresh_branch_entries();
+                    if !form.agent_is_custom() {
+                        // Backspace off a preset: jump to custom and start fresh.
+                        form.switch_to_custom();
+                    }
+                    form.agent.pop();
                 }
                 KeyCode::Char(c) => {
-                    form.branch_input.push(c);
-                    form.refresh_branch_entries();
-                }
-                KeyCode::Up => form.branch_select_prev(),
-                KeyCode::Down => form.branch_select_next(),
-                KeyCode::Tab => form.advance(),
-                KeyCode::Enter => {
-                    if form.is_last_step() {
-                        return self.submit_create(form);
-                    } else {
-                        form.advance();
+                    if !form.agent_is_custom() {
+                        form.switch_to_custom();
                     }
+                    form.agent.push(c);
                 }
                 _ => {}
-            }
-            self.mode = Mode::Create(form);
-            return None;
-        }
-
-        // Base-branch picker step. h/l mirror ←/→ (vim-style) — it's a pure
-        // selection step with no free text, so the letters are unambiguous.
-        // Base is the last step in the prefilled `+ create` flow (Agent skipped),
-        // so Enter there submits rather than wrapping.
-        if form.field == CreateField::Base {
-            match key.code {
-                KeyCode::Esc => return None,
-                KeyCode::Left | KeyCode::Char('h') => form.cycle_base(-1),
-                KeyCode::Right | KeyCode::Char('l') => form.cycle_base(1),
-                KeyCode::Tab => form.advance(),
-                KeyCode::Enter => {
-                    if form.is_last_step() {
-                        return self.submit_create(form);
-                    } else {
-                        form.advance();
-                    }
+            },
+            // Name / Branch: plain text fields.
+            CreateField::Name | CreateField::Branch => match key.code {
+                KeyCode::Backspace => {
+                    form.current_mut().pop();
+                }
+                KeyCode::Char(c) => {
+                    form.current_mut().push(c);
                 }
                 _ => {}
-            }
-            self.mode = Mode::Create(form);
-            return None;
-        }
-
-        // Name / agent steps: plain text fields (Branch/Base/Terminal/Dir all
-        // returned earlier above).
-        match key.code {
-            KeyCode::Esc => return None,
-            KeyCode::Left if form.field == CreateField::Agent => form.cycle_agent(-1),
-            KeyCode::Right if form.field == CreateField::Agent => form.cycle_agent(1),
-            // h/l cycle agents vim-style, but only while a preset is selected —
-            // once on the custom slot they're typed so a command can contain them.
-            KeyCode::Char('h') if form.field == CreateField::Agent && !form.agent_is_custom() => {
-                form.cycle_agent(-1)
-            }
-            KeyCode::Char('l') if form.field == CreateField::Agent && !form.agent_is_custom() => {
-                form.cycle_agent(1)
-            }
-            KeyCode::Backspace => {
-                if form.field == CreateField::Agent && !form.agent_is_custom() {
-                    // Backspace off a preset: jump to custom and start fresh (matches Char).
-                    form.agent_index = form.agent_choices.len().saturating_sub(1);
-                    form.agent.clear();
-                }
-                form.current_mut().pop();
-            }
-            KeyCode::Char(c) => {
-                if form.field == CreateField::Agent && !form.agent_is_custom() {
-                    form.agent_index = form.agent_choices.len().saturating_sub(1);
-                    form.agent.clear();
-                }
-                form.current_mut().push(c);
-            }
-            KeyCode::Tab => form.advance(),
-            KeyCode::Enter => {
-                let submit = form.is_last_step();
-                if submit {
-                    return self.submit_create(form);
-                } else {
-                    // Non-submit step → advance (handles Dir refresh when needed).
-                    form.advance();
-                }
-            }
-            _ => {}
+            },
         }
         self.mode = Mode::Create(form);
         None
@@ -2046,32 +2165,42 @@ pub fn abbreviate_path(path: &str) -> String {
 /// validated). Shared by every submit path so the assembly lives in one place.
 pub fn build_create_action(form: &CreateForm, existing: &[String]) -> Result<Action, String> {
     validate_create(&form.name, &form.dir, existing)?;
-    let worktree = match form.branch_entries.get(form.branch_selected) {
-        // No Branch step (non-repo dir) → plain session.
-        None => None,
-        // The dir's own branch → plain session in the dir, no worktree.
-        Some(BranchEntry::Existing(b)) if Some(b) == form.current_branch.as_ref() => None,
-        Some(BranchEntry::Existing(b)) => Some(WorktreeSpec::Existing { branch: b.clone() }),
-        Some(BranchEntry::Create(name)) => {
-            let branch = name.trim().to_string();
-            validate_branch(&branch)?;
-            Some(WorktreeSpec::New {
-                base: form
-                    .branches
-                    .get(form.base_index)
-                    .cloned()
-                    .unwrap_or_default(),
-                branch,
-            })
-        }
+    let worktree = if form.worktree {
+        let branch = form.new_branch.trim().to_string();
+        validate_branch(&branch)?;
+        let base = match form.selected_base() {
+            Some(b) => b,
+            // Parity with the old picker: an empty repo submits an empty base.
+            None if form.base_branches.is_empty() => String::new(),
+            None => return Err(format!("no branch matches '{}'", form.base_filter)),
+        };
+        Some(WorktreeSpec::New { base, branch })
+    } else {
+        None
     };
+    let (model, effort) = form.model_flags();
     Ok(Action::Create {
         name: form.name.trim().to_string(),
         dir: expand_tilde(&form.dir),
         agent: form.agent.clone(),
         worktree,
         terminal: form.terminal,
+        model: model.map(str::to_string),
+        effort: effort.map(str::to_string),
     })
+}
+
+/// The final command a create runs: the agent plus claude model/effort flags.
+/// Shared by the submit path (main.rs) and the modal's command preview.
+pub fn compose_agent_command(agent: &str, model: Option<&str>, effort: Option<&str>) -> String {
+    let mut cmd = agent.to_string();
+    if let Some(m) = model {
+        cmd.push_str(&format!(" --model {m}"));
+    }
+    if let Some(e) = effort {
+        cmd.push_str(&format!(" --effort {e}"));
+    }
+    cmd
 }
 
 /// Validates create-form input. `dir` is checked after tilde expansion.
@@ -3006,29 +3135,31 @@ mod tests {
     }
 
     #[test]
-    fn shift_tab_walks_focus_backwards() {
+    fn arrows_walk_fields_both_ways() {
         let mut app = App::new(Config::default());
         let mut form = CreateForm::new("claude", &["claude".into()]);
-        form.field = CreateField::Terminal; // a mid-flow step
+        form.field = CreateField::Terminal;
         app.mode = Mode::Create(form);
-        app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE));
-        assert_eq!(cform(&app).field, CreateField::Dir); // step before Terminal
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(cform(&app).field, CreateField::Dir);
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(cform(&app).field, CreateField::Terminal);
     }
 
     #[test]
-    fn base_picker_cycles_with_h_and_l() {
+    fn base_typing_filters_and_tab_cycles() {
         let mut app = App::new(Config::default());
         let mut form = CreateForm::new("claude", &["claude".into()]);
         form.field = CreateField::Base;
-        form.branches = vec!["main".into(), "dev".into(), "feat".into()];
-        form.base_index = 0;
+        form.base_branches = vec!["main".into(), "dev".into(), "feature".into()];
         app.mode = Mode::Create(form);
-        app.handle_key(key('l'));
-        assert_eq!(cform(&app).base_index, 1);
-        app.handle_key(key('l'));
-        assert_eq!(cform(&app).base_index, 2);
-        app.handle_key(key('h'));
-        assert_eq!(cform(&app).base_index, 1);
+        app.handle_key(key('e')); // filter: dev, feature
+        assert_eq!(cform(&app).base_filter, "e");
+        assert_eq!(cform(&app).selected_base().as_deref(), Some("dev"));
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(cform(&app).selected_base().as_deref(), Some("feature"));
+        app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        assert_eq!(cform(&app).selected_base().as_deref(), Some("dev"));
     }
 
     #[test]
@@ -3065,13 +3196,30 @@ mod tests {
     }
 
     #[test]
-    fn prefilled_flow_skips_dir_and_agent() {
-        // Non-repo dir → no Branch step: Name → Terminal → wrap to Name.
+    fn prefilled_flow_skips_dir_but_keeps_agent() {
         let mut form = CreateForm::for_project("/home/u/proj", "claude", &[]);
+        // Name → Terminal → Worktree → Agent → wrap to Name (only Dir skipped).
         form.advance();
         assert_eq!(form.field, CreateField::Terminal);
         form.advance();
+        assert_eq!(form.field, CreateField::Worktree);
+        form.advance();
+        assert_eq!(form.field, CreateField::Agent);
+        form.advance();
         assert_eq!(form.field, CreateField::Name);
+    }
+
+    #[test]
+    fn prefilled_flow_with_worktree_walks_base_then_branch() {
+        let mut form = CreateForm::for_project("/home/u/proj", "claude", &[]);
+        form.field = CreateField::Worktree;
+        form.worktree = true;
+        form.advance();
+        assert_eq!(form.field, CreateField::Base);
+        form.advance();
+        assert_eq!(form.field, CreateField::Branch);
+        form.advance();
+        assert_eq!(form.field, CreateField::Agent);
     }
 
     #[test]
@@ -3143,8 +3291,7 @@ mod tests {
         let mut app = app_with(vec![at("s", "/p")]);
         let mut form = CreateForm::for_project(&dir, "claude", &[]);
         form.name = "sess".into();
-        // Non-repo temp dir → no Branch step; Terminal is the last prefilled step.
-        form.field = CreateField::Terminal;
+        form.field = CreateField::Worktree; // any field — Enter submits from anywhere
         app.mode = Mode::Create(form);
         let act = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         match act {
@@ -3153,7 +3300,7 @@ mod tests {
                 dir: d,
                 agent,
                 worktree,
-                terminal: _,
+                ..
             }) => {
                 assert_eq!(name, "sess");
                 assert_eq!(d, dir);
@@ -3165,7 +3312,105 @@ mod tests {
     }
 
     #[test]
-    fn prefilled_submit_with_new_branch_carries_spec() {
+    fn enter_submits_from_name_field() {
+        let dir = std::env::temp_dir().to_string_lossy().to_string();
+        let mut app = app_with(vec![at("s", "/p")]);
+        let mut form = CreateForm::new("claude", &[]);
+        form.name = "quick".into();
+        form.dir = dir;
+        assert_eq!(form.field, CreateField::Name);
+        app.mode = Mode::Create(form);
+        let act = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(act, Some(Action::Create { .. })));
+    }
+
+    #[test]
+    fn enter_with_invalid_form_shows_error_and_keeps_form() {
+        let mut app = App::new(Config::default());
+        let form = CreateForm::new("claude", &[]); // empty name → invalid
+        app.mode = Mode::Create(form);
+        let act = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(act.is_none());
+        assert!(app.error.is_some());
+        assert!(matches!(app.mode, Mode::Create(_)));
+    }
+
+    #[test]
+    fn j_dives_into_model_list_and_h_l_set_effort() {
+        let mut app = App::new(Config::default());
+        let mut form = CreateForm::new("claude", &[]);
+        form.field = CreateField::Agent;
+        app.mode = Mode::Create(form);
+        app.handle_key(key('j')); // agent row → opus
+        assert_eq!(cform(&app).model_index, Some(0));
+        app.handle_key(key('j')); // opus → sonnet
+        assert_eq!(cform(&app).model_index, Some(1));
+        app.handle_key(key('l')); // auto → low
+        app.handle_key(key('l')); // low → medium
+        assert_eq!(cform(&app).effort_index, 2);
+        app.handle_key(key('k')); // back to opus — effort resets
+        assert_eq!(cform(&app).model_index, Some(0));
+        assert_eq!(cform(&app).effort_index, 0);
+        app.handle_key(key('k')); // opus → agent row (auto)
+        assert_eq!(cform(&app).model_index, None);
+    }
+
+    #[test]
+    fn down_past_haiku_leaves_list_but_keeps_selection() {
+        let mut app = App::new(Config::default());
+        let mut form = CreateForm::new("claude", &[]);
+        form.field = CreateField::Agent;
+        form.model_index = Some(2); // haiku
+        app.mode = Mode::Create(form);
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(cform(&app).field, CreateField::Name); // wrapped
+        assert_eq!(cform(&app).model_index, Some(2)); // selection survives
+    }
+
+    #[test]
+    fn enter_on_model_row_submits_with_flags() {
+        let dir = std::env::temp_dir().to_string_lossy().to_string();
+        let mut app = app_with(vec![at("s", "/p")]);
+        let mut form = CreateForm::new("claude", &[]);
+        form.name = "sess".into();
+        form.dir = dir;
+        form.field = CreateField::Agent;
+        form.model_index = Some(1); // sonnet
+        form.effort_index = 3; // high
+        app.mode = Mode::Create(form);
+        match app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)) {
+            Some(Action::Create { model, effort, .. }) => {
+                assert_eq!(model.as_deref(), Some("sonnet"));
+                assert_eq!(effort.as_deref(), Some("high"));
+            }
+            other => panic!("expected Create, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn h_l_toggle_worktree_and_terminal() {
+        let mut app = App::new(Config::default());
+        let mut form = CreateForm::new("claude", &[]);
+        form.field = CreateField::Terminal;
+        app.mode = Mode::Create(form);
+        app.handle_key(key('l'));
+        assert!(cform(&app).terminal);
+        app.handle_key(key('h'));
+        assert!(!cform(&app).terminal);
+    }
+
+    #[test]
+    fn j_k_type_into_text_fields() {
+        let mut app = App::new(Config::default());
+        let form = CreateForm::new("claude", &[]); // field = Name
+        app.mode = Mode::Create(form);
+        app.handle_key(key('j'));
+        app.handle_key(key('k'));
+        assert_eq!(cform(&app).name, "jk");
+    }
+
+    #[test]
+    fn prefilled_submit_with_worktree_carries_spec() {
         let dir = std::env::temp_dir().to_string_lossy().to_string();
         let mut app = app_with(vec![at("s", "/p")]);
         let mut form = CreateForm::for_project(&dir, "claude", &[]);
@@ -3174,9 +3419,8 @@ mod tests {
         form.branches = vec!["main".into()];
         form.current_branch = Some("main".into());
         form.base_index = 0;
-        form.branch_input = "feat".into();
-        form.refresh_branch_entries(); // sole Create row, selected
-        form.field = CreateField::Base; // last step in the + create flow
+        form.new_branch = "feat".into();
+        form.field = CreateField::Agent;
         app.mode = Mode::Create(form);
         let act = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         match act {
@@ -3214,19 +3458,14 @@ mod tests {
     fn prefilled_step_indicator_counts() {
         // Non-repo dir → no Branch step: name, terminal.
         let mut form = CreateForm::for_project("/home/u/proj", "claude", &[]);
-        assert_eq!(form.total_steps(), 2);
+        assert_eq!(form.total_steps(), 4); // name, terminal, worktree, agent
         assert_eq!(form.step(), 1);
-        form.field = CreateField::Terminal;
-        assert_eq!(form.step(), 2);
-        // Seed branches + a + create row: name, terminal, branch, base.
-        form.branches = vec!["main".into()];
-        form.current_branch = Some("main".into());
-        form.branch_input = "new".into();
-        form.refresh_branch_entries();
-        assert!(form.branch_is_new());
-        assert_eq!(form.total_steps(), 4);
-        form.field = CreateField::Base;
-        assert_eq!(form.step(), 4);
+        form.field = CreateField::Worktree;
+        assert_eq!(form.step(), 3);
+        form.worktree = true;
+        assert_eq!(form.total_steps(), 6); // + base, branch
+        form.field = CreateField::Branch;
+        assert_eq!(form.step(), 5);
     }
 
     #[test]
@@ -3414,13 +3653,13 @@ mod tests {
     }
 
     #[test]
-    fn left_right_cycles_base_branch() {
+    fn tab_cycles_base_branch() {
         let mut app = App::new(Config::default());
         let mut form = CreateForm::new("claude", &[]);
         form.branches = vec!["main".into(), "dev".into()];
         form.field = CreateField::Base;
         app.mode = Mode::Create(form);
-        app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         match &app.mode {
             Mode::Create(f) => assert_eq!(f.base_index, 1),
             _ => panic!(),
@@ -3428,31 +3667,68 @@ mod tests {
     }
 
     #[test]
-    fn dir_enter_advances_to_terminal_step() {
+    fn worktree_off_skips_base_and_branch() {
+        let mut form = CreateForm::new("claude", &[]);
+        form.field = CreateField::Worktree;
+        assert!(!form.worktree);
+        form.advance(); // toggle off -> straight to Agent
+        assert_eq!(form.field, CreateField::Agent);
+    }
+
+    #[test]
+    fn worktree_on_visits_base_and_branch() {
+        if std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let repo = temp_git_repo("visits");
+        let mut form = CreateForm::new("claude", &[]);
+        form.field = CreateField::Worktree;
+        form.dir = repo.to_str().unwrap().to_string();
+        form.toggle_worktree(); // turn on
+        assert!(form.worktree);
+        form.advance();
+        assert_eq!(form.field, CreateField::Base);
+        form.advance();
+        assert_eq!(form.field, CreateField::Branch);
+        form.advance();
+        assert_eq!(form.field, CreateField::Agent);
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn step_count_grows_with_worktree() {
+        let mut form = CreateForm::new("claude", &[]);
+        assert_eq!(form.total_steps(), 5);
+        form.worktree = true;
+        assert_eq!(form.total_steps(), 7);
+    }
+
+    #[test]
+    fn dir_tab_cycles_candidates_and_right_descends() {
+        let base = std::env::temp_dir().join(format!("cm_tab_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("sub_a")).unwrap();
+        std::fs::create_dir_all(base.join("sub_b")).unwrap();
+
         let mut app = App::new(Config::default());
-        app.mode = Mode::Create(CreateForm::new("claude", &[]));
-        // Name step: type a name, Enter -> Dir.
-        for c in "iso".chars() {
-            app.handle_key(key(c));
-        }
-        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        match &app.mode {
-            Mode::Create(f) => assert_eq!(f.field, CreateField::Dir),
-            _ => panic!("expected Dir step"),
-        }
-        // Dir step: set an existing dir, Enter -> Terminal (NOT Agent).
-        if let Mode::Create(f) = &mut app.mode {
-            f.dir = "/tmp".into();
-        }
-        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        match &app.mode {
-            Mode::Create(f) => assert_eq!(
-                f.field,
-                CreateField::Terminal,
-                "Dir Enter must advance to the Terminal step, not skip it"
-            ),
-            _ => panic!("expected Terminal step"),
-        }
+        let mut form = CreateForm::new("claude", &[]);
+        form.field = CreateField::Dir;
+        form.dir = format!("{}/", base.display());
+        form.refresh_dir_entries();
+        app.mode = Mode::Create(form);
+
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(cform(&app).dir_selected, 1);
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)); // wraps
+        assert_eq!(cform(&app).dir_selected, 0);
+        app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(cform(&app).dir, format!("{}/sub_a/", base.display()));
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -3845,32 +4121,220 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_x_clears_the_composer_buffer() {
-        let mut app = app_with_two_sessions();
-        app.drafts.insert("a".into(), "old draft".into());
-        app.selected = 0;
-        app.handle_key(key('i'));
-        app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
-        match &app.mode {
-            Mode::Reply(f) => assert_eq!(f.area.buffer, ""),
-            other => panic!("expected Reply, got {other:?}"),
-        }
-        // Esc after the wipe drops the stored draft too.
-        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        assert!(!app.drafts.contains_key("a"));
+    fn model_list_visible_only_for_claude_agent() {
+        let mut form = CreateForm::new("claude", &["codex".into()]);
+        assert!(form.model_list_visible());
+        form.cycle_agent(1); // codex
+        assert!(!form.model_list_visible());
+        // A custom command whose binary is claude still gets the list.
+        form.agent = "claude --dangerously-skip-permissions".into();
+        assert!(form.model_list_visible());
+        form.terminal = true;
+        assert!(!form.model_list_visible());
     }
 
     #[test]
-    fn reply_ctrl_chords_work_on_cyrillic_layout() {
-        // Physical 'x' emits 'ч' on a Russian layout; ctrl+ч must still clear.
-        let mut app = app_with_two_sessions();
-        app.selected = 0;
-        app.handle_key(key('i'));
-        app.handle_key(key('п'));
-        app.handle_key(KeyEvent::new(KeyCode::Char('ч'), KeyModifiers::CONTROL));
-        match &app.mode {
-            Mode::Reply(f) => assert_eq!(f.area.buffer, ""),
-            other => panic!("expected Reply, got {other:?}"),
+    fn model_down_enters_walks_and_exits_list() {
+        let mut form = CreateForm::new("claude", &[]);
+        assert!(form.model_down()); // agent row → opus
+        assert_eq!(form.model_index, Some(0));
+        assert!(form.model_down()); // opus → sonnet
+        assert!(form.model_down()); // sonnet → haiku
+        assert_eq!(form.model_index, Some(2));
+        // Past the last model: false → caller advances; selection survives.
+        assert!(!form.model_down());
+        assert_eq!(form.model_index, Some(2));
+    }
+
+    #[test]
+    fn model_down_is_noop_for_non_claude() {
+        let mut form = CreateForm::new("codex", &[]);
+        assert!(!form.model_down());
+        assert_eq!(form.model_index, None);
+    }
+
+    #[test]
+    fn model_up_returns_to_agent_row_and_resets() {
+        let mut form = CreateForm::new("claude", &[]);
+        form.model_index = Some(1);
+        form.effort_index = 2;
+        assert!(form.model_up()); // sonnet → opus, effort resets
+        assert_eq!(form.model_index, Some(0));
+        assert_eq!(form.effort_index, 0);
+        assert!(form.model_up()); // opus → agent row (auto)
+        assert_eq!(form.model_index, None);
+        assert!(!form.model_up()); // already on the agent row
+    }
+
+    #[test]
+    fn effort_slider_clamps_per_model() {
+        let mut form = CreateForm::new("claude", &[]);
+        form.model_index = Some(0); // opus: auto low medium high xhigh max
+        form.cycle_effort(-1);
+        assert_eq!(form.effort_index, 0); // clamped at auto
+        for _ in 0..10 {
+            form.cycle_effort(1);
+        }
+        assert_eq!(form.effort_index, 5); // clamped at max
+        form.model_index = Some(1); // sonnet: no xhigh → top index 4
+        form.effort_index = 0;
+        for _ in 0..10 {
+            form.cycle_effort(1);
+        }
+        assert_eq!(form.effort_index, 4);
+        assert_eq!(form.selected_effort(), Some("max"));
+        form.model_index = Some(2); // haiku: only auto, slider is a no-op
+        form.effort_index = 0;
+        form.cycle_effort(1);
+        assert_eq!(form.effort_index, 0);
+    }
+
+    #[test]
+    fn selected_model_and_effort_map_to_flags() {
+        let mut form = CreateForm::new("claude", &[]);
+        assert_eq!(form.model_flags(), (None, None)); // agent row = auto
+        form.model_index = Some(0);
+        assert_eq!(form.model_flags(), (Some("opus"), None)); // auto effort
+        form.effort_index = 3;
+        assert_eq!(form.model_flags(), (Some("opus"), Some("high")));
+        form.terminal = true;
+        assert_eq!(form.model_flags(), (None, None)); // terminal drops flags
+    }
+
+    #[test]
+    fn cycle_agent_resets_model_selection() {
+        let mut form = CreateForm::new("claude", &["codex".into()]);
+        form.model_index = Some(1);
+        form.effort_index = 2;
+        form.cycle_agent(1);
+        assert_eq!(form.model_index, None);
+        assert_eq!(form.effort_index, 0);
+    }
+
+    #[test]
+    fn switch_to_custom_clears_agent_and_model() {
+        let mut form = CreateForm::new("claude", &[]);
+        form.model_index = Some(0);
+        form.switch_to_custom();
+        assert!(form.agent_is_custom());
+        assert_eq!(form.agent, "");
+        assert_eq!(form.model_index, None);
+    }
+
+    #[test]
+    fn base_matches_filters_case_insensitive_substring() {
+        let mut form = CreateForm::new("claude", &[]);
+        form.base_branches = vec!["main".into(), "dev".into(), "Feature/X".into()];
+        assert_eq!(form.base_matches().len(), 3); // empty filter = all
+        form.base_filter = "Eat".into();
+        assert_eq!(form.base_matches(), vec!["Feature/X".to_string()]);
+        form.base_filter = "zzz".into();
+        assert!(form.base_matches().is_empty());
+    }
+
+    #[test]
+    fn base_select_wraps_over_matches() {
+        let mut form = CreateForm::new("claude", &[]);
+        form.base_branches = vec!["main".into(), "dev".into(), "feature".into()];
+        form.base_filter = "e".into(); // dev, feature
+        form.base_select(1);
+        assert_eq!(form.selected_base().as_deref(), Some("feature"));
+        form.base_select(1); // wraps
+        assert_eq!(form.selected_base().as_deref(), Some("dev"));
+        form.base_select(-1);
+        assert_eq!(form.selected_base().as_deref(), Some("feature"));
+    }
+
+    #[test]
+    fn base_filter_edit_resets_highlight() {
+        let mut form = CreateForm::new("claude", &[]);
+        form.base_branches = vec!["main".into(), "dev".into()];
+        form.base_select(1);
+        assert_eq!(form.base_index, 1);
+        form.base_filter_push('d');
+        assert_eq!(form.base_index, 0);
+        form.base_select(1);
+        form.base_filter_pop();
+        assert_eq!(form.base_index, 0); // pop resets the highlight too
+    }
+
+    #[test]
+    fn build_create_uses_highlighted_base_match() {
+        let mut form = CreateForm::new("claude", &[]);
+        form.name = "ok".into();
+        form.dir = "/tmp".into();
+        form.worktree = true;
+        form.new_branch = "feat-y".into();
+        form.base_branches = vec!["main".into(), "dev".into()];
+        form.base_filter = "de".into();
+        match build_create_action(&form, &[]) {
+            Ok(Action::Create {
+                worktree: Some(WorktreeSpec::New { base, branch }),
+                ..
+            }) => {
+                assert_eq!(base, "dev");
+                assert_eq!(branch, "feat-y");
+            }
+            other => panic!("expected worktree create, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_create_rejects_unmatched_base_filter() {
+        let mut form = CreateForm::new("claude", &[]);
+        form.name = "ok".into();
+        form.dir = "/tmp".into();
+        form.worktree = true;
+        form.new_branch = "feat-y".into();
+        form.base_branches = vec!["main".into()];
+        form.base_filter = "nope".into();
+        assert!(build_create_action(&form, &[]).is_err());
+    }
+
+    #[test]
+    fn compose_agent_command_appends_flags() {
+        assert_eq!(compose_agent_command("claude", None, None), "claude");
+        assert_eq!(
+            compose_agent_command("claude", Some("opus"), None),
+            "claude --model opus"
+        );
+        assert_eq!(
+            compose_agent_command("claude", Some("sonnet"), Some("high")),
+            "claude --model sonnet --effort high"
+        );
+        assert_eq!(
+            compose_agent_command("claude --dangerously-skip-permissions", Some("haiku"), None),
+            "claude --dangerously-skip-permissions --model haiku"
+        );
+    }
+
+    #[test]
+    fn build_create_carries_model_and_effort() {
+        let mut form = CreateForm::new("claude", &[]);
+        form.name = "ok".into();
+        form.dir = "/tmp".into();
+        form.model_index = Some(0); // opus
+        form.effort_index = 3; // high
+        match build_create_action(&form, &[]) {
+            Ok(Action::Create { model, effort, .. }) => {
+                assert_eq!(model.as_deref(), Some("opus"));
+                assert_eq!(effort.as_deref(), Some("high"));
+            }
+            other => panic!("expected Create, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_create_auto_model_has_no_flags() {
+        let mut form = CreateForm::new("claude", &[]);
+        form.name = "ok".into();
+        form.dir = "/tmp".into();
+        match build_create_action(&form, &[]) {
+            Ok(Action::Create { model, effort, .. }) => {
+                assert_eq!(model, None);
+                assert_eq!(effort, None);
+            }
+            other => panic!("expected Create, got {other:?}"),
         }
     }
 }
