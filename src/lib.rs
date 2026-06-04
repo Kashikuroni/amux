@@ -11,4 +11,5 @@ pub mod theme;
 pub mod timeutil;
 pub mod tmux;
 pub mod ui;
+pub mod update;
 pub mod usage;

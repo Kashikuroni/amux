@@ -400,7 +400,7 @@ fn error_detail(body: &[u8]) -> String {
     // Fallback: raw bytes, printable ASCII only, capped at 80 chars.
     let snippet: String = body
         .iter()
-        .filter(|&&b| b >= 0x20 && b < 0x7f)
+        .filter(|&&b| (0x20..0x7f).contains(&b))
         .take(80)
         .map(|&b| b as char)
         .collect();
