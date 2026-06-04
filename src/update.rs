@@ -161,7 +161,11 @@ fn curl_to(url: &str, dest: &Path) -> bool {
 /// Compares the file's sha256 against the first token of the `.sha256` file.
 fn sha256_matches(file: &Path, sha_file: &Path) -> Result<bool, String> {
     let expected = std::fs::read_to_string(sha_file).map_err(|e| format!("read checksum: {e}"))?;
-    let expected = expected.split_whitespace().next().unwrap_or("").to_lowercase();
+    let expected = expected
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_lowercase();
     if expected.len() != 64 {
         return Err("malformed checksum file".into());
     }

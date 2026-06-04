@@ -78,7 +78,18 @@ fn items_for(mode: &Mode) -> Vec<Item> {
                 ("esc", "exit", false),
             ],
         },
-        Mode::ConfirmUpdate(_) => vec![("esc", "close", false)], // full hints in Task 6
+        Mode::ConfirmUpdate(m) => match &m.stage {
+            None => vec![
+                ("y", "install", true),
+                ("n", "not now", false),
+                ("esc", "dismiss", false),
+            ],
+            Some(crate::update::UpdateStage::Done(_)) => {
+                vec![("r", "restart", true), ("esc", "later", false)]
+            }
+            Some(crate::update::UpdateStage::Failed(_)) => vec![("esc", "close", false)],
+            Some(_) => vec![("esc", "hide", false)],
+        },
     }
 }
 
@@ -126,6 +137,28 @@ mod tests {
     use crate::ui::testutil::buf_to_string;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+
+    #[test]
+    fn update_footer_follows_stage() {
+        use crate::update::{UpdateInfo, UpdateStage};
+        let mk = |stage| {
+            let mut app = App::new(Config::default());
+            app.mode = Mode::ConfirmUpdate(crate::app::UpdateModal {
+                info: UpdateInfo {
+                    version: "9.9.9".into(),
+                    url: String::new(),
+                },
+                stage,
+            });
+            let mut t = Terminal::new(TestBackend::new(120, 6)).unwrap();
+            t.draw(|f| render(f, f.area(), &app)).unwrap();
+            buf_to_string(t.backend().buffer())
+        };
+        assert!(mk(None).contains("y install"));
+        assert!(mk(Some(UpdateStage::Downloading)).contains("esc hide"));
+        assert!(mk(Some(UpdateStage::Done("9.9.9".into()))).contains("r restart"));
+        assert!(mk(Some(UpdateStage::Failed("x".into()))).contains("esc close"));
+    }
 
     #[test]
     fn list_footer_spells_keys_without_modifier_glyphs() {

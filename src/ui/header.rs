@@ -46,6 +46,16 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         Span::styled(format!("   {waiting} waiting"), status_style(INDIGO)),
         Span::styled(format!("   {idle} idle"), status_style(Color::Red)),
     ]);
+    if let Some(u) = &app.update {
+        spans.push(Span::styled(
+            format!("  {}  ", th::SEP),
+            Style::default().fg(th::DIM),
+        ));
+        spans.push(Span::styled(
+            format!("↑ v{}", u.version),
+            Style::default().fg(th::AMBER).add_modifier(Modifier::DIM),
+        ));
+    }
     if !clock.is_empty() {
         let left_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
         let right_width = clock.chars().count();
@@ -72,6 +82,19 @@ mod tests {
     use ratatui::Terminal;
 
     use crate::ui::testutil::buf_to_string;
+
+    #[test]
+    fn header_shows_update_badge() {
+        let mut app = App::new(crate::config::Config::default());
+        app.update = Some(crate::update::UpdateInfo {
+            version: "9.9.9".into(),
+            url: String::new(),
+        });
+        let mut t = Terminal::new(TestBackend::new(120, 4)).unwrap();
+        t.draw(|f| render(f, f.area(), &app)).unwrap();
+        let s = buf_to_string(t.backend().buffer());
+        assert!(s.contains("↑ v9.9.9"), "update badge:\n{s}");
+    }
 
     #[test]
     fn header_omits_limits_always() {

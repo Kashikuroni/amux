@@ -5,6 +5,7 @@ mod header;
 mod modal_help;
 mod modal_kill;
 mod modal_new;
+mod modal_update;
 mod modal_usage_log;
 mod note;
 mod preview;
@@ -59,7 +60,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         // No modal: these render over the plain list (the SESSIONS label shows
         // the select-mode prompt).
         Mode::List | Mode::Filter | Mode::SelectSession | Mode::Note(_) => {}
-        Mode::ConfirmUpdate(_) => {} // modal rendered in Task 6
+        Mode::ConfirmUpdate(m) => modal_update::render(f, m),
     }
 }
 

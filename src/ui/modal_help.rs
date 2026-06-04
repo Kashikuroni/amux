@@ -43,7 +43,14 @@ pub fn render(f: &mut Frame) {
                 ("auto", "refresh on interval"),
             ],
         ),
-        ("App", &[("?", "help"), ("L", "usage log"), ("q", "quit (sessions stay)")]),
+        (
+            "App",
+            &[
+                ("?", "help"),
+                ("L", "usage log"),
+                ("q", "quit (sessions stay)"),
+            ],
+        ),
     ];
     let mut lines = vec![
         Line::from(vec![

@@ -33,7 +33,10 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(th::AMBER),
         ),
         Span::styled(title.to_string(), Style::default().fg(th::TEXT_BOLD)),
-        Span::styled(format!("  {age}"), Style::default().add_modifier(Modifier::DIM)),
+        Span::styled(
+            format!("  {age}"),
+            Style::default().add_modifier(Modifier::DIM),
+        ),
     ];
     let right = if sel.is_some_and(|s| is_claude(&s.agent)) {
         crate::usage::account_right_spans(
