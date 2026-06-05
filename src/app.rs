@@ -2337,29 +2337,33 @@ pub fn abbreviate_path(path: &str) -> String {
 /// validated). Shared by every submit path so the assembly lives in one place.
 pub fn build_create_action(form: &CreateForm, existing: &[String]) -> Result<Action, String> {
     validate_create(&form.name, &form.dir, existing)?;
-    let worktree = if let Some(entry) = form.branch_entries.get(form.branch_selected) {
-        match entry {
-            BranchEntry::Existing(branch)
-                if form.current_branch.as_deref() == Some(branch.as_str()) =>
-            {
-                None
-            }
-            BranchEntry::Existing(branch) => Some(WorktreeSpec::Existing {
-                branch: branch.clone(),
-            }),
-            BranchEntry::Create(branch) => {
-                validate_branch(branch)?;
-                let base = match form.selected_base() {
-                    Some(b) => b,
-                    // Parity with the old picker: an empty repo submits an empty base.
-                    None if form.base_branches.is_empty() => String::new(),
-                    None => return Err(format!("no branch matches '{}'", form.base_filter)),
-                };
-                Some(WorktreeSpec::New {
-                    base,
+    let worktree = if form.worktree {
+        if let Some(entry) = form.branch_entries.get(form.branch_selected) {
+            match entry {
+                BranchEntry::Existing(branch)
+                    if form.current_branch.as_deref() == Some(branch.as_str()) =>
+                {
+                    None
+                }
+                BranchEntry::Existing(branch) => Some(WorktreeSpec::Existing {
                     branch: branch.clone(),
-                })
+                }),
+                BranchEntry::Create(branch) => {
+                    validate_branch(branch)?;
+                    let base = match form.selected_base() {
+                        Some(b) => b,
+                        // Parity with the old picker: an empty repo submits an empty base.
+                        None if form.base_branches.is_empty() => String::new(),
+                        None => return Err(format!("no branch matches '{}'", form.base_filter)),
+                    };
+                    Some(WorktreeSpec::New {
+                        base,
+                        branch: branch.clone(),
+                    })
+                }
             }
+        } else {
+            None
         }
     } else {
         None
@@ -3257,6 +3261,7 @@ mod tests {
         f.name = "s1".into();
         f.dir = "/tmp".into();
         f.branch_selected = 1; // "dev"
+        f.worktree = true;
         match build_create_action(&f, &[]) {
             Ok(Action::Create {
                 worktree: Some(WorktreeSpec::Existing { branch }),
@@ -3275,6 +3280,7 @@ mod tests {
         f.refresh_branch_entries();
         f.branch_selected = f.branch_entries.len() - 1; // the Create entry
         f.base_index = 1; // base = "dev"
+        f.worktree = true;
         match build_create_action(&f, &[]) {
             Ok(Action::Create {
                 worktree: Some(WorktreeSpec::New { base, branch }),
@@ -3294,6 +3300,7 @@ mod tests {
         f.dir = "/tmp".into();
         f.branch_input = "../escape".into();
         f.refresh_branch_entries();
+        f.worktree = true;
         assert!(f.branch_is_new());
         assert!(build_create_action(&f, &[]).is_err());
     }
@@ -3689,6 +3696,7 @@ mod tests {
         form.branch_input = "feat".into();
         form.refresh_branch_entries();
         assert!(form.branch_is_new());
+        form.worktree = true;
         form.field = CreateField::Agent;
         app.mode = Mode::Create(form);
         let act = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
@@ -4042,6 +4050,7 @@ mod tests {
         form.base_index = 0;
         form.branch_input = "iso-branch".into();
         form.refresh_branch_entries(); // sole Create row, selected
+        form.worktree = true;
         form.field = CreateField::Agent;
         app.mode = Mode::Create(form);
         let action = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
@@ -4564,6 +4573,7 @@ mod tests {
         form.branch_input = "feat-y".into();
         form.refresh_branch_entries(); // + create row selected
         form.base_filter = "de".into();
+        form.worktree = true;
         match build_create_action(&form, &[]) {
             Ok(Action::Create {
                 worktree: Some(WorktreeSpec::New { base, branch }),
@@ -4584,6 +4594,7 @@ mod tests {
         form.branch_input = "feat-y".into();
         form.refresh_branch_entries(); // + create row selected
         form.base_filter = "nope".into();
+        form.worktree = true;
         assert!(build_create_action(&form, &[]).is_err());
     }
 
@@ -4718,6 +4729,23 @@ mod tests {
             assert_eq!(f.field, CreateField::Dir, "↑ must not leave Dir step");
         } else {
             panic!("lost Create mode");
+        }
+    }
+
+    #[test]
+    fn build_create_action_no_worktree_when_flag_false() {
+        let mut form = CreateForm::new("claude", &[]);
+        form.name = "mysession".to_string();
+        form.dir = "/tmp".to_string(); // must exist
+        form.branches = vec!["main".to_string(), "dev".to_string()];
+        form.current_branch = Some("main".to_string());
+        form.refresh_branch_entries(); // populates branch_entries with main, dev
+        // worktree is false (default) — no WorktreeSpec should be emitted
+        let action = build_create_action(&form, &[]).unwrap();
+        if let Action::Create { worktree, .. } = action {
+            assert!(worktree.is_none(), "worktree must be None when form.worktree=false");
+        } else {
+            panic!("expected Action::Create");
         }
     }
 }
