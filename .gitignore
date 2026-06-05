@@ -9,6 +9,7 @@
 # Superpowers internal design/plan artifacts — never publish these. The leading
 # `**/` matches from any directory in the repo, not just the root.
 **/docs/superpowers/
+**/docs/
 **/specs/
 **/plans/
 
@@ -24,3 +25,4 @@
 # Environment / secrets
 .env
 *.local
+
