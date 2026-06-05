@@ -493,7 +493,7 @@ fn handle_action(
             }
             app.refresh();
         }
-        Action::PromoteWorktree { name, branch, has_stash } => {
+        Action::PromoteWorktree { name, branch } => {
             let session = app.sessions.iter().find(|s| s.name == name);
             let Some(s) = session else {
                 app.error = Some(format!("session '{name}' not found"));
@@ -509,7 +509,10 @@ fn handle_action(
                     return Ok(());
                 }
             };
-            if has_stash {
+            // Re-check dirtiness at dispatch time (not at modal-open time) so
+            // the decision reflects the actual worktree state when the user confirms.
+            let dirty = am::git::is_dirty(&worktree_dir);
+            if dirty {
                 if let Err(e) = am::git::stash_push(&worktree_dir) {
                     app.error = Some(format!("git stash failed: {e}"));
                     app.refresh();
@@ -517,7 +520,7 @@ fn handle_action(
                 }
             }
             if let Err(e) = am::git::remove_worktree(&repo_root, &worktree_dir) {
-                let msg = if has_stash {
+                let msg = if dirty {
                     format!("worktree removal failed (stash preserved as stash@{{0}}): {e}")
                 } else {
                     format!("worktree removal failed — session left in worktree: {e}")
@@ -529,7 +532,7 @@ fn handle_action(
             fn sh_squote(s: &str) -> String {
                 format!("'{}'", s.replace('\'', "'\\''"))
             }
-            let cmd = if has_stash {
+            let cmd = if dirty {
                 format!("cd {} && git checkout {} && git stash pop", sh_squote(&repo_root), sh_squote(&branch))
             } else {
                 format!("cd {} && git checkout {}", sh_squote(&repo_root), sh_squote(&branch))
@@ -539,25 +542,9 @@ fn handle_action(
             }
             app.refresh();
         }
-        Action::DeleteBranch { name, branch } => {
-            let repo_root = app
-                .sessions
-                .iter()
-                .find(|s| s.name == name)
-                .and_then(|s| {
-                    s.worktree_repo
-                        .clone()
-                        .or_else(|| am::git::repo_root(&s.dir))
-                });
-            match repo_root {
-                None => {
-                    app.error = Some(format!("could not determine repo root for '{name}'"));
-                }
-                Some(root) => {
-                    if let Err(e) = am::git::delete_branch(&root, &branch) {
-                        app.error = Some(e.to_string());
-                    }
-                }
+        Action::DeleteBranch { branch, repo_root, .. } => {
+            if let Err(e) = am::git::delete_branch(&repo_root, &branch) {
+                app.error = Some(e.to_string());
             }
             app.refresh();
         }

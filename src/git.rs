@@ -292,8 +292,9 @@ pub fn delete_branch(repo_root: &str, branch: &str) -> std::io::Result<()> {
     git_run(repo_root, &["branch", "-d", branch])
 }
 
-/// List local branches that are fully merged into HEAD, excluding protected names
-/// and the currently checked-out branch.
+/// List local branches that are fully merged into HEAD, excluding the currently
+/// checked-out branch. Protected branches (see `PROTECTED_BRANCHES`) are included
+/// so callers can display them as non-selectable; they are NOT pre-filtered here.
 pub fn list_merged_branches(repo_root: &str) -> Vec<String> {
     let Some(out) = git_out(repo_root, &["branch", "--merged", "HEAD", "--format=%(refname:short)"]) else {
         return Vec::new();
@@ -304,7 +305,6 @@ pub fn list_merged_branches(repo_root: &str) -> Vec<String> {
         .map(|l| l.trim().to_string())
         .filter(|b| !b.is_empty())
         .filter(|b| b != &current)
-        .filter(|b| !PROTECTED_BRANCHES.contains(&b.as_str()))
         .collect()
 }
 
@@ -806,7 +806,7 @@ mod tests {
     }
 
     #[test]
-    fn list_merged_branches_excludes_protected_and_current() {
+    fn list_merged_branches_excludes_current_includes_protected() {
         if Command::new("git").arg("--version").output().is_err() { return; }
         let dir = temp_repo("listmerged");
         let root = dir.to_str().unwrap();
@@ -822,7 +822,9 @@ mod tests {
             .args(["merge", "--no-ff", "-m", "merge done", "done"]).output().unwrap();
         let merged = list_merged_branches(root);
         assert!(merged.contains(&"done".to_string()), "merged branch must appear");
-        assert!(!merged.contains(&"main".to_string()), "main must be excluded");
+        // current branch (main, checked out) is excluded; other protected branches
+        // that are merged would appear so callers can display them as non-selectable
+        assert!(!merged.contains(&"main".to_string()), "checked-out branch must be excluded");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
