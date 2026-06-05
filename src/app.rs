@@ -1188,7 +1188,7 @@ impl App {
                 }
                 None
             }
-            ModeKind::Git => None,
+            ModeKind::Git => self.handle_git_key(key),
         }
     }
 
@@ -1342,7 +1342,7 @@ impl App {
                 self.selected = 0;
                 self.mode = Mode::Filter;
             }
-            KeyCode::Char('g') => {
+            KeyCode::Char('g') if !ctrl => {
                 self.select_first();
                 self.update_preview();
             }
@@ -1354,6 +1354,75 @@ impl App {
             KeyCode::PageDown => self.preview_scroll_down(10),
             KeyCode::Char('k') if ctrl => self.preview_scroll_up(10),
             KeyCode::Char('j') if ctrl => self.preview_scroll_down(10),
+            KeyCode::Char('g') if ctrl => {
+                if let Some(s) = self.selected_session() {
+                    let root = session_root(s).to_string();
+                    if is_worktree(s) {
+                        let branch = s.git.as_ref().map(|g| g.branch.clone()).unwrap_or_default();
+                        let has_stash = crate::git::is_dirty(&s.dir);
+                        self.mode = Mode::Git(GitForm {
+                            session_name: s.name.clone(),
+                            branch,
+                            repo_root: root,
+                            worktree_path: Some(s.dir.clone()),
+                            has_stash,
+                            action: GitAction::Promote,
+                            branches: vec![],
+                            selected: std::collections::HashSet::new(),
+                            cursor: 0,
+                        });
+                    } else if let Some(g) = &s.git {
+                        let branch = g.branch.clone();
+                        if !crate::git::PROTECTED_BRANCHES.contains(&branch.as_str()) {
+                            self.mode = Mode::Git(GitForm {
+                                session_name: s.name.clone(),
+                                branch,
+                                repo_root: root,
+                                worktree_path: None,
+                                has_stash: false,
+                                action: GitAction::DeleteBranch,
+                                branches: vec![],
+                                selected: std::collections::HashSet::new(),
+                                cursor: 0,
+                            });
+                        }
+                    }
+                }
+            }
+            KeyCode::Char('l') if ctrl => {
+                if let Some(s) = self.selected_session() {
+                    let root = session_root(s).to_string();
+                    let raw = crate::git::list_merged_branches(&root);
+                    if raw.is_empty() {
+                        self.error = Some("no merged branches found".into());
+                    } else {
+                        let branches: Vec<BranchItem> = raw
+                            .into_iter()
+                            .map(|name| {
+                                let protected = crate::git::PROTECTED_BRANCHES.contains(&name.as_str());
+                                BranchItem { name, protected }
+                            })
+                            .collect();
+                        let selected: std::collections::HashSet<usize> = branches
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, b)| !b.protected)
+                            .map(|(i, _)| i)
+                            .collect();
+                        self.mode = Mode::Git(GitForm {
+                            session_name: s.name.clone(),
+                            branch: String::new(),
+                            repo_root: root,
+                            worktree_path: None,
+                            has_stash: false,
+                            action: GitAction::BranchCleanup,
+                            branches,
+                            selected,
+                            cursor: 0,
+                        });
+                    }
+                }
+            }
             KeyCode::End => self.preview_to_end(),
             // Resize the split: [ / ] small step; { / } or Ctrl+←/→ bigger step.
             KeyCode::Char('[') => self.resize_split(-3),
@@ -1567,6 +1636,80 @@ impl App {
             }
             KeyCode::Char('n') | KeyCode::Esc => {}
             _ => self.mode = Mode::ConfirmDelete(form),
+        }
+        None
+    }
+
+    fn handle_git_key(&mut self, key: KeyEvent) -> Option<Action> {
+        let Mode::Git(mut form) = std::mem::replace(&mut self.mode, Mode::List) else {
+            return None;
+        };
+        match form.action {
+            GitAction::Promote | GitAction::DeleteBranch => match latin_code(key.code) {
+                KeyCode::Char('y') => {
+                    return Some(match form.action {
+                        GitAction::Promote => Action::PromoteWorktree {
+                            name: form.session_name,
+                            branch: form.branch,
+                        },
+                        GitAction::DeleteBranch => Action::DeleteBranch {
+                            name: form.session_name,
+                            branch: form.branch,
+                        },
+                        _ => unreachable!(),
+                    });
+                }
+                KeyCode::Char('n') | KeyCode::Esc => {}
+                _ => self.mode = Mode::Git(form),
+            },
+            GitAction::BranchCleanup => match latin_code(key.code) {
+                KeyCode::Char('y') => {
+                    let mut branches: Vec<String> = form
+                        .selected
+                        .iter()
+                        .map(|&i| form.branches[i].name.clone())
+                        .collect();
+                    branches.sort();
+                    if !branches.is_empty() {
+                        return Some(Action::CleanupBranches {
+                            repo_root: form.repo_root,
+                            branches,
+                        });
+                    }
+                }
+                KeyCode::Char(' ') => {
+                    let i = form.cursor;
+                    if i < form.branches.len() && !form.branches[i].protected {
+                        if form.selected.contains(&i) {
+                            form.selected.remove(&i);
+                        } else {
+                            form.selected.insert(i);
+                        }
+                    }
+                    self.mode = Mode::Git(form);
+                }
+                KeyCode::Char('a') => {
+                    form.selected = form
+                        .branches
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, b)| !b.protected)
+                        .map(|(i, _)| i)
+                        .collect();
+                    self.mode = Mode::Git(form);
+                }
+                KeyCode::Char('j') | KeyCode::Down => {
+                    form.cursor =
+                        (form.cursor + 1).min(form.branches.len().saturating_sub(1));
+                    self.mode = Mode::Git(form);
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    form.cursor = form.cursor.saturating_sub(1);
+                    self.mode = Mode::Git(form);
+                }
+                KeyCode::Esc | KeyCode::Char('n') => {}
+                _ => self.mode = Mode::Git(form),
+            },
         }
         None
     }
@@ -4661,5 +4804,131 @@ mod tests {
         assert!(matches!(app.mode, Mode::List));
         app.set_update_stage(S::Done("9.9.9".into()));
         assert!(app.update.is_none(), "badge cleared even when hidden");
+    }
+
+    fn make_git_session(name: &str, dir: &str, worktree_repo: Option<&str>, branch: Option<&str>) -> crate::tmux::Session {
+        crate::tmux::Session {
+            name: name.into(),
+            dir: dir.into(),
+            cwd: dir.into(),
+            created: 0,
+            agent: String::new(),
+            status: crate::tmux::Status::Idle,
+            attached: false,
+            git: branch.map(|b| crate::git::GitInfo { branch: b.into(), added: 0, removed: 0 }),
+            worktree_repo: worktree_repo.map(|r| r.into()),
+        }
+    }
+
+    #[test]
+    fn ctrl_g_on_worktree_session_opens_promote_modal() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut app = App::new(Config::default());
+        let s = make_git_session("wt", "/proj/.worktrees/feat", Some("/proj"), Some("feat"));
+        app.sessions = vec![s];
+        app.selected = 0;
+        let key = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL);
+        app.handle_key(key);
+        assert!(
+            matches!(&app.mode, Mode::Git(f) if f.action == GitAction::Promote && f.branch == "feat"),
+            "Ctrl+g on worktree must open Promote modal, got {:?}", app.mode
+        );
+    }
+
+    #[test]
+    fn ctrl_g_on_normal_branch_session_opens_delete_modal() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut app = App::new(Config::default());
+        let s = make_git_session("br", "/proj", None, Some("feature/x"));
+        app.sessions = vec![s];
+        app.selected = 0;
+        let key = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL);
+        app.handle_key(key);
+        assert!(
+            matches!(&app.mode, Mode::Git(f) if f.action == GitAction::DeleteBranch && f.branch == "feature/x"),
+            "Ctrl+g on normal session must open DeleteBranch modal"
+        );
+    }
+
+    #[test]
+    fn ctrl_g_on_protected_branch_is_noop() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut app = App::new(Config::default());
+        let s = make_git_session("main-sess", "/proj", None, Some("main"));
+        app.sessions = vec![s];
+        app.selected = 0;
+        let key = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL);
+        app.handle_key(key);
+        assert!(
+            matches!(app.mode, Mode::List),
+            "Ctrl+g on protected branch must stay in List"
+        );
+    }
+
+    #[test]
+    fn git_modal_y_returns_promote_action() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut app = App::new(Config::default());
+        app.mode = Mode::Git(GitForm {
+            session_name: "wt".into(),
+            branch: "feat".into(),
+            repo_root: "/proj".into(),
+            worktree_path: Some("/proj/.worktrees/feat".into()),
+            has_stash: false,
+            action: GitAction::Promote,
+            branches: vec![],
+            selected: std::collections::HashSet::new(),
+            cursor: 0,
+        });
+        let key = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE);
+        let action = app.handle_key(key);
+        assert_eq!(
+            action,
+            Some(Action::PromoteWorktree { name: "wt".into(), branch: "feat".into() })
+        );
+    }
+
+    #[test]
+    fn git_modal_n_returns_to_list() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut app = App::new(Config::default());
+        app.mode = Mode::Git(GitForm {
+            session_name: "wt".into(),
+            branch: "feat".into(),
+            repo_root: "/proj".into(),
+            worktree_path: Some("/proj/.worktrees/feat".into()),
+            has_stash: false,
+            action: GitAction::Promote,
+            branches: vec![],
+            selected: std::collections::HashSet::new(),
+            cursor: 0,
+        });
+        let key = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE);
+        let action = app.handle_key(key);
+        assert_eq!(action, None);
+        assert!(matches!(app.mode, Mode::List));
+    }
+
+    #[test]
+    fn cleanup_space_toggles_selection() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut app = App::new(Config::default());
+        let mut selected = std::collections::HashSet::new();
+        selected.insert(0usize);
+        app.mode = Mode::Git(GitForm {
+            session_name: "s".into(),
+            branch: String::new(),
+            repo_root: "/proj".into(),
+            worktree_path: None,
+            has_stash: false,
+            action: GitAction::BranchCleanup,
+            branches: vec![BranchItem { name: "feat".into(), protected: false }],
+            selected,
+            cursor: 0,
+        });
+        let key = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE);
+        app.handle_key(key);
+        let Mode::Git(f) = &app.mode else { panic!("must stay in Git mode") };
+        assert!(!f.selected.contains(&0), "space must deselect");
     }
 }
