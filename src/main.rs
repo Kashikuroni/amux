@@ -532,11 +532,39 @@ fn handle_action(
             }
             app.refresh();
         }
-        Action::DeleteBranch { .. } => {
-            // Handled in Task 9.
+        Action::DeleteBranch { name, branch } => {
+            let repo_root = app
+                .sessions
+                .iter()
+                .find(|s| s.name == name)
+                .and_then(|s| {
+                    s.worktree_repo
+                        .clone()
+                        .or_else(|| am::git::repo_root(&s.dir))
+                });
+            match repo_root {
+                None => {
+                    app.error = Some(format!("could not determine repo root for '{name}'"));
+                }
+                Some(root) => {
+                    if let Err(e) = am::git::delete_branch(&root, &branch) {
+                        app.error = Some(e.to_string());
+                    }
+                }
+            }
+            app.refresh();
         }
-        Action::CleanupBranches { .. } => {
-            // Handled in Task 9.
+        Action::CleanupBranches { repo_root, branches } => {
+            let mut errors: Vec<String> = vec![];
+            for branch in &branches {
+                if let Err(e) = am::git::delete_branch(&repo_root, branch) {
+                    errors.push(format!("{branch}: {e}"));
+                }
+            }
+            if !errors.is_empty() {
+                app.error = Some(errors.join(" | "));
+            }
+            app.refresh();
         }
     }
     Ok(())
