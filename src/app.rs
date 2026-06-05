@@ -21,6 +21,7 @@ pub enum CreateField {
     Name,
     Dir,
     Terminal,
+    Worktree,
     Branch,
     Base,
     Agent,
@@ -65,6 +66,9 @@ pub struct CreateForm {
     /// True when the session should run a plain shell instead of an agent.
     /// When set, the Agent step is skipped and `$SHELL` is launched.
     pub terminal: bool,
+    /// True when the user wants to create/use a git worktree for this session.
+    /// When set, the Branch (and optionally Base) steps appear.
+    pub worktree: bool,
 }
 
 impl CreateForm {
@@ -98,6 +102,7 @@ impl CreateForm {
             base_filter: String::new(),
             prefilled: false,
             terminal: false,
+            worktree: false,
         }
     }
 
@@ -121,7 +126,7 @@ impl CreateForm {
             CreateField::Branch => &mut self.branch_input,
             CreateField::Agent => &mut self.agent,
             CreateField::Base => &mut self.base_filter,
-            CreateField::Terminal => &mut self.agent,
+            CreateField::Terminal | CreateField::Worktree => &mut self.agent,
         }
     }
 
@@ -135,9 +140,12 @@ impl CreateForm {
         }
         v.push(CreateField::Terminal);
         if !self.branches.is_empty() {
-            v.push(CreateField::Branch);
-            if self.branch_is_new() {
-                v.push(CreateField::Base);
+            v.push(CreateField::Worktree);
+            if self.worktree {
+                v.push(CreateField::Branch);
+                if self.branch_is_new() {
+                    v.push(CreateField::Base);
+                }
             }
         }
         if !self.terminal {
@@ -264,6 +272,16 @@ impl CreateForm {
     /// simply disappears from `field_sequence` when on.
     pub fn toggle_terminal(&mut self) {
         self.terminal = !self.terminal;
+    }
+
+    /// Flip the worktree toggle. When turning off, clears the branch input so
+    /// no stale branch lingers in the hidden Branch/Base steps.
+    pub fn toggle_worktree(&mut self) {
+        self.worktree = !self.worktree;
+        if !self.worktree {
+            self.branch_input.clear();
+            self.refresh_branch_entries();
+        }
     }
 
     /// Branches matching the typed filter (case-insensitive substring); the
@@ -1635,6 +1653,10 @@ impl App {
             // controls and otherwise stay available to text fields.
             CreateField::Terminal => match key.code {
                 KeyCode::Char(' ') | KeyCode::Left | KeyCode::Right => form.toggle_terminal(),
+                _ => {}
+            },
+            CreateField::Worktree => match key.code {
+                KeyCode::Char(' ') | KeyCode::Left | KeyCode::Right => form.toggle_worktree(),
                 _ => {}
             },
             // Base: branch search. Typing filters, Tab cycles the matches.
@@ -3174,12 +3196,26 @@ mod tests {
     #[test]
     fn sequence_includes_branch_with_repo_and_base_only_for_create() {
         let mut f = form_with_branches(&["main", "dev"], Some("main"));
+        // worktree=false (default): Worktree step present, Branch hidden.
         assert_eq!(
             f.field_sequence_for_test(),
             vec![
                 CreateField::Name,
                 CreateField::Dir,
                 CreateField::Terminal,
+                CreateField::Worktree,
+                CreateField::Agent
+            ]
+        );
+        // Enable worktree: Branch now appears.
+        f.worktree = true;
+        assert_eq!(
+            f.field_sequence_for_test(),
+            vec![
+                CreateField::Name,
+                CreateField::Dir,
+                CreateField::Terminal,
+                CreateField::Worktree,
                 CreateField::Branch,
                 CreateField::Agent
             ]
@@ -3194,6 +3230,7 @@ mod tests {
                 CreateField::Name,
                 CreateField::Dir,
                 CreateField::Terminal,
+                CreateField::Worktree,
                 CreateField::Branch,
                 CreateField::Base,
                 CreateField::Agent
@@ -3318,7 +3355,7 @@ mod tests {
 
         let f = CreateForm::for_project(d, "claude", &[]);
         assert_eq!(f.branches.first().map(String::as_str), Some("main"));
-        assert!(f.field_sequence_for_test().contains(&CreateField::Branch));
+        assert!(f.field_sequence_for_test().contains(&CreateField::Worktree));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3422,7 +3459,11 @@ mod tests {
         form.branch_input = "feat".into();
         form.refresh_branch_entries();
         assert!(form.branch_is_new());
+        // Enable worktree so Branch/Base steps appear.
+        form.worktree = true;
         form.field = CreateField::Terminal;
+        form.advance();
+        assert_eq!(form.field, CreateField::Worktree);
         form.advance();
         assert_eq!(form.field, CreateField::Branch);
         form.advance();
@@ -3476,6 +3517,23 @@ mod tests {
         assert!(form.terminal);
         form.toggle_terminal();
         assert!(!form.terminal);
+    }
+
+    #[test]
+    fn worktree_field_gates_branch_step() {
+        let mut form = CreateForm::new("claude", &[]);
+        form.branches = vec!["main".to_string(), "dev".to_string()];
+        form.current_branch = Some("main".to_string());
+        form.refresh_branch_entries();
+
+        // With worktree=false (default), Worktree step is present but Branch is not.
+        let seq = form.field_sequence_for_test();
+        assert!(seq.contains(&CreateField::Worktree), "Worktree step must be present when branches non-empty");
+        assert!(!seq.contains(&CreateField::Branch), "Branch step must be hidden when worktree=false");
+
+        form.worktree = true;
+        let seq = form.field_sequence_for_test();
+        assert!(seq.contains(&CreateField::Branch), "Branch step must appear when worktree=true");
     }
 
     #[test]
@@ -3673,16 +3731,18 @@ mod tests {
         assert_eq!(form.step(), 1);
         form.field = CreateField::Terminal;
         assert_eq!(form.step(), 2);
-        // A repo adds the Branch picker; the + create row adds Base.
+        // A repo adds the Worktree step; Branch/Base hidden until opted-in.
         form.branches = vec!["main".into()];
         form.current_branch = Some("main".into());
         form.refresh_branch_entries();
-        assert_eq!(form.total_steps(), 4); // + branch
+        assert_eq!(form.total_steps(), 4); // + worktree
+        // Enable worktree and type a new branch name → Branch + Base appear.
+        form.worktree = true;
         form.branch_input = "feat".into();
         form.refresh_branch_entries();
-        assert_eq!(form.total_steps(), 5); // + base for the new branch
+        assert_eq!(form.total_steps(), 6); // + branch + base for the new branch
         form.field = CreateField::Base;
-        assert_eq!(form.step(), 4);
+        assert_eq!(form.step(), 5);
     }
 
     #[test]
@@ -3907,7 +3967,11 @@ mod tests {
         form.load_branches();
         assert!(form.dir_is_repo());
         form.refresh_branch_entries();
+        // Enable worktree so Branch/Base steps appear.
+        form.worktree = true;
         form.field = CreateField::Terminal;
+        form.advance();
+        assert_eq!(form.field, CreateField::Worktree);
         form.advance();
         assert_eq!(form.field, CreateField::Branch);
         // An existing branch is highlighted → no Base step.
@@ -3931,10 +3995,12 @@ mod tests {
         assert_eq!(form.total_steps(), 4); // name, dir, terminal, agent
         form.branches = vec!["main".into()];
         form.refresh_branch_entries();
-        assert_eq!(form.total_steps(), 5); // + branch
+        assert_eq!(form.total_steps(), 5); // + worktree (branch hidden until opted-in)
+        form.worktree = true;
+        assert_eq!(form.total_steps(), 6); // + branch (worktree opted-in)
         form.branch_input = "feat".into();
         form.refresh_branch_entries();
-        assert_eq!(form.total_steps(), 6); // + base for the + create row
+        assert_eq!(form.total_steps(), 7); // + base for the + create row
     }
 
     #[test]
