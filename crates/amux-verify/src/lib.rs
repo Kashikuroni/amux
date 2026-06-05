@@ -12,4 +12,4 @@ pub mod runner;
 pub(crate) mod testutil;
 
 pub use contract::{find_contract, Contract, ContractError, Gate};
-pub use runner::{GateResult, GateStatus, Verdict, VerdictMsg};
+pub use runner::{run, GateResult, GateStatus, RunOptions, Verdict, VerdictMsg};
