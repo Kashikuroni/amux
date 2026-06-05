@@ -1594,6 +1594,8 @@ impl App {
                 // row is the exit at the top.
                 if form.field == CreateField::Branch {
                     form.branch_select_prev();
+                } else if form.field == CreateField::Dir {
+                    form.dir_select_prev();
                 } else if !(form.field == CreateField::Agent && form.model_up()) {
                     form.retreat();
                 }
@@ -1603,6 +1605,8 @@ impl App {
             KeyCode::Down => {
                 if form.field == CreateField::Branch {
                     form.branch_select_next();
+                } else if form.field == CreateField::Dir {
+                    form.dir_select_next();
                 } else if !(form.field == CreateField::Agent && form.model_down()) {
                     form.advance();
                 }
@@ -1624,9 +1628,7 @@ impl App {
                     form.dir.push(c);
                     form.refresh_dir_entries();
                 }
-                KeyCode::Tab => form.dir_select_next(),
-                KeyCode::BackTab => form.dir_select_prev(),
-                KeyCode::Right => form.enter_selected_dir(),
+                KeyCode::Tab | KeyCode::Right => form.enter_selected_dir(),
                 _ => {}
             },
             // Toggles: space/←/→ flip. h/j/k/l are reserved for agent/model
@@ -3340,9 +3342,12 @@ mod tests {
         let mut form = CreateForm::new("claude", &["claude".into()]);
         form.field = CreateField::Terminal;
         app.mode = Mode::Create(form);
+        // Up from Terminal retreats to Dir.
         app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
         assert_eq!(cform(&app).field, CreateField::Dir);
-        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        // Down on Dir walks the picker (dir_entries is empty → no-op on selection),
+        // so the field stays at Dir. Advance to Terminal via Enter instead.
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(cform(&app).field, CreateField::Terminal);
     }
 
@@ -3946,11 +3951,13 @@ mod tests {
         form.refresh_dir_entries();
         app.mode = Mode::Create(form);
 
-        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        // ↓ / ↑ now navigate the picker list.
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         assert_eq!(cform(&app).dir_selected, 1);
-        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)); // wraps
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)); // wraps
         assert_eq!(cform(&app).dir_selected, 0);
-        app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        // Tab and Right both descend into the selected entry.
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(cform(&app).dir, format!("{}/sub_a/", base.display()));
 
         let _ = std::fs::remove_dir_all(&base);
@@ -4616,5 +4623,35 @@ mod tests {
         assert!(matches!(app.mode, Mode::List));
         app.set_update_stage(S::Done("9.9.9".into()));
         assert!(app.update.is_none(), "badge cleared even when hidden");
+    }
+
+    #[test]
+    fn dir_up_down_navigate_picker_not_fields() {
+        let mut app = App::new(Config::default());
+        // Open create form and manually put it on the Dir step with entries.
+        let mut form = CreateForm::new("claude", &[]);
+        form.field = CreateField::Dir;
+        // Seed two fake entries so the picker has something to walk.
+        form.dir_entries = vec!["alpha".to_string(), "beta".to_string()];
+        form.dir_selected = 0;
+        app.mode = Mode::Create(form);
+
+        // ↓ should move the picker selection, not advance the form field.
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        if let Mode::Create(ref f) = app.mode {
+            assert_eq!(f.dir_selected, 1, "↓ moves picker selection");
+            assert_eq!(f.field, CreateField::Dir, "↓ must not leave Dir step");
+        } else {
+            panic!("lost Create mode");
+        }
+
+        // ↑ wraps back.
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        if let Mode::Create(ref f) = app.mode {
+            assert_eq!(f.dir_selected, 0, "↑ moves picker selection back");
+            assert_eq!(f.field, CreateField::Dir, "↑ must not leave Dir step");
+        } else {
+            panic!("lost Create mode");
+        }
     }
 }
