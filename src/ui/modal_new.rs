@@ -142,12 +142,18 @@ pub fn render(f: &mut Frame, form: &CreateForm, error: Option<&str>) {
     let branch_extra: u16 = if form.branches.is_empty() {
         0
     } else {
-        let picker = if branch_focused {
-            form.branch_entries.len().min(PICKER_MAX) as u16
+        // +1 for the worktree checkbox row (always visible in git repos).
+        let worktree_row = 1u16;
+        if !form.worktree {
+            worktree_row
         } else {
-            0
-        };
-        1 + picker + u16::from(form.branch_is_new())
+            let picker = if branch_focused {
+                form.branch_entries.len().min(PICKER_MAX) as u16
+            } else {
+                0
+            };
+            worktree_row + 1 + picker + u16::from(form.branch_is_new())
+        }
     };
     // One extra row for the validation error banner when present.
     let err_extra = u16::from(error.is_some());
@@ -331,7 +337,22 @@ pub fn render(f: &mut Frame, form: &CreateForm, error: Option<&str>) {
     }
     y += 1;
 
+    // worktree checkbox — only visible when the dir is a git repo.
     if !form.branches.is_empty() {
+        if let Some(r) = row(x, y, w, bottom) {
+            let focused = form.field == CreateField::Worktree;
+            let mark = if form.worktree { "[x]" } else { "[ ]" };
+            let line = Line::from(vec![
+                lbl("worktree"),
+                Span::styled(format!("{mark} create"), Style::default()),
+                Span::styled("   space", Style::default().add_modifier(Modifier::DIM)),
+            ]);
+            f.render_widget(band(Paragraph::new(line), focused), r);
+        }
+        y += 1;
+    }
+
+    if !form.branches.is_empty() && form.worktree {
         if let Some(r) = row(x, y, w, bottom) {
             input_row(
                 f,
@@ -617,20 +638,21 @@ mod tests {
     #[test]
     fn new_modal_shows_branch_picker_for_repo_dir() {
         let mut form = form_with_branches(&["main", "feature-x"], Some("main"));
+        form.worktree = true;
         form.field = crate::app::CreateField::Branch;
         let mut t = Terminal::new(TestBackend::new(80, 36)).unwrap();
         t.draw(|f| render(f, &form, None)).unwrap();
         let s = buf_to_string(t.backend().buffer());
-        assert!(s.contains("branch"), "branch label:\n{s}");
+        assert!(s.contains("worktree"), "worktree checkbox visible:\n{s}");
         assert!(s.contains("main"), "current branch listed:\n{s}");
         assert!(s.contains("(current)"), "current annotation:\n{s}");
         assert!(s.contains("feature-x"), "other branch listed:\n{s}");
-        assert!(!s.contains("create worktree"), "old toggle gone:\n{s}");
     }
 
     #[test]
     fn new_modal_shows_create_entry_and_base_for_new_name() {
         let mut form = form_with_branches(&["main"], Some("main"));
+        form.worktree = true;
         form.field = crate::app::CreateField::Branch;
         form.branch_input = "feat-z".into();
         form.refresh_branch_entries(); // sole Create row, selected
@@ -649,7 +671,7 @@ mod tests {
         t.draw(|f| render(f, &form, None)).unwrap();
         let s = buf_to_string(t.backend().buffer());
         assert!(!s.contains("branch "), "no branch row without a repo:\n{s}");
-        assert!(!s.contains("worktree"), "old worktree row gone:\n{s}");
+        assert!(!s.contains("worktree"), "no worktree row without a repo:\n{s}");
     }
 
     #[test]
@@ -753,6 +775,7 @@ mod tests {
         form.branches = vec!["main".into(), "dev".into(), "feature".into()];
         form.branch_input = "newb".into();
         form.refresh_branch_entries();
+        form.worktree = true;
         form.field = CreateField::Base;
         form.base_filter = "e".into(); // dev, feature
         let mut t = Terminal::new(TestBackend::new(90, 40)).unwrap();
@@ -769,11 +792,35 @@ mod tests {
         form.branches = vec!["main".into(), "dev".into()];
         form.branch_input = "feat".into();
         form.refresh_branch_entries(); // + create row → Base step exists
+        form.worktree = true;
         form.field = CreateField::Branch;
         let mut t = Terminal::new(TestBackend::new(90, 40)).unwrap();
         t.draw(|f| render(f, &form, None)).unwrap();
         let s = buf_to_string(t.backend().buffer());
         assert!(s.contains("main"), "selected base shown:\n{s}");
         assert!(!s.contains("dev"), "match list hidden when unfocused:\n{s}");
+    }
+
+    #[test]
+    fn worktree_checkbox_shows_when_git_repo() {
+        let form = form_with_branches(&["main"], Some("main")); // worktree=false
+        let mut t = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        t.draw(|f| render(f, &form, None)).unwrap();
+        let s = buf_to_string(t.backend().buffer());
+        assert!(s.contains("worktree"), "worktree row visible for git repo:\n{s}");
+        assert!(s.contains("[ ] create"), "unchecked by default:\n{s}");
+        assert!(!s.contains("branch"), "branch picker hidden when worktree=false:\n{s}");
+    }
+
+    #[test]
+    fn worktree_checked_shows_branch_picker() {
+        let mut form = form_with_branches(&["main", "feat"], Some("main"));
+        form.worktree = true;
+        form.field = crate::app::CreateField::Branch;
+        let mut t = Terminal::new(TestBackend::new(80, 36)).unwrap();
+        t.draw(|f| render(f, &form, None)).unwrap();
+        let s = buf_to_string(t.backend().buffer());
+        assert!(s.contains("[x] create"), "checked:\n{s}");
+        assert!(s.contains("branch"), "branch picker visible:\n{s}");
     }
 }
