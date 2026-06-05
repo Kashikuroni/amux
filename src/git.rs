@@ -3,6 +3,8 @@
 use std::io::Write as _;
 use std::process::Command;
 
+pub const PROTECTED_BRANCHES: &[&str] = &["main", "master", "develop", "dev"];
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct GitInfo {
     pub branch: String,
@@ -283,6 +285,27 @@ pub fn ensure_gitignore(repo_root: &str, entry: &str) -> std::io::Result<()> {
 /// Absolute path of the repository containing `dir`, or None if `dir` is not in a repo.
 pub fn repo_root(dir: &str) -> Option<String> {
     git_out(dir, &["rev-parse", "--show-toplevel"])
+}
+
+/// Delete a local branch with `git branch -d` (refuses unmerged; use `-D` for force).
+pub fn delete_branch(repo_root: &str, branch: &str) -> std::io::Result<()> {
+    git_run(repo_root, &["branch", "-d", branch])
+}
+
+/// List local branches that are fully merged into HEAD, excluding protected names
+/// and the currently checked-out branch.
+pub fn list_merged_branches(repo_root: &str) -> Vec<String> {
+    let Some(out) = git_out(repo_root, &["branch", "--merged", "HEAD", "--format=%(refname:short)"]) else {
+        return Vec::new();
+    };
+    let current = git_out(repo_root, &["symbolic-ref", "--short", "HEAD"])
+        .unwrap_or_default();
+    out.lines()
+        .map(|l| l.trim().to_string())
+        .filter(|b| !b.is_empty())
+        .filter(|b| b != &current)
+        .filter(|b| !PROTECTED_BRANCHES.contains(&b.as_str()))
+        .collect()
 }
 
 /// Branch currently checked out in `dir`, or None (detached HEAD / not a repo).
@@ -740,6 +763,66 @@ mod tests {
         assert!(!is_dirty(d), "clean after stash push");
         stash_pop(d).expect("stash pop");
         assert_eq!(std::fs::read_to_string(dir.join("f.txt")).unwrap(), "stashed\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn delete_branch_removes_merged_branch() {
+        if Command::new("git").arg("--version").output().is_err() { return; }
+        let dir = temp_repo("delbranch");
+        let root = dir.to_str().unwrap();
+        Command::new("git").arg("-C").arg(root)
+            .args(["checkout", "-b", "feature"]).output().unwrap();
+        std::fs::write(dir.join("feat.txt"), "x\n").unwrap();
+        Command::new("git").arg("-C").arg(root).args(["add", "."]).output().unwrap();
+        Command::new("git").arg("-C").arg(root)
+            .args(["commit", "-qm", "feat"]).output().unwrap();
+        Command::new("git").arg("-C").arg(root)
+            .args(["checkout", "main"]).output().unwrap();
+        Command::new("git").arg("-C").arg(root)
+            .args(["merge", "--no-ff", "-m", "merge feat", "feature"]).output().unwrap();
+        delete_branch(root, "feature").expect("delete merged branch");
+        assert!(!branch_exists(root, "feature"), "branch must be gone");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn delete_branch_fails_on_unmerged() {
+        if Command::new("git").arg("--version").output().is_err() { return; }
+        let dir = temp_repo("delbranch_unmerged");
+        let root = dir.to_str().unwrap();
+        Command::new("git").arg("-C").arg(root)
+            .args(["checkout", "-b", "unmerged"]).output().unwrap();
+        std::fs::write(dir.join("x.txt"), "x\n").unwrap();
+        Command::new("git").arg("-C").arg(root).args(["add", "."]).output().unwrap();
+        Command::new("git").arg("-C").arg(root)
+            .args(["commit", "-qm", "x"]).output().unwrap();
+        Command::new("git").arg("-C").arg(root)
+            .args(["checkout", "main"]).output().unwrap();
+        let err = delete_branch(root, "unmerged")
+            .expect_err("unmerged branch must fail");
+        assert!(err.to_string().len() > 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn list_merged_branches_excludes_protected_and_current() {
+        if Command::new("git").arg("--version").output().is_err() { return; }
+        let dir = temp_repo("listmerged");
+        let root = dir.to_str().unwrap();
+        Command::new("git").arg("-C").arg(root)
+            .args(["checkout", "-b", "done"]).output().unwrap();
+        std::fs::write(dir.join("done.txt"), "x\n").unwrap();
+        Command::new("git").arg("-C").arg(root).args(["add", "."]).output().unwrap();
+        Command::new("git").arg("-C").arg(root)
+            .args(["commit", "-qm", "done"]).output().unwrap();
+        Command::new("git").arg("-C").arg(root)
+            .args(["checkout", "main"]).output().unwrap();
+        Command::new("git").arg("-C").arg(root)
+            .args(["merge", "--no-ff", "-m", "merge done", "done"]).output().unwrap();
+        let merged = list_merged_branches(root);
+        assert!(merged.contains(&"done".to_string()), "merged branch must appear");
+        assert!(!merged.contains(&"main".to_string()), "main must be excluded");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
