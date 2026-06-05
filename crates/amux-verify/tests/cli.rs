@@ -134,3 +134,37 @@ fn json_mode_prints_verdict_on_stdout_and_progress_on_stderr() {
     assert_eq!(verdict["gates"][0]["status"], "failed");
     assert!(!out.stderr.is_empty(), "progress should be on stderr");
 }
+
+#[cfg(unix)]
+#[test]
+fn sigint_cancels_the_run_and_exits_130() {
+    use std::time::{Duration, Instant};
+
+    let td = TempDir::new();
+    td.write(
+        ".amux/verify.toml",
+        "[[gate]]\nname = \"slow\"\ncmd = \"sleep 5\"\n",
+    );
+    let mut child = Command::new(BIN)
+        .arg("--dir")
+        .arg(td.path())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn amux-verify");
+    std::thread::sleep(Duration::from_millis(400)); // let the gate start
+                                                    // SAFETY: plain kill(2) on our own child.
+    unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGINT) };
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("try_wait") {
+            break status;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "amux-verify did not exit after SIGINT"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    };
+    assert_eq!(status.code(), Some(130));
+}
