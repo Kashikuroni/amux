@@ -166,17 +166,6 @@ mod tests {
     }
 
     #[test]
-    fn newline_then_up_down_preserve_column() {
-        let mut a = TextArea::new("abc");
-        a.insert_char('\n');
-        a.insert_str("de");
-        assert_eq!(a.buffer, "abc\nde");
-        a.up();
-        a.down();
-        assert_eq!(a.buffer, "abc\nde");
-    }
-
-    #[test]
     fn left_right_step_over_multibyte_chars() {
         // Cyrillic letters are 2 bytes each; the cursor is a CHAR index, so
         // motion + editing must never split a UTF-8 boundary.

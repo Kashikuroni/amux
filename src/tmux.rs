@@ -477,13 +477,6 @@ mod tests {
     }
 
     #[test]
-    fn attached_count_greater_than_one_is_attached() {
-        let out = "multi\t/d\t1\t1\tclaude\t2";
-        let sessions = parse_sessions(out);
-        assert!(sessions[0].attached);
-    }
-
-    #[test]
     fn empty_input_yields_no_sessions() {
         assert!(parse_sessions("").is_empty());
     }

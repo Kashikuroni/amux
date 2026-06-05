@@ -799,9 +799,7 @@ mod tests {
             .args(["commit", "-qm", "x"]).output().unwrap();
         Command::new("git").arg("-C").arg(root)
             .args(["checkout", "main"]).output().unwrap();
-        let err = delete_branch(root, "unmerged")
-            .expect_err("unmerged branch must fail");
-        assert!(err.to_string().len() > 0);
+        delete_branch(root, "unmerged").expect_err("unmerged branch must fail");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

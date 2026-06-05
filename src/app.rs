@@ -4358,45 +4358,6 @@ mod tests {
     }
 
     #[test]
-    fn killing_a_session_drops_its_note() {
-        let mut app = App::new(Config::default());
-        app.notes.insert("s".into(), "- [ ] x".into());
-        app.notes.remove("s"); // mirrors the Kill handler
-        assert!(!app.notes.contains_key("s"));
-    }
-
-    #[test]
-    fn renaming_moves_the_note() {
-        let mut app = App::new(Config::default());
-        app.notes.insert("old".into(), "- [ ] x".into());
-        if let Some(t) = app.notes.remove("old") {
-            app.notes.insert("new".into(), t);
-        }
-        assert_eq!(app.notes.get("new").map(String::as_str), Some("- [ ] x"));
-        assert!(!app.notes.contains_key("old"));
-    }
-
-    #[test]
-    fn killing_a_session_drops_its_draft() {
-        let mut app = App::new(Config::default());
-        app.drafts.insert("s".into(), "draft".into());
-        app.drafts.remove("s"); // mirrors the Kill handler
-        assert!(!app.drafts.contains_key("s"));
-    }
-
-    #[test]
-    fn renaming_moves_the_draft() {
-        let mut app = App::new(Config::default());
-        app.drafts.insert("old".into(), "draft".into());
-        // Mirrors the Rename handler.
-        if let Some(d) = app.drafts.remove("old") {
-            app.drafts.insert("new".into(), d);
-        }
-        assert_eq!(app.drafts.get("new").map(String::as_str), Some("draft"));
-        assert!(!app.drafts.contains_key("old"));
-    }
-
-    #[test]
     fn prune_dead_drafts_drops_only_dead_sessions() {
         let mut app = app_with_two_sessions(); // sessions "a" and "b"
         app.drafts.insert("a".into(), "keep".into());
