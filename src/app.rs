@@ -775,7 +775,7 @@ pub enum Action {
     RestartSelf,
     /// Promote a worktree session to the project root: stash (if dirty),
     /// remove worktree, then send `cd <root> && git checkout <branch>` to the session.
-    PromoteWorktree { name: String, branch: String },
+    PromoteWorktree { name: String, branch: String, has_stash: bool },
     /// Delete a local git branch (safe, refuses unmerged).
     DeleteBranch { name: String, branch: String },
     /// Delete a set of merged branches in a repo.
@@ -1651,6 +1651,7 @@ impl App {
                         GitAction::Promote => Action::PromoteWorktree {
                             name: form.session_name,
                             branch: form.branch,
+                            has_stash: form.has_stash,
                         },
                         GitAction::DeleteBranch => Action::DeleteBranch {
                             name: form.session_name,
@@ -4884,7 +4885,7 @@ mod tests {
         let action = app.handle_key(key);
         assert_eq!(
             action,
-            Some(Action::PromoteWorktree { name: "wt".into(), branch: "feat".into() })
+            Some(Action::PromoteWorktree { name: "wt".into(), branch: "feat".into(), has_stash: false })
         );
     }
 

@@ -493,7 +493,7 @@ fn handle_action(
             }
             app.refresh();
         }
-        Action::PromoteWorktree { name, branch } => {
+        Action::PromoteWorktree { name, branch, has_stash } => {
             let session = app.sessions.iter().find(|s| s.name == name);
             let Some(s) = session else {
                 app.error = Some(format!("session '{name}' not found"));
@@ -509,8 +509,7 @@ fn handle_action(
                     return Ok(());
                 }
             };
-            let dirty = am::git::is_dirty(&worktree_dir);
-            if dirty {
+            if has_stash {
                 if let Err(e) = am::git::stash_push(&worktree_dir) {
                     app.error = Some(format!("git stash failed: {e}"));
                     app.refresh();
@@ -518,14 +517,19 @@ fn handle_action(
                 }
             }
             if let Err(e) = am::git::remove_worktree(&repo_root, &worktree_dir) {
-                app.error = Some(format!("worktree removal failed — session left in worktree: {e}"));
+                let msg = if has_stash {
+                    format!("worktree removal failed (stash preserved as stash@{{0}}): {e}")
+                } else {
+                    format!("worktree removal failed — session left in worktree: {e}")
+                };
+                app.error = Some(msg);
                 app.refresh();
                 return Ok(());
             }
             fn sh_squote(s: &str) -> String {
                 format!("'{}'", s.replace('\'', "'\\''"))
             }
-            let cmd = if dirty {
+            let cmd = if has_stash {
                 format!("cd {} && git checkout {} && git stash pop", sh_squote(&repo_root), sh_squote(&branch))
             } else {
                 format!("cd {} && git checkout {}", sh_squote(&repo_root), sh_squote(&branch))
