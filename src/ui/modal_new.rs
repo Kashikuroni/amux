@@ -671,7 +671,10 @@ mod tests {
         t.draw(|f| render(f, &form, None)).unwrap();
         let s = buf_to_string(t.backend().buffer());
         assert!(!s.contains("branch "), "no branch row without a repo:\n{s}");
-        assert!(!s.contains("worktree"), "no worktree row without a repo:\n{s}");
+        assert!(
+            !s.contains("worktree"),
+            "no worktree row without a repo:\n{s}"
+        );
     }
 
     #[test]
@@ -807,9 +810,15 @@ mod tests {
         let mut t = Terminal::new(TestBackend::new(80, 30)).unwrap();
         t.draw(|f| render(f, &form, None)).unwrap();
         let s = buf_to_string(t.backend().buffer());
-        assert!(s.contains("worktree"), "worktree row visible for git repo:\n{s}");
+        assert!(
+            s.contains("worktree"),
+            "worktree row visible for git repo:\n{s}"
+        );
         assert!(s.contains("[ ] create"), "unchecked by default:\n{s}");
-        assert!(!s.contains("branch"), "branch picker hidden when worktree=false:\n{s}");
+        assert!(
+            !s.contains("branch"),
+            "branch picker hidden when worktree=false:\n{s}"
+        );
     }
 
     #[test]

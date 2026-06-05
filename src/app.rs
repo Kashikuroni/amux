@@ -793,11 +793,21 @@ pub enum Action {
     RestartSelf,
     /// Promote a worktree session to the project root: stash (if dirty),
     /// remove worktree, then send `cd <root> && git checkout <branch>` to the session.
-    PromoteWorktree { name: String, branch: String },
+    PromoteWorktree {
+        name: String,
+        branch: String,
+    },
     /// Delete a local git branch (safe, refuses unmerged).
-    DeleteBranch { name: String, branch: String, repo_root: String },
+    DeleteBranch {
+        name: String,
+        branch: String,
+        repo_root: String,
+    },
     /// Delete a set of merged branches in a repo.
-    CleanupBranches { repo_root: String, branches: Vec<String> },
+    CleanupBranches {
+        repo_root: String,
+        branches: Vec<String>,
+    },
 }
 
 #[derive(Copy, Clone)]
@@ -1426,7 +1436,8 @@ impl App {
                         let branches: Vec<BranchItem> = raw
                             .into_iter()
                             .map(|name| {
-                                let protected = crate::git::PROTECTED_BRANCHES.contains(&name.as_str());
+                                let protected =
+                                    crate::git::PROTECTED_BRANCHES.contains(&name.as_str());
                                 BranchItem { name, protected }
                             })
                             .collect();
@@ -1727,8 +1738,7 @@ impl App {
                     self.mode = Mode::Git(form);
                 }
                 KeyCode::Char('j') | KeyCode::Down => {
-                    form.cursor =
-                        (form.cursor + 1).min(form.branches.len().saturating_sub(1));
+                    form.cursor = (form.cursor + 1).min(form.branches.len().saturating_sub(1));
                     self.mode = Mode::Git(form);
                 }
                 KeyCode::Char('k') | KeyCode::Up => {
@@ -3733,12 +3743,21 @@ mod tests {
 
         // With worktree=false (default), Worktree step is present but Branch is not.
         let seq = form.field_sequence_for_test();
-        assert!(seq.contains(&CreateField::Worktree), "Worktree step must be present when branches non-empty");
-        assert!(!seq.contains(&CreateField::Branch), "Branch step must be hidden when worktree=false");
+        assert!(
+            seq.contains(&CreateField::Worktree),
+            "Worktree step must be present when branches non-empty"
+        );
+        assert!(
+            !seq.contains(&CreateField::Branch),
+            "Branch step must be hidden when worktree=false"
+        );
 
         form.worktree = true;
         let seq = form.field_sequence_for_test();
-        assert!(seq.contains(&CreateField::Branch), "Branch step must appear when worktree=true");
+        assert!(
+            seq.contains(&CreateField::Branch),
+            "Branch step must appear when worktree=true"
+        );
     }
 
     #[test]
@@ -3942,7 +3961,7 @@ mod tests {
         form.current_branch = Some("main".into());
         form.refresh_branch_entries();
         assert_eq!(form.total_steps(), 4); // + worktree
-        // Enable worktree and type a new branch name → Branch + Base appear.
+                                           // Enable worktree and type a new branch name → Branch + Base appear.
         form.worktree = true;
         form.branch_input = "feat".into();
         form.refresh_branch_entries();
@@ -4861,7 +4880,12 @@ mod tests {
         assert!(app.update.is_none(), "badge cleared even when hidden");
     }
 
-    fn make_git_session(name: &str, dir: &str, worktree_repo: Option<&str>, branch: Option<&str>) -> crate::tmux::Session {
+    fn make_git_session(
+        name: &str,
+        dir: &str,
+        worktree_repo: Option<&str>,
+        branch: Option<&str>,
+    ) -> crate::tmux::Session {
         crate::tmux::Session {
             name: name.into(),
             dir: dir.into(),
@@ -4870,7 +4894,11 @@ mod tests {
             agent: String::new(),
             status: crate::tmux::Status::Idle,
             attached: false,
-            git: branch.map(|b| crate::git::GitInfo { branch: b.into(), added: 0, removed: 0 }),
+            git: branch.map(|b| crate::git::GitInfo {
+                branch: b.into(),
+                added: 0,
+                removed: 0,
+            }),
             worktree_repo: worktree_repo.map(|r| r.into()),
         }
     }
@@ -4916,7 +4944,8 @@ mod tests {
         app.handle_key(key);
         assert!(
             matches!(&app.mode, Mode::Git(f) if f.action == GitAction::Promote && f.branch == "feat"),
-            "Ctrl+g on worktree must open Promote modal, got {:?}", app.mode
+            "Ctrl+g on worktree must open Promote modal, got {:?}",
+            app.mode
         );
     }
 
@@ -4969,7 +4998,10 @@ mod tests {
         let action = app.handle_key(key);
         assert_eq!(
             action,
-            Some(Action::PromoteWorktree { name: "wt".into(), branch: "feat".into() })
+            Some(Action::PromoteWorktree {
+                name: "wt".into(),
+                branch: "feat".into()
+            })
         );
     }
 
@@ -5007,13 +5039,18 @@ mod tests {
             worktree_path: None,
             has_stash: false,
             action: GitAction::BranchCleanup,
-            branches: vec![BranchItem { name: "feat".into(), protected: false }],
+            branches: vec![BranchItem {
+                name: "feat".into(),
+                protected: false,
+            }],
             selected,
             cursor: 0,
         });
         let key = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE);
         app.handle_key(key);
-        let Mode::Git(f) = &app.mode else { panic!("must stay in Git mode") };
+        let Mode::Git(f) = &app.mode else {
+            panic!("must stay in Git mode")
+        };
         assert!(!f.selected.contains(&0), "space must deselect");
     }
 
@@ -5025,10 +5062,13 @@ mod tests {
         form.branches = vec!["main".to_string(), "dev".to_string()];
         form.current_branch = Some("main".to_string());
         form.refresh_branch_entries(); // populates branch_entries with main, dev
-        // worktree is false (default) — no WorktreeSpec should be emitted
+                                       // worktree is false (default) — no WorktreeSpec should be emitted
         let action = build_create_action(&form, &[]).unwrap();
         if let Action::Create { worktree, .. } = action {
-            assert!(worktree.is_none(), "worktree must be None when form.worktree=false");
+            assert!(
+                worktree.is_none(),
+                "worktree must be None when form.worktree=false"
+            );
         } else {
             panic!("expected Action::Create");
         }

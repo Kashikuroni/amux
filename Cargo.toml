@@ -1,6 +1,6 @@
 [package]
 name = "amux"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2021"
 description = "A terminal cockpit for AI coding agents: manage parallel tmux sessions running Claude Code, Codex, Gemini, Aider and more — with live previews, git worktrees, and per-session markdown notes."
 license = "MIT OR Apache-2.0"

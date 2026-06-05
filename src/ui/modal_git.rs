@@ -29,7 +29,10 @@ fn render_promote(f: &mut Frame, form: &GitForm) {
         Line::from(""),
         Line::from(vec![
             Span::styled("Branch:  ", Style::default().fg(th::MUTED)),
-            Span::styled(form.branch.clone(), Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                form.branch.clone(),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
         ]),
         Line::from(vec![
             Span::styled("Worktree: ", Style::default().fg(th::MUTED)),
@@ -41,12 +44,10 @@ fn render_promote(f: &mut Frame, form: &GitForm) {
         Line::from(""),
     ];
     if form.has_stash {
-        lines.push(Line::from(vec![
-            Span::styled(
-                "⚠ Unstaged changes — will git stash",
-                Style::default().fg(th::YELLOW),
-            ),
-        ]));
+        lines.push(Line::from(vec![Span::styled(
+            "⚠ Unstaged changes — will git stash",
+            Style::default().fg(th::YELLOW),
+        )]));
         lines.push(Line::from(vec![Span::styled(
             "  and restore after checkout",
             Style::default().fg(th::DIM),
@@ -75,7 +76,10 @@ fn render_delete_branch(f: &mut Frame, form: &GitForm) {
     f.render_widget(Clear, area);
     let lines = vec![
         Line::from(vec![
-            Span::styled("✕ ", Style::default().fg(th::RED).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "✕ ",
+                Style::default().fg(th::RED).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(
                 "delete branch",
                 Style::default()
@@ -86,7 +90,10 @@ fn render_delete_branch(f: &mut Frame, form: &GitForm) {
         Line::from(""),
         Line::from(vec![
             Span::styled("Branch:  ", Style::default().fg(th::MUTED)),
-            Span::styled(form.branch.clone(), Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                form.branch.clone(),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
         ]),
         Line::from(vec![
             Span::styled("Session: ", Style::default().fg(th::MUTED)),
@@ -142,13 +149,19 @@ fn render_cleanup(f: &mut Frame, form: &GitForm) {
 
     // Header
     let header_line = Line::from(vec![
-        Span::styled("branch cleanup", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "branch cleanup",
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
         Span::styled(
             format!("  ({} branches)", form.branches.len()),
             Style::default().fg(th::DIM),
         ),
     ]);
-    f.render_widget(Paragraph::new(vec![header_line, Line::from("")]), header_area);
+    f.render_widget(
+        Paragraph::new(vec![header_line, Line::from("")]),
+        header_area,
+    );
 
     // Branch list
     let mut list_lines: Vec<Line> = form
@@ -188,10 +201,7 @@ fn render_cleanup(f: &mut Frame, form: &GitForm) {
     // Clamp scroll so cursor is visible
     let visible = list_area.height as usize;
     let start = form.cursor.saturating_sub(visible.saturating_sub(1));
-    let list_lines_display: Vec<Line> = list_lines
-        .drain(start..)
-        .take(visible)
-        .collect();
+    let list_lines_display: Vec<Line> = list_lines.drain(start..).take(visible).collect();
     f.render_widget(Paragraph::new(list_lines_display), list_area);
 
     // Hints
@@ -282,9 +292,18 @@ mod tests {
             has_stash: false,
             action: GitAction::BranchCleanup,
             branches: vec![
-                BranchItem { name: "feature/agent-auth".into(), protected: false },
-                BranchItem { name: "fix/typo".into(),           protected: false },
-                BranchItem { name: "main".into(),                protected: true  },
+                BranchItem {
+                    name: "feature/agent-auth".into(),
+                    protected: false,
+                },
+                BranchItem {
+                    name: "fix/typo".into(),
+                    protected: false,
+                },
+                BranchItem {
+                    name: "main".into(),
+                    protected: true,
+                },
             ],
             selected,
             cursor: 0,
@@ -300,7 +319,10 @@ mod tests {
         assert!(s.contains("feature/agent-auth"), "must list branch");
         assert!(s.contains("fix/typo"), "must list branch");
         assert!(s.contains("main"), "must show protected branch");
-        assert!(s.contains("Space") || s.contains("space"), "must show space hint");
+        assert!(
+            s.contains("Space") || s.contains("space"),
+            "must show space hint"
+        );
     }
 
     #[test]

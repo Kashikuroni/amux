@@ -501,7 +501,11 @@ fn handle_action(
                 return Ok(());
             };
             let worktree_dir = s.dir.clone();
-            let repo_root = match s.worktree_repo.clone().or_else(|| am::git::repo_root(&s.dir)) {
+            let repo_root = match s
+                .worktree_repo
+                .clone()
+                .or_else(|| am::git::repo_root(&s.dir))
+            {
                 Some(r) => r,
                 None => {
                     app.error = Some("could not determine repo root".into());
@@ -533,22 +537,35 @@ fn handle_action(
                 format!("'{}'", s.replace('\'', "'\\''"))
             }
             let cmd = if dirty {
-                format!("cd {} && git checkout {} && git stash pop", sh_squote(&repo_root), sh_squote(&branch))
+                format!(
+                    "cd {} && git checkout {} && git stash pop",
+                    sh_squote(&repo_root),
+                    sh_squote(&branch)
+                )
             } else {
-                format!("cd {} && git checkout {}", sh_squote(&repo_root), sh_squote(&branch))
+                format!(
+                    "cd {} && git checkout {}",
+                    sh_squote(&repo_root),
+                    sh_squote(&branch)
+                )
             };
             if let Err(e) = am::tmux::send_text(&name, &cmd) {
                 app.error = Some(format!("send_keys failed: {e}"));
             }
             app.refresh();
         }
-        Action::DeleteBranch { branch, repo_root, .. } => {
+        Action::DeleteBranch {
+            branch, repo_root, ..
+        } => {
             if let Err(e) = am::git::delete_branch(&repo_root, &branch) {
                 app.error = Some(e.to_string());
             }
             app.refresh();
         }
-        Action::CleanupBranches { repo_root, branches } => {
+        Action::CleanupBranches {
+            repo_root,
+            branches,
+        } => {
             let mut errors: Vec<String> = vec![];
             for branch in &branches {
                 if let Err(e) = am::git::delete_branch(&repo_root, branch) {
