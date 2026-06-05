@@ -242,6 +242,28 @@ pub fn remove_worktree(repo_root: &str, wt_path: &str) -> std::io::Result<()> {
     git_run(repo_root, &["worktree", "remove", wt_path])
 }
 
+/// True if the working tree at `dir` has staged or unstaged changes vs HEAD.
+pub fn is_dirty(dir: &str) -> bool {
+    Command::new("git")
+        .arg("-C").arg(dir)
+        .args(["diff", "HEAD", "--quiet"])
+        .env("LC_ALL", "C")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .status()
+        .map(|s| !s.success())
+        .unwrap_or(false)
+}
+
+/// Stash all working-tree changes in `dir` with the label "am-promote".
+pub fn stash_push(dir: &str) -> std::io::Result<()> {
+    git_run(dir, &["stash", "push", "-m", "am-promote"])
+}
+
+/// Pop the most recent stash in `dir`.
+pub fn stash_pop(dir: &str) -> std::io::Result<()> {
+    git_run(dir, &["stash", "pop"])
+}
+
 /// Appends `entry` as its own line to `<repo_root>/.gitignore` if not already
 /// present (exact-line match). Creates the file when missing.
 pub fn ensure_gitignore(repo_root: &str, entry: &str) -> std::io::Result<()> {
@@ -691,6 +713,37 @@ mod tests {
             .expect("orphan cleared, worktree created");
         assert!(wt.join("f.txt").exists());
         assert!(!wt.join("stale.txt").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn is_dirty_clean_repo_is_false() {
+        if Command::new("git").arg("--version").output().is_err() { return; }
+        let dir = temp_repo("dirty_clean");
+        assert!(!is_dirty(dir.to_str().unwrap()), "fresh repo must be clean");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn is_dirty_modified_file_is_true() {
+        if Command::new("git").arg("--version").output().is_err() { return; }
+        let dir = temp_repo("dirty_mod");
+        std::fs::write(dir.join("f.txt"), "changed\n").unwrap();
+        assert!(is_dirty(dir.to_str().unwrap()), "modified tracked file must be dirty");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stash_push_then_pop_roundtrip() {
+        if Command::new("git").arg("--version").output().is_err() { return; }
+        let dir = temp_repo("stash_rt");
+        let d = dir.to_str().unwrap();
+        std::fs::write(dir.join("f.txt"), "stashed\n").unwrap();
+        assert!(is_dirty(d));
+        stash_push(d).expect("stash push");
+        assert!(!is_dirty(d), "clean after stash push");
+        stash_pop(d).expect("stash pop");
+        assert_eq!(std::fs::read_to_string(dir.join("f.txt")).unwrap(), "stashed\n");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
