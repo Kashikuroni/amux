@@ -29,7 +29,7 @@ Three git actions exposed through a single `Mode::Git`:
 |---|---|---|
 | Promote worktree | `Ctrl+g` | `⧉` worktree sessions |
 | Delete branch | `Ctrl+g` | `⎇` normal branch sessions |
-| Branch cleanup | `Ctrl+b` | Any session (global) |
+| Branch cleanup | `Ctrl+l` | Any session (global) |
 
 ---
 
@@ -124,9 +124,11 @@ The `⚠` line is omitted when the worktree is clean.
 1. `git::is_dirty(worktree_path)` → set `has_stash`
 2. If dirty: `git::stash_push(worktree_path)`
 3. `git::remove_worktree(repo_root, worktree_path)`
-4. `tmux::send_keys(session, "cd <repo_root> && git checkout <branch>")`
-5. If stashed: `git::stash_pop(repo_root)` (after a brief yield so checkout
-   completes in the shell before stash pop runs)
+4. Build shell command:
+   - clean:  `"cd <repo_root> && git checkout <branch>"`
+   - dirty:  `"cd <repo_root> && git checkout <branch> && git stash pop"`
+5. `tmux::send_keys(session, <command>)` — stash pop runs in the shell after
+   checkout completes, no Rust-side timing needed
 6. `app.refresh()` — git poller will pick up `⎇` icon on next tick
 
 **Error handling:** Any step failure sets `app.error` with a contextual message
@@ -157,7 +159,7 @@ Execution stops at the first failure.
 
 ---
 
-### 3. Branch cleanup (`Ctrl+b`)
+### 3. Branch cleanup (`Ctrl+l`)
 
 **Modal:**
 
@@ -167,7 +169,7 @@ Execution stops at the first failure.
 │                                          │
 │  [✓] feature/agent-auth                  │
 │  [✓] fix/agent-typo                      │
-│  [ ] feature/wip-test                    │
+│  [✓] feature/wip-test                    │
 │  [✓] refactor/agent-ui                   │
 │  [ ] main                    (protected) │  ← dim, not selectable
 │                                          │
@@ -195,7 +197,7 @@ git repo, `app.error` is set and mode stays `List`.
 | `Ctrl+g` | `Mode::List` (worktree session) | Open `Mode::Git(Promote)` |
 | `Ctrl+g` | `Mode::List` (normal branch session) | Open `Mode::Git(DeleteBranch)` |
 | `Ctrl+g` | `Mode::List` (non-git session) | No-op |
-| `Ctrl+b` | `Mode::List` | Open `Mode::Git(BranchCleanup)` |
+| `Ctrl+l` | `Mode::List` | Open `Mode::Git(BranchCleanup)` |
 | `y` | `Mode::Git(Promote/Delete)` | Confirm + execute |
 | `n` / `Esc` | `Mode::Git` | Cancel → `Mode::List` |
 | `Space` | `Mode::Git(BranchCleanup)` | Toggle selection |
