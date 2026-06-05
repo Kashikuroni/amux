@@ -2,6 +2,7 @@ mod empty;
 mod error;
 mod footer;
 mod header;
+mod modal_git;
 mod modal_help;
 mod modal_kill;
 mod modal_new;
@@ -61,7 +62,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         // the select-mode prompt).
         Mode::List | Mode::Filter | Mode::SelectSession | Mode::Note(_) => {}
         Mode::ConfirmUpdate(m) => modal_update::render(f, m),
-        Mode::Git(_) => {}
+        Mode::Git(form) => modal_git::render(f, form),
     }
 }
 
