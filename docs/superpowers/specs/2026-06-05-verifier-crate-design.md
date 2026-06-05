@@ -278,8 +278,10 @@ verdict: FAILED — 1 failed, 1 passed, 3 skipped
 `ContractError` enum with `Display`: `Io { path, source }`,
 `Toml(toml::de::Error)` (carries line/col for unknown fields and syntax),
 `NoGates`, `DuplicateGateName(name)`, `EmptyGateName`, `EmptyCmd { gate }`,
-`InvalidTimeout { gate }`, `ShellOperator { gate, token }` (message
-includes the wrap-it-in-a-script hint). The CLI prints the error to stderr
+`InvalidTimeout { gate }`, `Split { gate, source: SplitError }` (wraps the
+argv splitter's error — shell operators, unterminated quotes, trailing
+backslash — with the gate name; the shell-operator message includes the
+wrap-it-in-a-script hint). The CLI prints the error to stderr
 and exits 2. The runner itself does not error: every gate outcome is a
 `GateResult`.
 
