@@ -90,6 +90,7 @@ fn items_for(mode: &Mode) -> Vec<Item> {
             Some(crate::update::UpdateStage::Failed(_)) => vec![("esc", "close", false)],
             Some(_) => vec![("esc", "hide", false)],
         },
+        Mode::Git(_) => vec![("esc", "cancel", true)],
     }
 }
 

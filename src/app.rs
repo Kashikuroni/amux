@@ -535,6 +535,39 @@ pub struct KillForm {
     pub remove_worktree: bool,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum GitAction {
+    Promote,
+    DeleteBranch,
+    BranchCleanup,
+}
+
+#[derive(Debug, Clone)]
+pub struct BranchItem {
+    pub name: String,
+    pub protected: bool,
+}
+
+/// Form carried by `Mode::Git`.
+#[derive(Debug, Clone)]
+pub struct GitForm {
+    pub session_name: String,
+    pub branch: String,
+    /// Absolute path to the project's git root.
+    pub repo_root: String,
+    /// Some(path) for Promote; None for DeleteBranch and BranchCleanup.
+    pub worktree_path: Option<String>,
+    /// Promote only: working tree was dirty when modal opened → stash needed.
+    pub has_stash: bool,
+    pub action: GitAction,
+    /// BranchCleanup only: list of candidate branches.
+    pub branches: Vec<BranchItem>,
+    /// BranchCleanup only: selected indices (pre-selected = all non-protected).
+    pub selected: std::collections::HashSet<usize>,
+    /// BranchCleanup only: cursor row.
+    pub cursor: usize,
+}
+
 /// Free-text reply being composed for a specific session.
 ///
 /// Editing is delegated to [`crate::editor::TextArea`] which holds the buffer
@@ -643,6 +676,8 @@ pub enum Mode {
     /// Self-update offer / install progress (opened automatically when a
     /// newer release is found and the app is idle in the list).
     ConfirmUpdate(UpdateModal),
+    /// Git operation panel (promote worktree, delete branch, or batch cleanup).
+    Git(GitForm),
 }
 
 /// Which note `Mode::Note` is editing.
@@ -738,6 +773,13 @@ pub enum Action {
     StartUpdate(crate::update::UpdateInfo),
     /// Restore the terminal and exec() the freshly installed binary.
     RestartSelf,
+    /// Promote a worktree session to the project root: stash (if dirty),
+    /// remove worktree, then send `cd <root> && git checkout <branch>` to the session.
+    PromoteWorktree { name: String, branch: String },
+    /// Delete a local git branch (safe, refuses unmerged).
+    DeleteBranch { name: String, branch: String },
+    /// Delete a set of merged branches in a repo.
+    CleanupBranches { repo_root: String, branches: Vec<String> },
 }
 
 #[derive(Copy, Clone)]
@@ -755,6 +797,7 @@ enum ModeKind {
     Note,
     UsageLog,
     ConfirmUpdate,
+    Git,
 }
 
 /// What the right pane renders: the live session preview, the selected session's
@@ -1095,6 +1138,7 @@ impl App {
             Mode::Note(_) => ModeKind::Note,
             Mode::UsageLog => ModeKind::UsageLog,
             Mode::ConfirmUpdate(_) => ModeKind::ConfirmUpdate,
+            Mode::Git(_) => ModeKind::Git,
         }
     }
 
@@ -1144,6 +1188,7 @@ impl App {
                 }
                 None
             }
+            ModeKind::Git => None,
         }
     }
 

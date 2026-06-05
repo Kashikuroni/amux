@@ -61,6 +61,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         // the select-mode prompt).
         Mode::List | Mode::Filter | Mode::SelectSession | Mode::Note(_) => {}
         Mode::ConfirmUpdate(m) => modal_update::render(f, m),
+        Mode::Git(_) => {}
     }
 }
 

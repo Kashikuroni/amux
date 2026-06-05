@@ -493,6 +493,15 @@ fn handle_action(
             }
             app.refresh();
         }
+        Action::PromoteWorktree { .. } => {
+            // Handled in Task 8.
+        }
+        Action::DeleteBranch { .. } => {
+            // Handled in Task 9.
+        }
+        Action::CleanupBranches { .. } => {
+            // Handled in Task 9.
+        }
     }
     Ok(())
 }
