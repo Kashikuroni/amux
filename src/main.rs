@@ -522,10 +522,13 @@ fn handle_action(
                 app.refresh();
                 return Ok(());
             }
+            fn sh_squote(s: &str) -> String {
+                format!("'{}'", s.replace('\'', "'\\''"))
+            }
             let cmd = if dirty {
-                format!("cd '{repo_root}' && git checkout '{branch}' && git stash pop")
+                format!("cd {} && git checkout {} && git stash pop", sh_squote(&repo_root), sh_squote(&branch))
             } else {
-                format!("cd '{repo_root}' && git checkout '{branch}'")
+                format!("cd {} && git checkout {}", sh_squote(&repo_root), sh_squote(&branch))
             };
             if let Err(e) = am::tmux::send_text(&name, &cmd) {
                 app.error = Some(format!("send_keys failed: {e}"));
