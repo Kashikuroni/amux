@@ -493,8 +493,44 @@ fn handle_action(
             }
             app.refresh();
         }
-        Action::PromoteWorktree { .. } => {
-            // Handled in Task 8.
+        Action::PromoteWorktree { name, branch } => {
+            let session = app.sessions.iter().find(|s| s.name == name);
+            let Some(s) = session else {
+                app.error = Some(format!("session '{name}' not found"));
+                app.refresh();
+                return Ok(());
+            };
+            let worktree_dir = s.dir.clone();
+            let repo_root = match s.worktree_repo.clone().or_else(|| am::git::repo_root(&s.dir)) {
+                Some(r) => r,
+                None => {
+                    app.error = Some("could not determine repo root".into());
+                    app.refresh();
+                    return Ok(());
+                }
+            };
+            let dirty = am::git::is_dirty(&worktree_dir);
+            if dirty {
+                if let Err(e) = am::git::stash_push(&worktree_dir) {
+                    app.error = Some(format!("git stash failed: {e}"));
+                    app.refresh();
+                    return Ok(());
+                }
+            }
+            if let Err(e) = am::git::remove_worktree(&repo_root, &worktree_dir) {
+                app.error = Some(format!("worktree removal failed — session left in worktree: {e}"));
+                app.refresh();
+                return Ok(());
+            }
+            let cmd = if dirty {
+                format!("cd {repo_root} && git checkout {branch} && git stash pop")
+            } else {
+                format!("cd {repo_root} && git checkout {branch}")
+            };
+            if let Err(e) = am::tmux::send_text(&name, &cmd) {
+                app.error = Some(format!("send_keys failed: {e}"));
+            }
+            app.refresh();
         }
         Action::DeleteBranch { .. } => {
             // Handled in Task 9.
