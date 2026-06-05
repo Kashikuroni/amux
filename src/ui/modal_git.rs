@@ -120,8 +120,92 @@ fn render_delete_branch(f: &mut Frame, form: &GitForm) {
     );
 }
 
-fn render_cleanup(_f: &mut Frame, _form: &GitForm) {
-    todo!()
+fn render_cleanup(f: &mut Frame, form: &GitForm) {
+    use ratatui::layout::{Constraint, Layout};
+    let area = super::centered(60, 70, f.area());
+    f.render_widget(Clear, area);
+    let block = th::panel()
+        .border_style(th::chrome(th::BORDER_HI))
+        .title(" git ")
+        .style(Style::default().bg(th::BG_RAISED));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if inner.height < 3 {
+        return;
+    }
+    let [header_area, list_area, hint_area] = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Min(1),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+
+    // Header
+    let header_line = Line::from(vec![
+        Span::styled("branch cleanup", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(
+            format!("  ({} branches)", form.branches.len()),
+            Style::default().fg(th::DIM),
+        ),
+    ]);
+    f.render_widget(Paragraph::new(vec![header_line, Line::from("")]), header_area);
+
+    // Branch list
+    let mut list_lines: Vec<Line> = form
+        .branches
+        .iter()
+        .enumerate()
+        .map(|(i, b)| {
+            let checkbox = if b.protected {
+                "[ ]"
+            } else if form.selected.contains(&i) {
+                "[✓]"
+            } else {
+                "[ ]"
+            };
+            let cursor_mark = if i == form.cursor { "▸ " } else { "  " };
+            let name_style = if b.protected {
+                Style::default().fg(th::DIM)
+            } else if i == form.cursor {
+                Style::default().add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            let mut spans = vec![
+                Span::styled(cursor_mark.to_string(), Style::default().fg(th::MUTED)),
+                Span::styled(
+                    format!("{checkbox} "),
+                    Style::default().fg(if b.protected { th::DIM } else { th::AMBER }),
+                ),
+                Span::styled(b.name.clone(), name_style),
+            ];
+            if b.protected {
+                spans.push(Span::styled("  (protected)", Style::default().fg(th::DIM)));
+            }
+            Line::from(spans)
+        })
+        .collect();
+    // Clamp scroll so cursor is visible
+    let visible = list_area.height as usize;
+    let start = form.cursor.saturating_sub(visible.saturating_sub(1));
+    let list_lines_display: Vec<Line> = list_lines
+        .drain(start..)
+        .take(visible)
+        .collect();
+    f.render_widget(Paragraph::new(list_lines_display), list_area);
+
+    // Hints
+    let hint = Line::from(vec![
+        Span::styled("Space", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(" toggle · ", Style::default().fg(th::DIM)),
+        Span::styled("a", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(" select all · ", Style::default().fg(th::DIM)),
+        Span::styled("y", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(" delete · ", Style::default().fg(th::DIM)),
+        Span::styled("n/esc", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(" cancel", Style::default().fg(th::DIM)),
+    ]);
+    f.render_widget(Paragraph::new(vec![hint]), hint_area);
 }
 
 #[cfg(test)]
@@ -183,6 +267,48 @@ mod tests {
         t.draw(|f| render(f, &promote_form(false))).unwrap();
         let s = buf_to_string(t.backend().buffer());
         assert!(!s.contains("stash"), "must NOT mention stash when clean");
+    }
+
+    fn cleanup_form() -> GitForm {
+        use crate::app::BranchItem;
+        let mut selected = std::collections::HashSet::new();
+        selected.insert(0usize);
+        selected.insert(1usize);
+        GitForm {
+            session_name: "s".into(),
+            branch: String::new(),
+            repo_root: "/proj".into(),
+            worktree_path: None,
+            has_stash: false,
+            action: GitAction::BranchCleanup,
+            branches: vec![
+                BranchItem { name: "feature/agent-auth".into(), protected: false },
+                BranchItem { name: "fix/typo".into(),           protected: false },
+                BranchItem { name: "main".into(),                protected: true  },
+            ],
+            selected,
+            cursor: 0,
+        }
+    }
+
+    #[test]
+    fn cleanup_modal_shows_branches_and_hints() {
+        let mut t = Terminal::new(TestBackend::new(70, 30)).unwrap();
+        t.draw(|f| render(f, &cleanup_form())).unwrap();
+        let s = buf_to_string(t.backend().buffer());
+        assert!(s.contains("branch cleanup"), "must show title");
+        assert!(s.contains("feature/agent-auth"), "must list branch");
+        assert!(s.contains("fix/typo"), "must list branch");
+        assert!(s.contains("main"), "must show protected branch");
+        assert!(s.contains("Space") || s.contains("space"), "must show space hint");
+    }
+
+    #[test]
+    fn cleanup_modal_marks_selected_with_checkmark() {
+        let mut t = Terminal::new(TestBackend::new(70, 30)).unwrap();
+        t.draw(|f| render(f, &cleanup_form())).unwrap();
+        let s = buf_to_string(t.backend().buffer());
+        assert!(s.contains("✓"), "selected branches must show checkmark");
     }
 
     #[test]
