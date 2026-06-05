@@ -117,3 +117,20 @@ fn help_exits_zero() {
     assert_eq!(out.status.code(), Some(0));
     assert!(String::from_utf8_lossy(&out.stdout).contains("usage: amux-verify"));
 }
+
+#[test]
+fn json_mode_prints_verdict_on_stdout_and_progress_on_stderr() {
+    let td = TempDir::new();
+    td.write(
+        ".amux/verify.toml",
+        "[[gate]]\nname = \"bad\"\ncmd = \"false\"\n",
+    );
+    let out = verify(td.path(), &["--json", "--task-id", "s1"]);
+    assert_eq!(out.status.code(), Some(1));
+    let verdict: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("stdout is a JSON verdict");
+    assert_eq!(verdict["passed"], false);
+    assert_eq!(verdict["task_id"], "s1");
+    assert_eq!(verdict["gates"][0]["status"], "failed");
+    assert!(!out.stderr.is_empty(), "progress should be on stderr");
+}
