@@ -242,21 +242,17 @@ pub fn remove_worktree(repo_root: &str, wt_path: &str) -> std::io::Result<()> {
     git_run(repo_root, &["worktree", "remove", wt_path])
 }
 
-/// True if the working tree at `dir` has staged or unstaged changes vs HEAD.
+/// True if the working tree at `dir` has staged, unstaged, or untracked changes.
 pub fn is_dirty(dir: &str) -> bool {
-    Command::new("git")
-        .arg("-C").arg(dir)
-        .args(["diff", "HEAD", "--quiet"])
-        .env("LC_ALL", "C")
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .status()
-        .map(|s| !s.success())
+    git_out(dir, &["status", "--porcelain"])
+        .map(|out| !out.is_empty())
         .unwrap_or(false)
 }
 
-/// Stash all working-tree changes in `dir` with the label "am-promote".
+/// Stash all working-tree changes in `dir` with the label "am-promote",
+/// including untracked files so they are not silently dropped on worktree removal.
 pub fn stash_push(dir: &str) -> std::io::Result<()> {
-    git_run(dir, &["stash", "push", "-m", "am-promote"])
+    git_run(dir, &["stash", "push", "--include-untracked", "-m", "am-promote"])
 }
 
 /// Pop the most recent stash in `dir`.
