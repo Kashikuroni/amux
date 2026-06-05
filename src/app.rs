@@ -1391,7 +1391,11 @@ impl App {
                         });
                     } else if let Some(g) = &s.git {
                         let branch = g.branch.clone();
-                        if !crate::git::PROTECTED_BRANCHES.contains(&branch.as_str()) {
+                        if crate::git::PROTECTED_BRANCHES.contains(&branch.as_str()) {
+                            self.error = Some(format!(
+                                "'{branch}' is a protected branch — Ctrl+g works on feature branches"
+                            ));
+                        } else {
                             self.mode = Mode::Git(GitForm {
                                 session_name: s.name.clone(),
                                 branch,
@@ -1404,6 +1408,11 @@ impl App {
                                 cursor: 0,
                             });
                         }
+                    } else {
+                        self.error = Some(
+                            "no git info for this session — Ctrl+g works on git-tracked sessions"
+                                .into(),
+                        );
                     }
                 }
             }
