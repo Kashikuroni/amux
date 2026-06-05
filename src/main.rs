@@ -523,9 +523,9 @@ fn handle_action(
                 return Ok(());
             }
             let cmd = if dirty {
-                format!("cd {repo_root} && git checkout {branch} && git stash pop")
+                format!("cd '{repo_root}' && git checkout '{branch}' && git stash pop")
             } else {
-                format!("cd {repo_root} && git checkout {branch}")
+                format!("cd '{repo_root}' && git checkout '{branch}'")
             };
             if let Err(e) = am::tmux::send_text(&name, &cmd) {
                 app.error = Some(format!("send_keys failed: {e}"));
