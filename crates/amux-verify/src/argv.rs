@@ -1,8 +1,9 @@
 //! Splits a gate `cmd` string into argv without invoking a shell.
 //!
 //! POSIX-flavoured quoting: whitespace separates words, single/double
-//! quotes group, backslash escapes the next character (bare or inside
-//! double quotes; literal inside single quotes). Unquoted shell operators
+//! quotes group, backslash escapes the next character bare; inside double
+//! quotes it escapes only `$`, backtick, `"` and `\` (POSIX rule) and stays
+//! literal otherwise; inside single quotes everything is literal. Unquoted shell operators
 //! are rejected: there is no shell at run time, so `&&` or `$VAR` would
 //! reach the program as literal arguments — never what the author meant.
 //! `*`, `?`, `~`, `=`, `#` are allowed and stay literal (no globbing, no
@@ -65,7 +66,11 @@ pub fn split(cmd: &str) -> Result<Vec<String>, SplitError> {
                     match chars.next() {
                         Some('"') => break,
                         Some('\\') => match chars.next() {
-                            Some(c) => current.push(c),
+                            Some(c @ ('"' | '\\' | '$' | '`')) => current.push(c),
+                            Some(c) => {
+                                current.push('\\');
+                                current.push(c);
+                            }
                             None => return Err(SplitError::UnterminatedQuote),
                         },
                         Some(c) => current.push(c),
@@ -207,5 +212,19 @@ mod tests {
     fn empty_input_splits_to_no_words() {
         assert_eq!(split("").unwrap(), Vec::<String>::new());
         assert_eq!(split("   ").unwrap(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn adjacent_segments_concatenate_into_one_word() {
+        assert_eq!(split(r#"--flag="x y""#).unwrap(), vec!["--flag=x y"]);
+        assert_eq!(split("a'b'c").unwrap(), vec!["abc"]);
+        assert_eq!(split(r"'don'\''t'").unwrap(), vec!["don't"]);
+    }
+
+    #[test]
+    fn double_quote_backslash_is_posix_accurate() {
+        assert_eq!(split(r#"echo "a\nb""#).unwrap(), vec!["echo", r"a\nb"]);
+        assert_eq!(split(r#"echo "a\$b""#).unwrap(), vec!["echo", "a$b"]);
+        assert_eq!(split(r#"echo "a\\b""#).unwrap(), vec!["echo", r"a\b"]);
     }
 }
