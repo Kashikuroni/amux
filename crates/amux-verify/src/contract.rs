@@ -4,7 +4,7 @@
 //! are loud: a broken contract must fail verification, not silently
 //! degrade to "no gates, all green".
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
@@ -131,6 +131,25 @@ impl Contract {
         }
         Ok(Contract { gates })
     }
+
+    pub fn load(path: &Path) -> Result<Contract, ContractError> {
+        let contents = std::fs::read_to_string(path).map_err(|source| ContractError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        Contract::parse(&contents)
+    }
+}
+
+/// Where a contract lives relative to a worktree root.
+pub const CONTRACT_REL_PATH: &str = ".amux/verify.toml";
+
+/// Returns the contract path if `<dir>/.amux/verify.toml` exists. No
+/// upward walk: amux always passes the worktree root, and the CLI has
+/// `--dir`/`--contract` overrides.
+pub fn find_contract(dir: &Path) -> Option<PathBuf> {
+    let path = dir.join(CONTRACT_REL_PATH);
+    path.is_file().then_some(path)
 }
 
 #[cfg(test)]
@@ -221,5 +240,33 @@ optional = true
         assert!(msg.contains("\"ui\""), "msg: {msg}");
         assert!(msg.contains("&&"), "msg: {msg}");
         assert!(msg.contains("wrap the command in a script"), "msg: {msg}");
+    }
+
+    #[test]
+    fn load_reads_file_and_missing_file_is_io_error() {
+        let td = crate::testutil::TempDir::new();
+        let path = td.write(
+            ".amux/verify.toml",
+            "[[gate]]\nname = \"a\"\ncmd = \"true\"\n",
+        );
+        let contract = Contract::load(&path).unwrap();
+        assert_eq!(contract.gates[0].name, "a");
+
+        let missing = td.path().join("nope.toml");
+        assert!(matches!(
+            Contract::load(&missing).unwrap_err(),
+            ContractError::Io { .. }
+        ));
+    }
+
+    #[test]
+    fn find_contract_checks_exact_location() {
+        let td = crate::testutil::TempDir::new();
+        assert_eq!(find_contract(td.path()), None);
+        let written = td.write(
+            ".amux/verify.toml",
+            "[[gate]]\nname = \"a\"\ncmd = \"true\"\n",
+        );
+        assert_eq!(find_contract(td.path()), Some(written));
     }
 }
