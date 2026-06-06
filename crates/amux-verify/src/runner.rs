@@ -17,7 +17,9 @@ use crate::contract::{Contract, Gate};
 pub const TAIL_LINES: usize = 40;
 
 /// A single captured line is truncated to this many bytes (then `…`) so a
-/// megabyte-long minified line can't blow up memory or the UI.
+/// megabyte-long minified line can't bloat the retained tail or the UI.
+/// (Peak memory while reading such a line is still proportional to the
+/// line itself — `read_until` buffers it before the cap applies.)
 pub const MAX_LINE_BYTES: usize = 2048;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -154,6 +156,7 @@ pub fn run(
 
 fn run_gate(dir: &Path, gate: &Gate, opts: &RunOptions, _cancel: &AtomicBool) -> GateResult {
     let start = Instant::now();
+    let timeout = Duration::from_secs(gate.timeout_s.unwrap_or(opts.default_timeout_s));
 
     let mut command = Command::new(&gate.argv[0]);
     command
@@ -209,6 +212,10 @@ fn run_gate(dir: &Path, gate: &Gate, opts: &RunOptions, _cancel: &AtomicBool) ->
                 kill_gate(&mut child);
                 break (GateStatus::Failed, None);
             }
+        }
+        if start.elapsed() >= timeout {
+            kill_gate(&mut child);
+            break (GateStatus::TimedOut, None);
         }
         thread::sleep(POLL_INTERVAL);
     };
@@ -519,5 +526,20 @@ mod tests {
             ..verdict
         };
         assert_eq!(serde_json::to_value(&tagged).unwrap()["task_id"], "s1");
+    }
+
+    #[test]
+    fn timeout_kills_the_gate() {
+        let mut slow = gate("slow", "sleep 5");
+        slow.timeout_s = Some(1);
+        let started = Instant::now();
+        let (verdict, _) = run_collect(vec![slow], &AtomicBool::new(false));
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "runner did not honor the timeout"
+        );
+        assert_eq!(verdict.gates[0].status, GateStatus::TimedOut);
+        assert_eq!(verdict.gates[0].exit_code, None);
+        assert!(!verdict.passed);
     }
 }
