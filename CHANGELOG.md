@@ -7,6 +7,11 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- `amux-verify`: a standalone workspace crate + CLI that runs the repo's
+  verification contract (`.amux/verify.toml`) — ordered gates executed
+  without a shell in a worktree, fail-fast cascade, per-gate timeout with
+  process-group kill, `--json` verdict. Foundation for in-app verification
+  (items 1–2 of the verification MVP).
 - The `i` composer keeps a per‑session **draft**: Esc closes and saves, `i`
   restores it; the draft survives amux restarts and dies with its session.
   `Ctrl‑y` copies the whole message, `Ctrl‑x` clears it.

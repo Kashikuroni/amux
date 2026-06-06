@@ -1,0 +1,15 @@
+# Verification contract for amux itself (dogfood). Run with:
+#   cargo run -p amux-verify -- --dir .
+
+[[gate]]
+name = "fmt"
+cmd  = "cargo fmt --all --check"
+
+[[gate]]
+name = "clippy"
+cmd  = "cargo clippy --workspace --all-targets -- -D warnings"
+
+[[gate]]
+name = "tests"
+cmd  = "cargo test --workspace"
+timeout_s = 600
