@@ -113,7 +113,7 @@ pub fn run(
     let mut halted = false;
 
     for (index, gate) in contract.gates.iter().enumerate() {
-        if halted {
+        if halted || cancel.load(Ordering::SeqCst) {
             let result = skipped(gate);
             on_event(VerdictMsg::GateFinished {
                 index,
@@ -154,7 +154,7 @@ pub fn run(
     verdict
 }
 
-fn run_gate(dir: &Path, gate: &Gate, opts: &RunOptions, _cancel: &AtomicBool) -> GateResult {
+fn run_gate(dir: &Path, gate: &Gate, opts: &RunOptions, cancel: &AtomicBool) -> GateResult {
     let start = Instant::now();
     let timeout = Duration::from_secs(gate.timeout_s.unwrap_or(opts.default_timeout_s));
 
@@ -212,6 +212,14 @@ fn run_gate(dir: &Path, gate: &Gate, opts: &RunOptions, _cancel: &AtomicBool) ->
                 kill_gate(&mut child);
                 break (GateStatus::Failed, None);
             }
+        }
+        // Deliberately checked mid-gate, not just between gates: amux's future
+        // CancelVerify must never wait out a 600 s timeout. A killed gate
+        // records Skipped (it was never judged) with its elapsed duration and
+        // captured tails.
+        if cancel.load(Ordering::SeqCst) {
+            kill_gate(&mut child);
+            break (GateStatus::Skipped, None);
         }
         if start.elapsed() >= timeout {
             kill_gate(&mut child);
@@ -540,6 +548,46 @@ mod tests {
         );
         assert_eq!(verdict.gates[0].status, GateStatus::TimedOut);
         assert_eq!(verdict.gates[0].exit_code, None);
+        assert!(!verdict.passed);
+    }
+
+    #[test]
+    fn preset_cancel_skips_every_gate() {
+        let (verdict, events) = run_collect(
+            vec![gate("a", "true"), gate("b", "true")],
+            &AtomicBool::new(true),
+        );
+        assert!(!verdict.passed);
+        assert!(verdict
+            .gates
+            .iter()
+            .all(|g| g.status == GateStatus::Skipped));
+        assert_eq!(
+            events,
+            vec!["started:2", "gf:0:Skipped", "gf:1:Skipped", "finished"]
+        );
+    }
+
+    #[test]
+    fn midgate_cancel_kills_the_gate_promptly() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let setter = Arc::clone(&cancel);
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(200));
+            setter.store(true, Ordering::SeqCst);
+        });
+        let started = Instant::now();
+        let (verdict, _) = run_collect(
+            vec![gate("slow", "sleep 5"), gate("after", "true")],
+            &cancel,
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "cancel did not interrupt the gate"
+        );
+        assert_eq!(verdict.gates[0].status, GateStatus::Skipped);
+        assert!(verdict.gates[0].duration_ms >= 200);
+        assert_eq!(verdict.gates[1].status, GateStatus::Skipped);
         assert!(!verdict.passed);
     }
 }
