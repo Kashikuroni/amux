@@ -6,3 +6,6 @@
 //! CI or by hand via the `amux-verify` binary.
 
 pub mod argv;
+pub mod contract;
+
+pub use contract::{Contract, ContractError, Gate};
