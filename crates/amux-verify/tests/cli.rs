@@ -141,9 +141,12 @@ fn sigint_cancels_the_run_and_exits_130() {
     use std::time::{Duration, Instant};
 
     let td = TempDir::new();
+    // The gate drops a marker file once it is running; waiting for it (instead
+    // of a fixed sleep) guarantees the SIGINT handler is already installed —
+    // run() starts only after installation — however loaded the machine is.
     td.write(
         ".amux/verify.toml",
-        "[[gate]]\nname = \"slow\"\ncmd = \"sleep 5\"\n",
+        "[[gate]]\nname = \"slow\"\ncmd = \"sh -c 'touch started && sleep 5'\"\n",
     );
     let mut child = Command::new(BIN)
         .arg("--dir")
@@ -152,8 +155,16 @@ fn sigint_cancels_the_run_and_exits_130() {
         .stderr(std::process::Stdio::null())
         .spawn()
         .expect("spawn amux-verify");
-    std::thread::sleep(Duration::from_millis(400)); // let the gate start
-                                                    // SAFETY: plain kill(2) on our own child.
+    let marker = td.path().join("started");
+    let spawn_deadline = Instant::now();
+    while !marker.exists() {
+        assert!(
+            spawn_deadline.elapsed() < Duration::from_secs(10),
+            "gate never started"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // SAFETY: plain kill(2) on our own child.
     unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGINT) };
     let started = Instant::now();
     let status = loop {
