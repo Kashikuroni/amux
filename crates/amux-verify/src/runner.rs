@@ -2,6 +2,7 @@
 //! worktree, reporting progress through events and returning a verdict.
 
 use serde::Serialize;
+use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
@@ -14,6 +15,10 @@ use crate::contract::{Contract, Gate};
 
 /// Last lines of each output stream kept per gate.
 pub const TAIL_LINES: usize = 40;
+
+/// A single captured line is truncated to this many bytes (then `…`) so a
+/// megabyte-long minified line can't blow up memory or the UI.
+pub const MAX_LINE_BYTES: usize = 2048;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -87,6 +92,10 @@ impl Default for RunOptions {
 /// progress through `on_event` and returns the final verdict (also sent
 /// as [`VerdictMsg::Finished`]). The caller owns threading: amux will
 /// call this from a background thread with a channel-sending callback.
+///
+/// Expects a contract produced by [`Contract::parse`]/[`Contract::load`]
+/// (non-empty gates, each with non-empty argv) — hand-built contracts
+/// violating that may panic.
 pub fn run(
     dir: &Path,
     contract: &Contract,
@@ -241,30 +250,64 @@ fn kill_gate(child: &mut Child) {
     let _ = child.wait();
 }
 
-/// Reads a pipe to EOF on a thread, collecting lines.
+/// Reads a pipe to EOF on a thread, keeping only the last [`TAIL_LINES`]
+/// lines — a `cargo build` can emit megabytes; never buffer it all.
 struct Drain {
-    lines: Arc<Mutex<Vec<String>>>,
+    lines: Arc<Mutex<VecDeque<String>>>,
     done: Arc<AtomicBool>,
 }
 
 fn drain(reader: impl Read + Send + 'static, mirror: bool) -> Drain {
-    let lines = Arc::new(Mutex::new(Vec::new()));
+    let lines = Arc::new(Mutex::new(VecDeque::with_capacity(TAIL_LINES)));
     let done = Arc::new(AtomicBool::new(false));
     let handle = Drain {
         lines: Arc::clone(&lines),
         done: Arc::clone(&done),
     };
     thread::spawn(move || {
-        for line in BufReader::new(reader).lines() {
-            let Ok(line) = line else { break };
+        let mut reader = BufReader::new(reader);
+        let mut buf = Vec::new();
+        loop {
+            buf.clear();
+            // Byte-level read + lossy conversion: one stray non-UTF8 byte
+            // must become U+FFFD, not silently end the whole capture.
+            match reader.read_until(b'\n', &mut buf) {
+                Ok(0) | Err(_) => break, // EOF or unrecoverable pipe error
+                Ok(_) => {}
+            }
+            if buf.last() == Some(&b'\n') {
+                buf.pop();
+                if buf.last() == Some(&b'\r') {
+                    buf.pop();
+                }
+            }
+            let mut line = String::from_utf8_lossy(&buf).into_owned();
+            if line.len() > MAX_LINE_BYTES {
+                let cut = floor_char_boundary(&line, MAX_LINE_BYTES);
+                line.truncate(cut);
+                line.push('…');
+            }
             if mirror {
                 eprintln!("{line}");
             }
-            lines.lock().unwrap().push(line);
+            let mut lines = lines.lock().unwrap();
+            if lines.len() == TAIL_LINES {
+                lines.pop_front();
+            }
+            lines.push_back(line);
         }
         done.store(true, Ordering::SeqCst);
     });
     handle
+}
+
+/// `str::floor_char_boundary` is unstable; this is the stable equivalent.
+fn floor_char_boundary(s: &str, index: usize) -> usize {
+    let mut index = index.min(s.len());
+    while !s.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
 }
 
 impl Drain {
@@ -275,7 +318,8 @@ impl Drain {
         while !self.done.load(Ordering::SeqCst) && started.elapsed() < DRAIN_GRACE {
             thread::sleep(Duration::from_millis(5));
         }
-        self.lines.lock().unwrap().join("\n")
+        let lines = self.lines.lock().unwrap();
+        lines.iter().cloned().collect::<Vec<_>>().join("\n")
     }
 }
 
@@ -397,6 +441,56 @@ mod tests {
         );
         assert_eq!(verdict.gates[0].stdout_tail, "out");
         assert_eq!(verdict.gates[0].stderr_tail, "err");
+    }
+
+    #[test]
+    fn output_tails_keep_only_the_last_lines() {
+        let (verdict, _) = run_collect(vec![gate("noisy", "seq 1 50")], &AtomicBool::new(false));
+        let tail = &verdict.gates[0].stdout_tail;
+        let lines: Vec<&str> = tail.lines().collect();
+        assert_eq!(lines.len(), TAIL_LINES);
+        assert_eq!(lines.first(), Some(&"11"));
+        assert_eq!(lines.last(), Some(&"50"));
+    }
+
+    #[test]
+    fn non_utf8_bytes_do_not_swallow_later_output() {
+        // \xff is invalid UTF-8; output after it must still be captured.
+        // Use printf "\xff\n" (double-quoted) which works on macOS sh.
+        let (verdict, _) = run_collect(
+            vec![gate(
+                "binary",
+                r#"sh -c 'echo before; printf "\xff\n"; echo after'"#,
+            )],
+            &AtomicBool::new(false),
+        );
+        let tail = &verdict.gates[0].stdout_tail;
+        assert!(tail.contains("before"), "tail: {tail:?}");
+        assert!(tail.contains('\u{FFFD}'), "tail: {tail:?}");
+        assert!(tail.contains("after"), "tail: {tail:?}");
+    }
+
+    #[test]
+    fn overlong_lines_are_truncated() {
+        let (verdict, _) = run_collect(
+            vec![gate(
+                "wide",
+                "sh -c 'head -c 8000 /dev/zero | tr \"\\0\" x'",
+            )],
+            &AtomicBool::new(false),
+        );
+        let tail = &verdict.gates[0].stdout_tail;
+        let line = tail.lines().next().unwrap();
+        assert!(
+            line.len() <= MAX_LINE_BYTES + '…'.len_utf8(),
+            "len: {}",
+            line.len()
+        );
+        assert!(
+            line.ends_with('…'),
+            "line end: {:?}",
+            &line[line.len() - 8..]
+        );
     }
 
     #[test]
