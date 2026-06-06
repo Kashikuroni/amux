@@ -13,7 +13,7 @@ use amux_verify::{
 };
 
 const USAGE: &str = "\
-usage: amux-verify [--dir <path>] [--contract <file>] [-v|--verbose]
+usage: amux-verify [--dir <path>] [--contract <file>] [--json] [-v|--verbose]
                    [--default-timeout <secs>] [--task-id <id>]
 
 Runs the gates from <dir>/.amux/verify.toml (or --contract) inside <dir>.
@@ -21,6 +21,8 @@ Gate commands run without a shell; exit code 0 means the gate passed.
 
   --dir <path>              worktree to verify (default: current directory)
   --contract <file>         contract path (default: <dir>/.amux/verify.toml)
+  --json                    print the final verdict as JSON on stdout
+                            (progress lines move to stderr)
   -v, --verbose             mirror gate output live to stderr
   --default-timeout <secs>  timeout for gates without timeout_s (default 300)
   --task-id <id>            tag the verdict with a task id
@@ -30,6 +32,7 @@ Gate commands run without a shell; exit code 0 means the gate passed.
 struct CliArgs {
     dir: PathBuf,
     contract: Option<PathBuf>,
+    json: bool,
     verbose: bool,
     default_timeout: u64,
     task_id: Option<String>,
@@ -40,6 +43,7 @@ impl Default for CliArgs {
         CliArgs {
             dir: PathBuf::from("."),
             contract: None,
+            json: false,
             verbose: false,
             default_timeout: 300,
             task_id: None,
@@ -61,6 +65,7 @@ fn parse_args(args: &[String]) -> Result<CliArgs, String> {
                     format!("--default-timeout: expected a positive number, got {raw}")
                 })?;
             }
+            "--json" => out.json = true,
             "--task-id" => out.task_id = Some(value(&mut it, "--task-id")?),
             other => return Err(format!("unknown argument: {other}")),
         }
@@ -72,6 +77,16 @@ fn value(it: &mut std::slice::Iter<'_, String>, flag: &str) -> Result<String, St
     it.next()
         .cloned()
         .ok_or_else(|| format!("{flag} requires a value"))
+}
+
+/// Progress goes to stdout normally; with --json stdout is reserved for
+/// the verdict, so progress moves to stderr.
+fn progress(json: bool, line: &str) {
+    if json {
+        eprintln!("{line}");
+    } else {
+        println!("{line}");
+    }
 }
 
 fn gate_line(index: usize, total: usize, width: usize, result: &GateResult) -> String {
@@ -167,27 +182,37 @@ fn main() -> ExitCode {
     let width = contract
         .gates
         .iter()
-        .map(|g| g.name.len())
+        .map(|g| g.name.chars().count())
         .max()
         .unwrap_or(0);
-    println!(
-        "amux-verify: {total} gates from {}",
-        contract_path.display()
+    let json = args.json;
+    progress(
+        json,
+        &format!(
+            "amux-verify: {total} gates from {}",
+            contract_path.display()
+        ),
     );
 
     let cancel = AtomicBool::new(false);
     let verdict = run(&args.dir, &contract, &opts, &cancel, &mut |msg| {
         if let VerdictMsg::GateFinished { index, result } = &msg {
-            println!("{}", gate_line(*index, total, width, result));
+            progress(json, &gate_line(*index, total, width, result));
             if matches!(result.status, GateStatus::Failed | GateStatus::TimedOut) {
                 for line in failure_details(result) {
-                    println!("{line}");
+                    progress(json, &line);
                 }
             }
         }
     });
 
-    println!("{}", verdict_line(&verdict));
+    progress(json, &verdict_line(&verdict));
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&verdict).expect("verdict serializes")
+        );
+    }
     ExitCode::from(if verdict.passed { 0 } else { 1 })
 }
 
