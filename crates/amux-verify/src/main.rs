@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use amux_verify::contract::CONTRACT_REL_PATH;
 use amux_verify::{
@@ -27,6 +27,24 @@ Gate commands run without a shell; exit code 0 means the gate passed.
   --default-timeout <secs>  timeout for gates without timeout_s (default 300)
   --task-id <id>            tag the verdict with a task id
 ";
+
+static CANCEL: AtomicBool = AtomicBool::new(false);
+
+#[cfg(unix)]
+fn install_sigint_handler() {
+    extern "C" fn on_sigint(_: libc::c_int) {
+        CANCEL.store(true, Ordering::SeqCst);
+    }
+    let handler = on_sigint as extern "C" fn(libc::c_int);
+    // SAFETY: the handler only performs an atomic store, which is
+    // async-signal-safe; replacing the default SIGINT disposition is the
+    // whole point — gate children sit in their own process groups, so the
+    // terminal's Ctrl+C never reaches them by itself.
+    unsafe { libc::signal(libc::SIGINT, handler as libc::sighandler_t) };
+}
+
+#[cfg(not(unix))]
+fn install_sigint_handler() {}
 
 #[derive(Debug)]
 struct CliArgs {
@@ -173,6 +191,8 @@ fn main() -> ExitCode {
         }
     };
 
+    install_sigint_handler();
+
     let opts = RunOptions {
         default_timeout_s: args.default_timeout,
         task_id: args.task_id.clone(),
@@ -194,8 +214,7 @@ fn main() -> ExitCode {
         ),
     );
 
-    let cancel = AtomicBool::new(false);
-    let verdict = run(&args.dir, &contract, &opts, &cancel, &mut |msg| {
+    let verdict = run(&args.dir, &contract, &opts, &CANCEL, &mut |msg| {
         if let VerdictMsg::GateFinished { index, result } = &msg {
             progress(json, &gate_line(*index, total, width, result));
             if matches!(result.status, GateStatus::Failed | GateStatus::TimedOut) {
@@ -212,6 +231,9 @@ fn main() -> ExitCode {
             "{}",
             serde_json::to_string_pretty(&verdict).expect("verdict serializes")
         );
+    }
+    if CANCEL.load(Ordering::SeqCst) {
+        return ExitCode::from(130);
     }
     ExitCode::from(if verdict.passed { 0 } else { 1 })
 }
