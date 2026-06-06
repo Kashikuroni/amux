@@ -7,7 +7,9 @@
 
 pub mod argv;
 pub mod contract;
+pub mod runner;
 #[cfg(test)]
 pub(crate) mod testutil;
 
 pub use contract::{find_contract, Contract, ContractError, Gate};
+pub use runner::{GateResult, GateStatus, Verdict, VerdictMsg};
