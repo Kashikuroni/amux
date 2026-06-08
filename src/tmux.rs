@@ -3,7 +3,8 @@ use std::process::Command;
 
 /// Tab-separated fields requested from `tmux list-sessions -F`.
 /// Order: name, path, created, @cm_managed, @cm_agent, attached-client-count,
-/// @cm_repo, active-pane cwd (resolves via the session's current window).
+/// @cm_repo, active-pane cwd (resolves via the session's current window),
+/// session_activity (epoch secs).
 pub const LIST_FORMAT: &str =
     "#{session_name}\t#{session_path}\t#{session_created}\t#{@cm_managed}\t#{@cm_agent}\t#{session_attached}\t#{@cm_repo}\t#{pane_current_path}\t#{session_activity}";
 
@@ -608,7 +609,7 @@ mod tests {
         let s = &parse_sessions(out)[0];
         assert_eq!(s.activity, 1780955306);
 
-        let no_activity = "old\t/d\t1\t1\tclaude\t0\t";
+        let no_activity = "old\t/d\t1\t1\tclaude\t0\t\t/d"; // 8 fields, activity absent
         assert_eq!(parse_sessions(no_activity)[0].activity, 0);
     }
 
