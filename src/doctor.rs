@@ -76,6 +76,140 @@ pub fn parse_panes(out: &str) -> Panes {
     p
 }
 
+use std::process::Command;
+
+/// One classified socket, with a short summary of what it holds.
+pub struct SocketInfo {
+    pub name: String,
+    pub path: String,
+    pub class: SocketClass,
+    pub panes: Panes,
+}
+
+/// The directory tmux keeps its `-L` sockets in (e.g. `/private/tmp/tmux-501`).
+/// Resolved by starting/asking the default server, then taking the dirname.
+pub fn socket_dir() -> Option<std::path::PathBuf> {
+    let out = Command::new("tmux")
+        .args(["start-server", ";", "display-message", "-p", "#{socket_path}"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    std::path::Path::new(&p).parent().map(|d| d.to_path_buf())
+}
+
+/// Query one socket by path: `Some(Panes)` if a server answers, `None` if dead.
+fn query(path: &std::path::Path) -> Option<Panes> {
+    const FMT: &str =
+        "#{session_name}\t#{@cm_managed}\t#{pane_dead}\t#{pane_current_command}";
+    let out = Command::new("tmux")
+        .arg("-S")
+        .arg(path)
+        .args(["list-panes", "-a", "-F", FMT])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None; // "no server running" → dead socket file
+    }
+    Some(parse_panes(&String::from_utf8_lossy(&out.stdout)))
+}
+
+/// Enumerate and classify every socket in the socket dir.
+pub fn scan() -> Vec<SocketInfo> {
+    let Some(dir) = socket_dir() else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for e in entries.flatten() {
+        let path = e.path();
+        let name = e.file_name().to_string_lossy().into_owned();
+        let panes = query(&path);
+        let alive = panes.as_ref().map(|_| true);
+        let has_cm = panes.as_ref().map(|p| p.has_cm_tags).unwrap_or(false);
+        let class = classify(&name, alive, has_cm);
+        out.push(SocketInfo {
+            name,
+            path: path.to_string_lossy().into_owned(),
+            class,
+            panes: panes.unwrap_or_default(),
+        });
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
+/// Human-readable report of all sockets, grouped by class.
+pub fn report(infos: &[SocketInfo]) -> String {
+    use std::fmt::Write as _;
+    let mut s = String::new();
+    let label = |c: SocketClass| match c {
+        SocketClass::LiveManaged => "cm (live amux)   ",
+        SocketClass::UserDefault => "default (yours)  ",
+        SocketClass::LeakedAmux => "LEAKED amux      ",
+        SocketClass::OtherLive => "other (yours)    ",
+        SocketClass::StaleFile => "stale socket file",
+    };
+    for i in infos {
+        let _ = writeln!(
+            s,
+            "  {}  {:20}  {} sessions, {} dead{}",
+            label(i.class),
+            i.name,
+            i.panes.sessions,
+            i.panes.dead_panes,
+            if i.class.cleanable() { "  [cleanable]" } else { "" },
+        );
+    }
+    let n = infos.iter().filter(|i| i.class.cleanable()).count();
+    if n > 0 {
+        let _ = writeln!(s, "\n{n} cleanable — run `amux doctor --clean` to remove them.");
+    } else {
+        let _ = writeln!(s, "\nNothing to clean.");
+    }
+    s
+}
+
+/// Remove cleanable sockets: `kill-server` for leaked amux servers, then unlink
+/// the socket file (tmux's kill-server doesn't reliably remove it). Returns the
+/// names removed. Never touches protected sockets.
+pub fn clean(infos: &[SocketInfo]) -> Vec<String> {
+    let mut removed = Vec::new();
+    for i in infos.iter().filter(|i| i.class.cleanable()) {
+        if i.class == SocketClass::LeakedAmux {
+            let _ = Command::new("tmux")
+                .arg("-S")
+                .arg(&i.path)
+                .arg("kill-server")
+                .status();
+        }
+        let _ = std::fs::remove_file(&i.path);
+        removed.push(i.name.clone());
+    }
+    removed
+}
+
+/// `amux doctor [--clean]` entry point. Prints the report; with `--clean`,
+/// removes cleanable sockets and prints what it did.
+pub fn run(args: &[String]) -> std::io::Result<()> {
+    let do_clean = args.iter().any(|a| a == "--clean");
+    let infos = scan();
+    print!("{}", report(&infos));
+    if do_clean {
+        let removed = clean(&infos);
+        if removed.is_empty() {
+            println!("Cleaned nothing (no cleanable sockets).");
+        } else {
+            println!("Cleaned {}: {}", removed.len(), removed.join(", "));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
