@@ -2394,8 +2394,10 @@ impl App {
 
     /// Per-refresh verification lifecycle: drain worker events, age out verdicts
     /// for sessions that genuinely resumed work (Running >= 30 s), and GC state
-    /// for sessions that no longer exist.
-    fn poll_verifications(&mut self) {
+    /// for sessions that no longer exist. Returns `true` when a visible
+    /// verification state changed, so `refresh` can force a redraw.
+    fn poll_verifications(&mut self) -> bool {
+        let mut changed = false;
         // Drain events first (collect, then mutate — avoids borrowing the worker
         // while mutating `verification`).
         let mut events = Vec::new();
@@ -2404,6 +2406,7 @@ impl App {
                 events.push(ev);
             }
         }
+        changed |= !events.is_empty();
         for (name, msg) in events {
             self.apply_verify_event(&name, msg);
         }
@@ -2431,6 +2434,7 @@ impl App {
                 {
                     self.verification.remove(name);
                     self.running_since.remove(name);
+                    changed = true;
                 }
             } else {
                 self.running_since.remove(name);
@@ -2443,6 +2447,8 @@ impl App {
         self.verification.retain(|n, _| live.contains(n.as_str()));
         self.verify_cancel.retain(|n, _| live.contains(n.as_str()));
         self.running_since.retain(|n, _| live.contains(n.as_str()));
+
+        changed
     }
 
     /// Re-derives sessions from tmux and recomputes statuses + preview.
@@ -2513,8 +2519,7 @@ impl App {
                     // GIT_REFRESH_SECS (covers first read + periodic freshness).
                     let mut dirs: Vec<String> = Vec::new();
                     for s in &sessions {
-                        let pane_changed =
-                            new_snaps.get(&s.name) != self.snapshots.get(&s.name);
+                        let pane_changed = new_snaps.get(&s.name) != self.snapshots.get(&s.name);
                         let last = self.git_last_enqueue.get(&s.cwd).copied();
                         if should_read_git(pane_changed, last, self.now_unix, GIT_REFRESH_SECS) {
                             self.git_last_enqueue.insert(s.cwd.clone(), self.now_unix);
@@ -2532,7 +2537,8 @@ impl App {
                     let live: std::collections::HashSet<&str> =
                         sessions.iter().map(|s| s.cwd.as_str()).collect();
                     self.git_cache.retain(|k, _| live.contains(k.as_str()));
-                    self.git_last_enqueue.retain(|k, _| live.contains(k.as_str()));
+                    self.git_last_enqueue
+                        .retain(|k, _| live.contains(k.as_str()));
                 } else {
                     for s in &mut sessions {
                         s.git = crate::git::read(&s.cwd);
@@ -2542,11 +2548,12 @@ impl App {
                 self.snapshots = new_snaps;
                 let prompts_changed = self.prompts != new_prompts;
                 self.prompts = new_prompts;
-                let new_sessions =
-                    apply_grouped_order(&self.project_order, &self.order, sessions);
+                let new_sessions = apply_grouped_order(&self.project_order, &self.order, sessions);
                 let sessions_changed = self.sessions != new_sessions;
                 self.sessions = new_sessions;
-                self.poll_verifications();
+                // Drain verification events / age out verdicts; a verification
+                // change must also force a redraw (folded into `changed` below).
+                let verify_changed = self.poll_verifications();
                 // A draft lives exactly as long as its session: drop entries for
                 // sessions that no longer exist (covers ones that died while
                 // amux wasn't running). Session notes are deliberately NOT pruned
@@ -2557,7 +2564,11 @@ impl App {
                 let new_preview_val = new_preview.unwrap_or_default();
                 let preview_changed = new_preview_val != self.preview;
                 self.preview = new_preview_val;
-                changed = changed || sessions_changed || prompts_changed || preview_changed;
+                changed = changed
+                    || sessions_changed
+                    || prompts_changed
+                    || preview_changed
+                    || verify_changed;
                 // The preview header shows the selected session's humanized age;
                 // redraw when that label would tick even if nothing else changed.
                 if let Some(s) = self.selected_session() {
@@ -5569,7 +5580,10 @@ mod tests {
             .flat_map(|l| l.spans.iter())
             .map(|s| s.content.as_ref())
             .collect();
-        assert!(joined.contains("red"), "parsed text missing content: {joined:?}");
+        assert!(
+            joined.contains("red"),
+            "parsed text missing content: {joined:?}"
+        );
         assert!(!joined.contains('\u{1b}'), "escape leaked: {joined:?}");
     }
 
@@ -5629,7 +5643,10 @@ mod tests {
         // Pending update while idle in the list → opens once, returns true.
         // `upd_info()` is the existing test helper in this module (src/app.rs).
         app.update = Some(upd_info());
-        assert!(app.offer_update_if_idle(), "first offer opens the modal → true");
+        assert!(
+            app.offer_update_if_idle(),
+            "first offer opens the modal → true"
+        );
         // Already prompted this run → no second open.
         assert!(!app.offer_update_if_idle(), "second call → false");
     }
@@ -5921,6 +5938,24 @@ mod tests {
         assert!(!app.verification.contains_key("ghost"));
         assert!(!app.verify_cancel.contains_key("ghost"));
         assert!(!app.running_since.contains_key("ghost"));
+    }
+
+    #[test]
+    fn poll_verifications_signals_change_so_refresh_redraws() {
+        // The bool return must drive `refresh`'s redraw flag — otherwise a
+        // verification badge would freeze until some other event forced a draw.
+        let mut app = app_with_two_sessions();
+        app.verification
+            .insert("a".into(), VerificationState::Done(done_verdict(true)));
+        app.sessions[0].status = Status::Running;
+        app.now_unix = 1000;
+        assert!(!app.poll_verifications(), "nothing changed yet → no redraw");
+        app.now_unix = 1030; // 30 s sustained Running ages out the verdict
+        assert!(
+            app.poll_verifications(),
+            "clearing a stale verdict must signal a redraw"
+        );
+        assert!(!app.verification.contains_key("a"));
     }
 
     fn gate_result(name: &str, status: amux_verify::GateStatus) -> amux_verify::GateResult {
