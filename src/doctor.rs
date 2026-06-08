@@ -1,5 +1,7 @@
 //! `amux doctor`: surface & clean tmux/agent detritus the cm-only view hides.
 
+use std::process::Command;
+
 /// How a tmux socket found in the user's socket dir is classified.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SocketClass {
@@ -76,8 +78,6 @@ pub fn parse_panes(out: &str) -> Panes {
     p
 }
 
-use std::process::Command;
-
 /// One classified socket, with a short summary of what it holds.
 pub struct SocketInfo {
     pub name: String,
@@ -129,6 +129,9 @@ pub fn scan() -> Vec<SocketInfo> {
         let path = e.path();
         let name = e.file_name().to_string_lossy().into_owned();
         let panes = query(&path);
+        // `query` returns `Some(_)` only for a live server, `None` for a dead
+        // socket file — so `alive` here is only ever `Some(true)` or `None`
+        // (classify also accepts `Some(false)`, but this caller never sends it).
         let alive = panes.as_ref().map(|_| true);
         let has_cm = panes.as_ref().map(|p| p.has_cm_tags).unwrap_or(false);
         let class = classify(&name, alive, has_cm);
