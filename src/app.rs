@@ -2303,6 +2303,59 @@ impl App {
         }
     }
 
+    /// Per-refresh verification lifecycle: drain worker events, age out verdicts
+    /// for sessions that genuinely resumed work (Running >= 30 s), and GC state
+    /// for sessions that no longer exist.
+    fn poll_verifications(&mut self) {
+        // Drain events first (collect, then mutate — avoids borrowing the worker
+        // while mutating `verification`).
+        let mut events = Vec::new();
+        if let Some(w) = &self.verify_worker {
+            while let Ok(ev) = w.rx.try_recv() {
+                events.push(ev);
+            }
+        }
+        for (name, msg) in events {
+            self.apply_verify_event(&name, msg);
+        }
+
+        // Clear-on-resume. Snapshot (name, is_running) so we don't hold a borrow
+        // of `self.sessions` while mutating the maps. 30 s of *uninterrupted*
+        // Running is the "agent genuinely resumed" signal; brief flips never
+        // reach it.
+        let snap: Vec<(String, bool)> = self
+            .sessions
+            .iter()
+            .map(|s| (s.name.clone(), s.status == crate::tmux::Status::Running))
+            .collect();
+        for (name, is_running) in &snap {
+            if *is_running {
+                let since = *self
+                    .running_since
+                    .entry(name.clone())
+                    .or_insert(self.now_unix);
+                if self.now_unix - since >= 30
+                    && matches!(
+                        self.verification.get(name),
+                        Some(VerificationState::Done(_))
+                    )
+                {
+                    self.verification.remove(name);
+                    self.running_since.remove(name);
+                }
+            } else {
+                self.running_since.remove(name);
+            }
+        }
+
+        // GC state for sessions that no longer exist.
+        let live: std::collections::HashSet<&str> =
+            self.sessions.iter().map(|s| s.name.as_str()).collect();
+        self.verification.retain(|n, _| live.contains(n.as_str()));
+        self.verify_cancel.retain(|n, _| live.contains(n.as_str()));
+        self.running_since.retain(|n, _| live.contains(n.as_str()));
+    }
+
     /// Re-derives sessions from tmux and recomputes statuses + preview.
     pub fn refresh(&mut self) {
         match crate::tmux::list_sessions() {
@@ -2376,6 +2429,7 @@ impl App {
                 self.snapshots = new_snaps;
                 self.prompts = new_prompts;
                 self.sessions = apply_grouped_order(&self.project_order, &self.order, sessions);
+                self.poll_verifications();
                 // A draft lives exactly as long as its session: drop entries for
                 // sessions that no longer exist (covers ones that died while
                 // amux wasn't running). Session notes are deliberately NOT pruned
@@ -5473,6 +5527,58 @@ mod tests {
             app.handle_key(key('v')),
             Some(Action::Verify { name: "a".into() })
         );
+    }
+
+    #[test]
+    fn verdict_clears_after_sustained_running_but_survives_flaky_flip() {
+        let mut app = app_with_two_sessions(); // sessions "a","b"; status defaults Idle
+        app.verification
+            .insert("a".into(), VerificationState::Done(done_verdict(true)));
+
+        // Running < 30s → kept (sets running_since = 1000).
+        app.sessions[0].status = Status::Running;
+        app.now_unix = 1000;
+        app.poll_verifications();
+        assert!(
+            app.verification.contains_key("a"),
+            "kept while running < 30s"
+        );
+
+        // Flip back to Idle before 30s → running_since cleared, verdict survives.
+        app.sessions[0].status = Status::Idle;
+        app.now_unix = 1010;
+        app.poll_verifications();
+        assert!(
+            app.verification.contains_key("a"),
+            "flaky flip keeps verdict"
+        );
+
+        // Sustained running >= 30s → cleared.
+        app.sessions[0].status = Status::Running;
+        app.now_unix = 1020; // running_since = 1020
+        app.poll_verifications();
+        app.now_unix = 1050; // +30s
+        app.poll_verifications();
+        assert!(
+            !app.verification.contains_key("a"),
+            "cleared after 30s sustained running"
+        );
+    }
+
+    #[test]
+    fn poll_verifications_gcs_vanished_sessions() {
+        let mut app = app_with_two_sessions();
+        app.verification
+            .insert("ghost".into(), VerificationState::Done(done_verdict(true)));
+        app.verify_cancel.insert(
+            "ghost".into(),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        );
+        app.running_since.insert("ghost".into(), 0);
+        app.poll_verifications();
+        assert!(!app.verification.contains_key("ghost"));
+        assert!(!app.verify_cancel.contains_key("ghost"));
+        assert!(!app.running_since.contains_key("ghost"));
     }
 
     fn gate_result(name: &str, status: amux_verify::GateStatus) -> amux_verify::GateResult {
