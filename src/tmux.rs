@@ -379,6 +379,17 @@ pub fn capture_scrollback(name: &str, history: u32) -> io::Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// Validates a Claude session display name (the quoted form of `--resume`).
+/// Only alphanumeric chars, hyphens, underscores, and dots are allowed — no
+/// shell metacharacters. A strict allowlist is the only safe choice here
+/// because the value ends up inside a command string passed to `sh -c` via
+/// `tmux respawn-pane`.
+fn is_resume_name(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
 fn is_resume_uuid(s: &str) -> bool {
     let b = s.as_bytes();
     if b.len() != 36 {
@@ -412,9 +423,11 @@ pub fn parse_resume_command(pane: &str) -> Option<String> {
     clean.lines().rev().find_map(|line| {
         let rest = line.get(line.rfind(HINT)? + HINT.len()..)?;
         if let Some(inner) = rest.strip_prefix('"') {
-            // Quoted session name: extract up to the closing quote.
-            let name = inner.split('"').next().filter(|s| !s.is_empty())?;
-            Some(format!("{HINT}\"{name}\""))
+            // Quoted session name: extract up to the closing quote and
+            // validate strictly — the value lands in a `sh -c` string via
+            // `tmux respawn-pane`, so any shell metacharacter is an injection.
+            let name = inner.split('"').next()?;
+            is_resume_name(name).then(|| format!("{HINT}\"{name}\""))
         } else {
             let token = rest.split_whitespace().next()?;
             is_resume_uuid(token).then(|| format!("{HINT}{token}"))
@@ -632,6 +645,34 @@ mod tests {
     #[test]
     fn parse_resume_command_rejects_empty_quoted_name() {
         assert!(parse_resume_command("claude --resume \"\"").is_none());
+    }
+
+    #[test]
+    fn parse_resume_command_rejects_shell_metacharacters_in_name() {
+        // Shell injection attempts must be rejected, not passed to sh -c.
+        assert!(parse_resume_command("claude --resume \"\"; rm -rf ~; echo \"\"").is_none());
+        assert!(parse_resume_command("claude --resume \"$(id)\"").is_none());
+        assert!(parse_resume_command("claude --resume \"name; evil\"").is_none());
+        assert!(parse_resume_command("claude --resume \"name`evil`\"").is_none());
+        assert!(parse_resume_command("claude --resume \"name$VAR\"").is_none());
+    }
+
+    #[test]
+    fn is_resume_name_allows_safe_chars() {
+        assert!(is_resume_name("doctor-spec-part-b-tdd"));
+        assert!(is_resume_name("my_session.1"));
+        assert!(is_resume_name("ABC123"));
+    }
+
+    #[test]
+    fn is_resume_name_rejects_shell_metacharacters() {
+        assert!(!is_resume_name(""));
+        assert!(!is_resume_name("a;b"));
+        assert!(!is_resume_name("a$b"));
+        assert!(!is_resume_name("a`b`"));
+        assert!(!is_resume_name("a\"b"));
+        assert!(!is_resume_name("a b")); // spaces
+        assert!(!is_resume_name("a/b")); // slashes
     }
 
     #[test]
