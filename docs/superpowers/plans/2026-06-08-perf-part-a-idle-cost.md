@@ -34,10 +34,10 @@ Expected: builds clean.
 - [ ] **Step 2: Record idle CPU + wakeups, warm case**
 
 Launch `./target/release/am` with ≥1 session present. Leave the screen fully
-static (no keypresses) for ≥30 s. In another terminal capture, for the `am` PID:
+static (no keypresses) for ≥30 s. In another terminal capture, for the `amux` PID:
 
 Run: `top -l 6 -s 5 -pid "$(pgrep -x am | head -1)" -stats pid,cpu,idlew`
-(macOS: `idlew` = idle wakeups; or use Activity Monitor → the `am` row → %CPU and
+(macOS: `idlew` = idle wakeups; or use Activity Monitor → the `amux` row → %CPU and
 "Idle Wake Ups").
 
 Record the numbers in this checkbox (edit the file):
@@ -706,7 +706,7 @@ Expected: no new warnings.
 
 Run: `cargo run` (with ≥1 session). Verify:
 - Idle list (no running session): screen is static; in `top`/Activity Monitor the
-  `am` PID shows near-0 %CPU and few wakeups (vs. the Task 0 baseline).
+  `amux` PID shows near-0 %CPU and few wakeups (vs. the Task 0 baseline).
 - A session actively producing output shows the spinner animating smoothly.
 - Navigation (`j`/`k`), opening modals (`n`, `?`, `d`), filter (`/`), preview
   scroll (PageUp/Down, mouse wheel), and attach/detach all redraw correctly — no
