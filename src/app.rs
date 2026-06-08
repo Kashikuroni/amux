@@ -2412,6 +2412,16 @@ impl App {
                 events.push(ev);
             }
         }
+        // Nothing pending and nothing tracked: skip the per-tick snapshot + GC
+        // churn (cloning every session name, building a live-set, three retains)
+        // for the common case where verification is never in play.
+        if events.is_empty()
+            && self.verification.is_empty()
+            && self.verify_cancel.is_empty()
+            && self.running_since.is_empty()
+        {
+            return false;
+        }
         changed |= !events.is_empty();
         for (name, msg) in events {
             self.apply_verify_event(&name, msg);
@@ -2865,11 +2875,20 @@ pub fn apply_grouped_order(
     groups.into_iter().flat_map(|(_, gs)| gs).collect()
 }
 
+/// `$HOME`, read once and cached. `collapse_home` runs per project header per
+/// frame, so re-reading the env (a lock + allocation) every call showed up in
+/// the render path; the value can't change over a session's lifetime.
+fn home_dir() -> Option<&'static str> {
+    static HOME: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    HOME.get_or_init(|| std::env::var("HOME").ok().filter(|h| !h.is_empty()))
+        .as_deref()
+}
+
 /// Expands a leading `~` using `$HOME`. Leaves other paths untouched.
 pub fn expand_tilde(path: &str) -> String {
     if let Some(rest) = path.strip_prefix('~') {
         if rest.is_empty() || rest.starts_with('/') {
-            if let Ok(home) = std::env::var("HOME") {
+            if let Some(home) = home_dir() {
                 return format!("{home}{rest}");
             }
         }
@@ -2880,14 +2899,12 @@ pub fn expand_tilde(path: &str) -> String {
 /// Collapses a leading `$HOME` to `~` for display: `/Users/me/work` → `~/work`.
 /// Inverse of [`expand_tilde`]. Leaves paths outside `$HOME` untouched.
 pub fn collapse_home(path: &str) -> String {
-    if let Ok(home) = std::env::var("HOME") {
-        if !home.is_empty() {
-            if path == home {
-                return "~".to_string();
-            }
-            if let Some(rest) = path.strip_prefix(&format!("{home}/")) {
-                return format!("~/{rest}");
-            }
+    if let Some(home) = home_dir() {
+        if path == home {
+            return "~".to_string();
+        }
+        if let Some(rest) = path.strip_prefix(&format!("{home}/")) {
+            return format!("~/{rest}");
         }
     }
     path.to_string()
