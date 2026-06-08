@@ -319,6 +319,9 @@ fn run(
             // command. Time out after 30 s (something went wrong — the dead
             // pane is left for inspection; kill with `d` or retry `u`).
             if !app.restarting.is_empty() {
+                // A pending restart mutates session state / errors as panes die
+                // and respawn; always repaint while it's in flight.
+                needs_redraw = true;
                 let mut to_clear: Vec<String> = Vec::new();
                 for (name, &started) in &app.restarting {
                     if app.now_unix - started > 30 {

@@ -2257,18 +2257,22 @@ impl App {
     pub fn refresh(&mut self) -> bool {
         match crate::tmux::list_sessions() {
             Ok(mut sessions) => {
+                let mut changed = false;
                 let selected_name = self.selected_name();
                 // Size the previewed window to the preview area before capturing,
                 // so its scrollback reflows to the preview width (no doubled box).
                 if let Some(name) = &selected_name {
                     self.fit_preview_window(name);
                 }
+                let prev_now = self.now_unix;
                 self.now_unix = crate::timeutil::now_unix();
-                // Re-fork `date` only when the minute actually changes.
+                // Re-fork `date` only when the minute actually changes; the new
+                // clock string is a visible change.
                 let minute = self.now_unix / 60;
                 if minute != self.last_clock_minute {
                     self.clock = crate::timeutil::clock_hhmm();
                     self.last_clock_minute = minute;
+                    changed = true;
                 }
                 let mut new_snaps = HashMap::new();
                 let mut new_prompts = HashMap::new();
@@ -2295,11 +2299,10 @@ impl App {
                 }
                 // Git info: served from the background reader's cache when a
                 // worker is attached (never blocks the UI), else read inline.
-                // Read from `cwd` (the active pane's live path), not `dir`: an
-                // agent that `cd`s into another repo/worktree and switches
-                // branches there must show that branch, not the start dir's.
+                // Read from `cwd` (the active pane's live path), not `dir`.
                 if self.git_worker.is_some() {
-                    // Apply the most recently received `dir → GitInfo` results.
+                    // Apply newest results — MERGE (keep dirs we didn't re-request
+                    // this tick), so gating below can't drop a session's git info.
                     let mut latest = None;
                     if let Some(w) = &self.git_worker {
                         while let Ok(map) = w.rx.try_recv() {
@@ -2307,42 +2310,71 @@ impl App {
                         }
                     }
                     if let Some(map) = latest {
-                        self.git_cache = map;
+                        for (dir, info) in map {
+                            self.git_cache.insert(dir, info);
+                        }
                     }
                     for s in &mut sessions {
                         s.git = self.git_cache.get(&s.cwd).cloned();
                     }
-                    // Ask the worker to refresh git for the current directories.
-                    if let Some(w) = &self.git_worker {
-                        let dirs: Vec<String> = sessions.iter().map(|s| s.cwd.clone()).collect();
-                        let _ = w.tx.send(dirs);
+                    // Gate which dirs to re-read: pane changed, or not read within
+                    // GIT_REFRESH_SECS (covers first read + periodic freshness).
+                    let mut dirs: Vec<String> = Vec::new();
+                    for s in &sessions {
+                        let pane_changed =
+                            new_snaps.get(&s.name) != self.snapshots.get(&s.name);
+                        let last = self.git_last_enqueue.get(&s.cwd).copied();
+                        if should_read_git(pane_changed, last, self.now_unix, GIT_REFRESH_SECS) {
+                            self.git_last_enqueue.insert(s.cwd.clone(), self.now_unix);
+                            dirs.push(s.cwd.clone());
+                        }
                     }
+                    dirs.sort();
+                    dirs.dedup();
+                    if !dirs.is_empty() {
+                        if let Some(w) = &self.git_worker {
+                            let _ = w.tx.send(dirs);
+                        }
+                    }
+                    // Prune bookkeeping for sessions that are gone.
+                    let live: std::collections::HashSet<&str> =
+                        sessions.iter().map(|s| s.cwd.as_str()).collect();
+                    self.git_cache.retain(|k, _| live.contains(k.as_str()));
+                    self.git_last_enqueue.retain(|k, _| live.contains(k.as_str()));
                 } else {
                     for s in &mut sessions {
                         s.git = crate::git::read(&s.cwd);
                     }
                 }
                 self.snapshots = new_snaps;
+                let prompts_changed = self.prompts != new_prompts;
                 self.prompts = new_prompts;
-                self.sessions = apply_grouped_order(&self.project_order, &self.order, sessions);
-                // A draft lives exactly as long as its session: drop entries for
-                // sessions that no longer exist (covers ones that died while
-                // amux wasn't running). Session notes are deliberately NOT pruned
-                // here — they're user knowledge, dropped only on explicit kill.
+                let new_sessions =
+                    apply_grouped_order(&self.project_order, &self.order, sessions);
+                let sessions_changed = self.sessions != new_sessions;
+                self.sessions = new_sessions;
+                // A draft lives exactly as long as its session.
                 self.prune_dead_drafts();
                 self.clamp_selection();
-                if let Some(p) = new_preview {
-                    self.preview = p;
-                } else {
-                    // Selection may have moved; show the now-selected session next tick.
-                    self.preview.clear();
+                // Preview: Some(new) replaces; None clears (selection moved away).
+                let new_preview_val = new_preview.unwrap_or_default();
+                let preview_changed = new_preview_val != self.preview;
+                self.preview = new_preview_val;
+                changed = changed || sessions_changed || prompts_changed || preview_changed;
+                // The preview header shows the selected session's humanized age;
+                // redraw when that label would tick even if nothing else changed.
+                if let Some(s) = self.selected_session() {
+                    if age_label_changed(s.created, prev_now, self.now_unix) {
+                        changed = true;
+                    }
                 }
+                changed
             }
-            Err(e) => self.error = Some(e.to_string()),
+            Err(e) => {
+                self.error = Some(e.to_string());
+                true
+            }
         }
-        // Part A (F2 hook): always request a redraw after a refresh. Part B (F3)
-        // refines this to return whether visible state actually changed.
-        true
     }
 
     /// Removes drafts whose session is gone. Only called from `refresh` with a
@@ -5267,12 +5299,30 @@ mod tests {
     }
 
     #[test]
-    fn refresh_signals_redraw() {
-        // Part A: refresh always requests a redraw. (Part B refines to real change
-        // detection.) With no tmux worker attached, refresh runs against an empty
-        // session list and must still return true.
+    fn refresh_no_change_returns_false() {
+        // A refresh that finds nothing new must not request a redraw (F3). Needs a
+        // tmux binary to return an (empty) session list; skip if absent or if live
+        // managed sessions exist (their pane output may change between two rapid
+        // captures, making a no-op test unreliable).
+        if !crate::tmux::is_available() {
+            return;
+        }
         let mut app = App::new(Config::default());
-        assert!(app.refresh(), "refresh requests a redraw in Part A");
+        let _ = app.refresh(); // establish baseline (now_unix / clock / snapshots)
+        if !app.sessions.is_empty() {
+            return; // live sessions → environment too noisy for a no-op assertion
+        }
+        assert!(!app.refresh(), "a no-op refresh must not request a redraw");
+    }
+
+    #[test]
+    fn refresh_redraws_on_clock_minute_change() {
+        // Forcing a stale clock-minute makes refresh update the header clock, which
+        // is a visible change → redraw. Works regardless of session count, and even
+        // if tmux is absent (the Err path also returns true).
+        let mut app = App::new(Config::default());
+        app.last_clock_minute = 0;
+        assert!(app.refresh(), "a clock-minute tick must request a redraw");
     }
 
     #[test]
