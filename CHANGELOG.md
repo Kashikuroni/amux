@@ -7,6 +7,10 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- Verify a session from the TUI: `v` runs its `.amux/verify.toml` contract in the
+  background (a second `v` cancels), the status slot shows live progress and a
+  `✓ verified` / `✗ failed: <gate>` verdict, and `V` opens a detail panel with
+  per-gate results, the repro command, and the failure output.
 - Sessions whose pane directory no longer resolves to a git repo now show their
   state instead of a blank: `no repo`, or `worktree removed · ctrl+r return to root`.
   Pressing `ctrl+r` returns the session to its project root (resuming Claude in place).
