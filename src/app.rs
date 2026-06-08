@@ -2460,6 +2460,19 @@ pub fn session_root(s: &Session) -> &str {
     }
 }
 
+/// The directory to respawn a restarting session in: the `RestartReq.root`
+/// override when set (returning a removed-worktree session to its repo root),
+/// otherwise the session's own `dir`. Empty string if the session is gone.
+pub fn respawn_dir(req: &RestartReq, sessions: &[Session], name: &str) -> String {
+    req.root.clone().unwrap_or_else(|| {
+        sessions
+            .iter()
+            .find(|s| s.name.as_str() == name)
+            .map(|s| s.dir.clone())
+            .unwrap_or_default()
+    })
+}
+
 /// True if the session runs in a worktree rather than the project root — i.e.
 /// its directory sits below the project root (e.g. under `.worktrees/`).
 pub fn is_worktree(s: &Session) -> bool {
@@ -5202,5 +5215,37 @@ mod tests {
         // Some(None) but no worktree_repo → NoRepo, still a no-op.
         app.git_cache.insert("/a".to_string(), None);
         assert_eq!(app.handle_key(key('c')), None);
+    }
+
+    #[test]
+    fn respawn_dir_prefers_root_override_else_session_dir() {
+        let sessions = vec![Session {
+            name: "a".into(),
+            dir: "/a".into(),
+            cwd: "/a".into(),
+            created: 1,
+            agent: "claude".into(),
+            status: Status::Idle,
+            attached: false,
+            git: None,
+            worktree_repo: None,
+        }];
+
+        // root override wins (return-to-root path)
+        let with_root = RestartReq {
+            started: 0,
+            root: Some("/repo".into()),
+        };
+        assert_eq!(respawn_dir(&with_root, &sessions, "a"), "/repo");
+
+        // no override → the session's own dir (plain `u` restart path)
+        let no_root = RestartReq {
+            started: 0,
+            root: None,
+        };
+        assert_eq!(respawn_dir(&no_root, &sessions, "a"), "/a");
+
+        // unknown session, no override → empty
+        assert_eq!(respawn_dir(&no_root, &sessions, "ghost"), "");
     }
 }

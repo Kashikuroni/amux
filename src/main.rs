@@ -278,13 +278,7 @@ fn run(
                     }
                     if let Ok(pane) = tmux::capture_pane(name) {
                         if let Some(cmd) = tmux::parse_resume_command(&pane) {
-                            let dir = req.root.clone().unwrap_or_else(|| {
-                                app.sessions
-                                    .iter()
-                                    .find(|s| s.name == *name)
-                                    .map(|s| s.dir.clone())
-                                    .unwrap_or_default()
-                            });
+                            let dir = am::app::respawn_dir(req, &app.sessions, name);
                             if let Err(e) = tmux::respawn_pane(name, &dir, &cmd) {
                                 app.error = Some(format!("resume: {e}"));
                             }
