@@ -912,6 +912,10 @@ pub struct App {
     /// Per-dir (`cwd`) Unix time of the last git re-read request, so idle
     /// sessions aren't re-forked every tick (F3). Pruned to live sessions.
     git_last_enqueue: HashMap<String, i64>,
+    /// Last `#{session_activity}` seen per session (by name). Capture-gating
+    /// reads this to skip panes that produced no output since the last tick.
+    /// Pruned to live sessions each refresh, like `git_last_enqueue`.
+    pub last_activity: HashMap<String, i64>,
     /// Background git reader; `None` in tests (git is read synchronously then).
     pub git_worker: Option<crate::git::GitReader>,
     pub error: Option<String>,
@@ -938,6 +942,11 @@ pub struct App {
     /// so it adds nothing to release builds.
     #[cfg(test)]
     preview_parse_count: std::cell::Cell<u64>,
+    /// Number of `capture-pane` forks issued by the last refresh cycle —
+    /// test-only observability for capture-gating, so it adds nothing to
+    /// release builds.
+    #[cfg(test)]
+    capture_count: std::cell::Cell<u64>,
     /// Last (session, cols, rows) we resized a window to, to skip redundant
     /// `resize-window` calls (which would needlessly reflow the agent).
     pub preview_sized: Option<(String, u16, u16)>,
@@ -1006,6 +1015,7 @@ impl App {
             snapshots: HashMap::new(),
             git_cache: HashMap::new(),
             git_last_enqueue: HashMap::new(),
+            last_activity: HashMap::new(),
             git_worker: None,
             error: None,
             should_quit: false,
@@ -1021,6 +1031,8 @@ impl App {
             preview_cache: std::cell::RefCell::new(PreviewCache::default()),
             #[cfg(test)]
             preview_parse_count: std::cell::Cell::new(0),
+            #[cfg(test)]
+            capture_count: std::cell::Cell::new(0),
             preview_sized: None,
             split_pct: 40,
             usage: None,
@@ -2488,26 +2500,61 @@ impl App {
                     self.last_clock_minute = minute;
                     changed = true;
                 }
+                // Prev status by name (last tick's view), snapshotted before the
+                // loop so we don't borrow `self.sessions` while mutating maps.
+                let prev_status: HashMap<String, Status> = self
+                    .sessions
+                    .iter()
+                    .map(|s| (s.name.clone(), s.status.clone()))
+                    .collect();
                 let mut new_snaps = HashMap::new();
                 let mut new_prompts = HashMap::new();
                 let mut new_preview = None;
                 for s in &mut sessions {
-                    if let Ok(content) = crate::tmux::capture_pane(&s.name) {
-                        let h = content_hash(&content);
-                        s.status = compute_status(self.snapshots.get(&s.name).copied(), h);
-                        new_snaps.insert(s.name.clone(), h);
-                        let opts = parse_prompt(&content);
-                        if !opts.is_empty() {
-                            // A pending numbered prompt means the agent is blocked
-                            // on the user; this overrides the pane-diff status.
-                            s.status = Status::Waiting;
-                            new_prompts.insert(s.name.clone(), opts);
+                    let last_seen = self.last_activity.get(&s.name).copied();
+                    let gate = should_capture(s.activity, last_seen, prev_status.get(&s.name));
+                    // Only fork `capture-pane` when the pane may have changed.
+                    let captured = if gate {
+                        #[cfg(test)]
+                        self.capture_count.set(self.capture_count.get() + 1);
+                        crate::tmux::capture_pane(&s.name).ok()
+                    } else {
+                        None
+                    };
+                    match captured {
+                        Some(content) => {
+                            let h = content_hash(&content);
+                            s.status = compute_status(self.snapshots.get(&s.name).copied(), h);
+                            new_snaps.insert(s.name.clone(), h);
+                            let opts = parse_prompt(&content);
+                            if !opts.is_empty() {
+                                s.status = Status::Waiting;
+                                new_prompts.insert(s.name.clone(), opts);
+                            }
+                            self.last_activity.insert(s.name.clone(), s.activity);
+                            if selected_name.as_deref() == Some(s.name.as_str()) {
+                                new_preview = Some(
+                                    crate::tmux::capture_scrollback(&s.name, 500)
+                                        .unwrap_or(content),
+                                );
+                            }
                         }
-                        if selected_name.as_deref() == Some(s.name.as_str()) {
-                            // Preview keeps scrollback so it can be paged back.
-                            new_preview = Some(
-                                crate::tmux::capture_scrollback(&s.name, 500).unwrap_or(content),
-                            );
+                        // Skipped (gated) OR capture failed: carry forward last
+                        // tick's snapshot + prompt so `new_snaps` stays complete
+                        // (an entry for every live session — else the next tick
+                        // falsely sees a change), and keep the selected session's
+                        // preview instead of blanking it.
+                        None => {
+                            if let Some(h) = self.snapshots.get(&s.name).copied() {
+                                new_snaps.insert(s.name.clone(), h);
+                            }
+                            if let Some(opts) = self.prompts.get(&s.name).cloned() {
+                                new_prompts.insert(s.name.clone(), opts);
+                            }
+                            s.status = status_when_idle(new_prompts.contains_key(&s.name));
+                            if selected_name.as_deref() == Some(s.name.as_str()) {
+                                new_preview = Some(self.preview.clone());
+                            }
                         }
                     }
                 }
@@ -2562,6 +2609,12 @@ impl App {
                     }
                 }
                 self.snapshots = new_snaps;
+                // Prune activity bookkeeping for sessions that are gone (same
+                // pattern as the git-cache prune above).
+                let live_names: std::collections::HashSet<&str> =
+                    sessions.iter().map(|s| s.name.as_str()).collect();
+                self.last_activity
+                    .retain(|k, _| live_names.contains(k.as_str()));
                 let prompts_changed = self.prompts != new_prompts;
                 self.prompts = new_prompts;
                 let new_sessions = apply_grouped_order(&self.project_order, &self.order, sessions);
@@ -3713,6 +3766,58 @@ mod tests {
         assert_eq!(status_when_idle(true), Status::Waiting);
         // No prompt on screen: idle.
         assert_eq!(status_when_idle(false), Status::Idle);
+    }
+
+    #[test]
+    fn refresh_skips_capture_for_quiet_sessions() {
+        use crate::tmux::{self, Status};
+        if !tmux::is_available() {
+            eprintln!("skipping: tmux not available");
+            return;
+        }
+        // Throwaway socket, killed on drop — never touches the live `cm`.
+        let _sock = tmux::isolate_socket(&format!("am_gate_{}", std::process::id()));
+        let dir = std::env::temp_dir();
+        let dir = dir.to_str().unwrap();
+        let n1 = format!("am_gate_a_{}", std::process::id());
+        let n2 = format!("am_gate_b_{}", std::process::id());
+        struct Guard(Vec<String>);
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                for n in &self.0 {
+                    let _ = tmux::kill_session(n);
+                }
+            }
+        }
+        let _g = Guard(vec![n1.clone(), n2.clone()]);
+        // Silent agents: `sleep` emits nothing, so activity never advances.
+        tmux::new_session(&n1, dir, "sleep 60", "bash").expect("n1");
+        tmux::new_session(&n2, dir, "sleep 60", "bash").expect("n2");
+        // Let the initial pane draw settle so its activity is recorded by refresh 1.
+        std::thread::sleep(std::time::Duration::from_millis(400));
+
+        let mut app = App::new(crate::config::Config::default());
+
+        // Refresh 1: both new → both captured.
+        app.refresh();
+        assert_eq!(app.capture_count.get(), 2, "first tick captures every session");
+        assert_eq!(app.sessions.len(), 2, "both managed sessions listed");
+        assert_eq!(app.snapshots.len(), 2, "snapshot recorded for each");
+
+        // Refresh 2: both quiet (no output) and Idle → both skipped.
+        let before = app.capture_count.get();
+        app.refresh();
+        assert_eq!(
+            app.capture_count.get(),
+            before,
+            "quiet idle sessions must not be re-captured"
+        );
+        // Completeness invariant: skipped sessions stay in snapshots and stay Idle
+        // (must not flip to Running for lack of a fresh snapshot).
+        assert_eq!(app.snapshots.len(), 2, "skipped sessions kept in snapshots");
+        for s in &app.sessions {
+            assert_eq!(s.status, Status::Idle, "quiet session stays Idle");
+        }
     }
 
     #[test]
