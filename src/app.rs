@@ -846,7 +846,7 @@ pub struct App {
     pub snapshots: HashMap<String, u64>,
     /// Latest `dir → GitInfo` from the background git reader (see `git_worker`).
     /// Empty when no worker is attached (the refresh then reads git inline).
-    pub git_cache: HashMap<String, crate::git::GitInfo>,
+    pub git_cache: HashMap<String, Option<crate::git::GitInfo>>,
     /// Background git reader; `None` in tests (git is read synchronously then).
     pub git_worker: Option<crate::git::GitReader>,
     pub error: Option<String>,
@@ -2229,7 +2229,7 @@ impl App {
                         self.git_cache = map;
                     }
                     for s in &mut sessions {
-                        s.git = self.git_cache.get(&s.cwd).cloned();
+                        s.git = self.git_cache.get(&s.cwd).cloned().flatten();
                     }
                     // Ask the worker to refresh git for the current directories.
                     if let Some(w) = &self.git_worker {
@@ -2239,6 +2239,7 @@ impl App {
                 } else {
                     for s in &mut sessions {
                         s.git = crate::git::read(&s.cwd);
+                        self.git_cache.insert(s.cwd.clone(), s.git.clone());
                     }
                 }
                 self.snapshots = new_snaps;
