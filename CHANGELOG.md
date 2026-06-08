@@ -6,6 +6,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-06-09
+
 ### Added
 - Verify a session from the TUI: `v` runs its `.amux/verify.toml` contract in the
   background (a second `v` cancels), the status slot shows live progress and a
@@ -66,5 +68,6 @@ Initial public release.
 - Configuration via `~/.agent-multiplexer/config.toml`; persisted UI state and
   notes in `~/.agent-multiplexer/state.toml`.
 
-[Unreleased]: https://github.com/kashikuroni/amux/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/kashikuroni/amux/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/kashikuroni/amux/compare/v0.1.0...v0.5.0
 [0.1.0]: https://github.com/kashikuroni/amux/releases/tag/v0.1.0
