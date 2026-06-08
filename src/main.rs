@@ -243,6 +243,10 @@ fn run(
             needs_redraw = true;
         }
 
+        // Render only when something changed. The contract: every state
+        // mutation above (and in the event block below) must set `needs_redraw`
+        // — there is no wrapper enforcing it, so a new mutation that forgets it
+        // will leave the screen stale.
         if needs_redraw {
             terminal.draw(|f| ui::draw(f, app))?;
             needs_redraw = false;
@@ -251,7 +255,8 @@ fn run(
         let timeout = poll_timeout(any_running, app.tmux_missing, last_refresh.elapsed(), refresh);
         if event::poll(timeout)? {
             let ev = event::read()?;
-            // Any consumed input may change the view.
+            // Any event reaching the loop may change the view; ignored ones
+            // (mouse moves, key-releases) cost at most one extra redraw.
             needs_redraw = true;
             if let Event::Paste(text) = &ev {
                 if !app.tmux_missing {
