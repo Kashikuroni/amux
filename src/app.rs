@@ -2,7 +2,10 @@ use crate::config::Config;
 use crate::tmux::{Session, Status};
 use std::collections::HashMap;
 
+use ansi_to_tui::IntoText;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::text::Text;
+use ratatui::widgets::{Paragraph, Wrap};
 
 /// Sentinel label for the free-text agent slot in `CreateForm::agent_choices`.
 pub const CUSTOM_AGENT_SLOT: &str = "custom\u{2026}"; // "custom…"
@@ -837,6 +840,20 @@ pub enum RightPane {
     ProjectNote,
 }
 
+/// Cached parse of `App::preview`. ANSI parsing of up to 500 scrollback lines is
+/// expensive, so we do it once per preview change instead of once per frame.
+/// A pure memo of `preview` — holds no logical state — so the "render is
+/// read-only" contract is preserved (cf. the `preview_dims: Cell` pattern).
+#[derive(Default)]
+pub struct PreviewCache {
+    /// `content_hash(&preview)` the cache was built for.
+    hash: u64,
+    /// Parsed, styled preview text (borrowed read-only by the renderer).
+    pub text: Text<'static>,
+    /// Memoized wrapped display-row count, keyed by render width: `(width, rows)`.
+    line_count: Option<(u16, u16)>,
+}
+
 pub struct App {
     pub config: Config,
     pub sessions: Vec<Session>,
@@ -867,6 +884,10 @@ pub struct App {
     /// the capture logic can size the tmux window to match. `Cell` because render
     /// only holds `&App`. (0, 0) until the first frame.
     pub preview_dims: std::cell::Cell<(u16, u16)>,
+    /// Parsed-ANSI memo of `preview`; rebuilt only when `preview` changes (F1/F5).
+    preview_cache: std::cell::RefCell<PreviewCache>,
+    /// Number of times the preview was (re)parsed — observability for tests.
+    preview_parse_count: std::cell::Cell<u64>,
     /// Last (session, cols, rows) we resized a window to, to skip redundant
     /// `resize-window` calls (which would needlessly reflow the agent).
     pub preview_sized: Option<(String, u16, u16)>,
@@ -935,6 +956,8 @@ impl App {
             prompts: HashMap::new(),
             preview_scroll: 0,
             preview_dims: std::cell::Cell::new((0, 0)),
+            preview_cache: std::cell::RefCell::new(PreviewCache::default()),
+            preview_parse_count: std::cell::Cell::new(0),
             preview_sized: None,
             split_pct: 40,
             usage: None,
@@ -1259,6 +1282,51 @@ impl App {
             }
             None => self.preview.clear(),
         }
+    }
+
+    /// Rebuild `preview_cache` if `preview` changed since the last parse.
+    fn ensure_preview_cache(&self) {
+        let h = content_hash(&self.preview);
+        if self.preview_cache.borrow().hash == h {
+            return;
+        }
+        let trimmed = self.preview.trim_end_matches(['\n', ' ', '\t']);
+        let text = trimmed
+            .into_text()
+            .unwrap_or_else(|_| Text::raw(trimmed.to_string()));
+        *self.preview_cache.borrow_mut() = PreviewCache {
+            hash: h,
+            text,
+            line_count: None,
+        };
+        self.preview_parse_count
+            .set(self.preview_parse_count.get() + 1);
+    }
+
+    /// Parsed preview text, rebuilt only on change. Borrowed read-only by the
+    /// renderer (clones the `Text` into its `Paragraph`, as before).
+    pub fn preview_text(&self) -> std::cell::Ref<'_, PreviewCache> {
+        self.ensure_preview_cache();
+        self.preview_cache.borrow()
+    }
+
+    /// Wrapped display-row count for `width`, memoized per `(hash, width)` so a
+    /// redraw at an unchanged width skips the re-wrap pass (F5).
+    pub fn preview_line_count(&self, width: u16) -> u16 {
+        self.ensure_preview_cache();
+        if let Some((w, total)) = self.preview_cache.borrow().line_count {
+            if w == width {
+                return total;
+            }
+        }
+        let total = {
+            let cache = self.preview_cache.borrow();
+            Paragraph::new(cache.text.clone())
+                .wrap(Wrap { trim: false })
+                .line_count(width) as u16
+        };
+        self.preview_cache.borrow_mut().line_count = Some((width, total));
+        total
     }
 
     /// Size `name`'s tmux window to the preview content area so its capture
@@ -5072,5 +5140,59 @@ mod tests {
         } else {
             panic!("expected Action::Create");
         }
+    }
+
+    #[test]
+    fn preview_cache_parses_once_until_changed() {
+        let mut app = App::new(Config::default());
+        app.preview = "\u{1b}[32mhi\u{1b}[0m there".into();
+        let _ = app.preview_text();
+        let _ = app.preview_text();
+        let _ = app.preview_line_count(40);
+        assert_eq!(
+            app.preview_parse_count.get(),
+            1,
+            "unchanged preview must be parsed exactly once"
+        );
+        app.preview = "completely different".into();
+        let _ = app.preview_text();
+        assert_eq!(
+            app.preview_parse_count.get(),
+            2,
+            "changed preview must trigger one reparse"
+        );
+    }
+
+    #[test]
+    fn preview_line_count_is_memoized_per_width() {
+        let mut app = App::new(Config::default());
+        app.preview = (0..10)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let a = app.preview_line_count(20);
+        let b = app.preview_line_count(20);
+        assert_eq!(a, b, "same width must return the same count");
+        assert_eq!(
+            app.preview_parse_count.get(),
+            1,
+            "two line-count calls must not reparse ANSI"
+        );
+    }
+
+    #[test]
+    fn preview_text_returns_parsed_content() {
+        let mut app = App::new(Config::default());
+        app.preview = "\u{1b}[31mred\u{1b}[0m".into();
+        let cache = app.preview_text();
+        let joined: String = cache
+            .text
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(joined.contains("red"), "parsed text missing content: {joined:?}");
+        assert!(!joined.contains('\u{1b}'), "escape leaked: {joined:?}");
     }
 }
