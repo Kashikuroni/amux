@@ -1094,7 +1094,6 @@ impl App {
             self.order = self.sessions.iter().map(|s| s.name.clone()).collect();
             self.project_order = unique_roots(&self.sessions);
             self.dirty = true;
-            self.update_preview();
         }
     }
 
@@ -1365,22 +1364,10 @@ impl App {
         match latin_code(key.code) {
             KeyCode::Char('q') => self.should_quit = true,
             // Plain j/k move the selection; Ctrl+j/Ctrl+k scroll the preview (below).
-            KeyCode::Char('j') if !ctrl => {
-                self.select_next();
-                self.update_preview();
-            }
-            KeyCode::Down => {
-                self.select_next();
-                self.update_preview();
-            }
-            KeyCode::Char('k') if !ctrl => {
-                self.select_prev();
-                self.update_preview();
-            }
-            KeyCode::Up => {
-                self.select_prev();
-                self.update_preview();
-            }
+            KeyCode::Char('j') if !ctrl => self.select_next(),
+            KeyCode::Down => self.select_next(),
+            KeyCode::Char('k') if !ctrl => self.select_prev(),
+            KeyCode::Up => self.select_prev(),
             KeyCode::Char('n') => {
                 self.error = None;
                 self.mode = Mode::Create(CreateForm::new(
@@ -1451,10 +1438,7 @@ impl App {
                 self.selected = 0;
                 self.mode = Mode::Filter;
             }
-            KeyCode::Char('g') if !ctrl => {
-                self.select_first();
-                self.update_preview();
-            }
+            KeyCode::Char('g') if !ctrl => self.select_first(),
             // Preview scroll (without attaching). G jumps to the latest output.
             // Note: Ctrl+J only arrives distinctly under the kitty keyboard
             // protocol; on terminals without it, Ctrl+J == Enter (= attach).
@@ -1628,7 +1612,6 @@ impl App {
                 let pos = c as usize - '1' as usize;
                 if pos < self.visible_indices().len() {
                     self.selected = pos;
-                    self.update_preview();
                     self.mode = Mode::List;
                 }
             }
@@ -5358,5 +5341,21 @@ mod tests {
     #[test]
     fn age_label_stable_within_a_minute_bucket() {
         assert!(!age_label_changed(0, 100, 101));
+    }
+
+    #[test]
+    fn navigation_defers_preview_capture() {
+        // Moving the selection must NOT capture the preview inline (that IO is now
+        // debounced in the event loop). The list selection still moves immediately;
+        // only `app.preview` stays untouched until the loop calls update_preview().
+        let mut app = App::new(Config::default());
+        app.sessions = vec![named("a"), named("b")];
+        app.preview = "stale".into();
+        app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert_eq!(app.selected, 1, "selection moved to the second session");
+        assert_eq!(
+            app.preview, "stale",
+            "preview capture is deferred to the loop, not done inline on nav"
+        );
     }
 }
