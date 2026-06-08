@@ -36,14 +36,16 @@ Expected: builds clean.
 Launch `./target/release/amux` with ≥1 session present. Leave the screen fully
 static (no keypresses) for ≥30 s. In another terminal capture, for the `amux` PID:
 
-Run: `top -l 6 -s 5 -pid "$(pgrep -x amux | head -1)" -stats pid,cpu,idlew`
-(macOS: `idlew` = idle wakeups; or use Activity Monitor → the `amux` row → %CPU and
-"Idle Wake Ups").
+Run: `top -l 6 -s 5 -pid "$(pgrep -x amux | head -1)" -stats pid,cpu,csw`
+(`cpu` = %CPU; `csw` = context switches, a wakeup proxy — read the *delta*
+between the interval samples, and ignore the first sample which is cumulative
+since process start. macOS `top` has no idle-wakeups key; for true "Idle Wake
+Ups" use Activity Monitor → CPU tab → enable that column → the `amux` row.)
 
 Record the numbers in this checkbox (edit the file):
 - Sessions: `____`
 - Idle %CPU (warm): `____`
-- Idle wakeups/sec (warm): `____`
+- Idle context-switches/interval (warm): `____`  (Activity Monitor Idle Wake Ups: `____`)
 
 - [ ] **Step 3: Record idle CPU, zero-session case**
 
