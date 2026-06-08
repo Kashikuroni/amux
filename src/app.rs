@@ -2316,7 +2316,13 @@ impl App {
                 ) {
                     self.verification
                         .insert(name.to_string(), VerificationState::Done(verdict));
-                    self.verify_cancel.remove(name);
+                    // Deliberately do NOT drop `verify_cancel[name]` here. Events
+                    // are keyed only by session name, so a *stale* `Finished` from
+                    // a just-cancelled run can land on a fresh run's `Running`
+                    // placeholder; removing the cancel handle then would orphan the
+                    // new run (its later `CancelVerify` would find nothing to set).
+                    // The handle is cleaned up by the next `Verify` (overwrite) or
+                    // by `poll_verifications` GC when the session goes away.
                 }
             }
         }
@@ -5515,6 +5521,35 @@ mod tests {
             },
         );
         assert!(!app.verification.contains_key("a"));
+    }
+
+    #[test]
+    fn stale_finished_keeps_a_new_runs_cancel_handle() {
+        // Fast cancel→re-run: run B is freshly in flight (placeholder Running +
+        // its own cancel handle), then the just-cancelled run A's trailing
+        // Finished lands (events are keyed only by name). B's cancel handle must
+        // survive so a later CancelVerify can still stop B.
+        let mut app = app_with_two_sessions();
+        let cancel_b = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        app.verify_cancel.insert("a".into(), cancel_b);
+        app.verification.insert(
+            "a".into(),
+            VerificationState::Running {
+                total: 1,
+                done: 0,
+                current: String::new(),
+            },
+        );
+        app.apply_verify_event(
+            "a",
+            amux_verify::VerdictMsg::Finished {
+                verdict: done_verdict(true),
+            },
+        );
+        assert!(
+            app.verify_cancel.contains_key("a"),
+            "a stale Finished must not strip the new run's cancel handle"
+        );
     }
 
     #[test]
