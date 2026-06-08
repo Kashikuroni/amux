@@ -14,3 +14,4 @@ pub mod tmux;
 pub mod ui;
 pub mod update;
 pub mod usage;
+pub mod verify;

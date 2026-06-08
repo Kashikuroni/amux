@@ -46,6 +46,7 @@ fn card(
     total: u32,
     restarting: bool,
     git_state: GitCardState,
+    verify: Option<&crate::app::VerificationState>,
 ) -> ListItem<'static> {
     // Line 1: badge name ........... status. The status is pushed to the far
     // right so it sits in the card's top-right corner and catches the eye.
@@ -53,21 +54,65 @@ fn card(
     // A restarting session overrides its tmux-derived status: the card shows a
     // yellow spinner + "restarting" until the resume command is sent (or the
     // 30 s timeout clears it).
-    let (status_glyph, status_label, status_color) = if restarting {
+    let (status_glyph, status_label, status_color) = if let Some(vs) = verify {
+        match vs {
+            crate::app::VerificationState::Running {
+                total,
+                done,
+                current,
+            } => {
+                let label = if current.is_empty() {
+                    format!("verifying {done}/{total}")
+                } else {
+                    format!("{current} {done}/{total}")
+                };
+                (
+                    spinner::glyph(spinner_frame).to_string(),
+                    label,
+                    Color::Blue,
+                )
+            }
+            crate::app::VerificationState::Done(v) if v.passed => {
+                ("✓".to_string(), "verified".to_string(), Color::Green)
+            }
+            crate::app::VerificationState::Done(v) => {
+                // Name the gate that actually blocked the verdict — a hard
+                // failure — preferring it over a skipped or optional gate that a
+                // bare "first non-passed" scan would otherwise surface.
+                let gate = v
+                    .gates
+                    .iter()
+                    .find(|g| {
+                        matches!(
+                            g.status,
+                            amux_verify::GateStatus::Failed | amux_verify::GateStatus::TimedOut
+                        )
+                    })
+                    .or_else(|| {
+                        v.gates
+                            .iter()
+                            .find(|g| g.status != amux_verify::GateStatus::Passed)
+                    })
+                    .map(|g| g.name.as_str())
+                    .unwrap_or("failed");
+                ("✗".to_string(), format!("failed: {gate}"), Color::Red)
+            }
+        }
+    } else if restarting {
         (
             spinner::glyph(spinner_frame).to_string(),
-            "restarting",
+            "restarting".to_string(),
             Color::Yellow,
         )
     } else {
         match s.status {
             Status::Running => (
                 spinner::glyph(spinner_frame).to_string(),
-                "running",
+                "running".to_string(),
                 Color::Blue,
             ),
-            Status::Idle => (th::IDLE_MARK.to_string(), "idle", Color::Red),
-            Status::Waiting => (th::WAIT_MARK.to_string(), "waiting", INDIGO),
+            Status::Idle => (th::IDLE_MARK.to_string(), "idle".to_string(), Color::Red),
+            Status::Waiting => (th::WAIT_MARK.to_string(), "waiting".to_string(), INDIGO),
         }
     };
     // Always solid bold (no DIM): the status should read at full strength whether
@@ -419,6 +464,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             .unwrap_or((0, 0));
         let restarting = app.restarting.contains_key(&s.name);
         let git_state = crate::app::git_card_state(&app.git_cache, s);
+        let verify = app.verification.get(&s.name);
         items.push(card(
             s,
             app.spinner_frame,
@@ -430,6 +476,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             total,
             restarting,
             git_state,
+            verify,
         ));
     }
 
@@ -999,6 +1046,70 @@ mod tests {
         assert!(!s.contains("0/0"), "no counter for a taskless note:\n{s}");
     }
 
+    fn verdict(passed: bool, fail_gate: &str) -> amux_verify::Verdict {
+        let gates = if passed {
+            vec![]
+        } else {
+            vec![amux_verify::GateResult {
+                name: fail_gate.into(),
+                status: amux_verify::GateStatus::Failed,
+                exit_code: Some(1),
+                duration_ms: 1,
+                stdout_tail: String::new(),
+                stderr_tail: String::new(),
+                repro: fail_gate.into(),
+            }]
+        };
+        amux_verify::Verdict {
+            task_id: None,
+            passed,
+            gates,
+        }
+    }
+
+    #[test]
+    fn verification_states_render_in_status_slot() {
+        let s = Session {
+            name: "feat".into(),
+            dir: "/repo".into(),
+            cwd: "/repo".into(),
+            created: 1,
+            agent: "claude".into(),
+            status: Status::Idle,
+            attached: false,
+            git: None,
+            worktree_repo: None,
+        };
+        let mk = |vs: &crate::app::VerificationState| {
+            let item = card(
+                &s,
+                0,
+                false,
+                None,
+                80,
+                1,
+                0,
+                0,
+                false,
+                GitCardState::Loading,
+                Some(vs),
+            );
+            let mut buf = Buffer::empty(ratatui::layout::Rect::new(0, 0, 80, 4));
+            let list = ratatui::widgets::List::new(vec![item]);
+            ratatui::widgets::Widget::render(list, buf.area, &mut buf);
+            buf_to_string(&buf)
+        };
+        use crate::app::VerificationState::*;
+        assert!(mk(&Running {
+            total: 3,
+            done: 1,
+            current: "clippy".into()
+        })
+        .contains("clippy 1/3"));
+        assert!(mk(&Done(verdict(true, ""))).contains("verified"));
+        assert!(mk(&Done(verdict(false, "clippy"))).contains("failed: clippy"));
+    }
+
     #[test]
     fn returnable_card_shows_return_to_root_hint() {
         let s = Session {
@@ -1023,6 +1134,7 @@ mod tests {
             0,
             false,
             GitCardState::Returnable,
+            None,
         );
         // Flatten the ListItem to a String by rendering into a Buffer.
         let mut buf = Buffer::empty(ratatui::layout::Rect::new(0, 0, 80, 4));

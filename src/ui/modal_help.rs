@@ -25,6 +25,8 @@ pub fn render(f: &mut Frame) {
                 ("i", "reply to agent"),
                 ("1-9", "answer prompt"),
                 ("ctrl+r", "return to root (stale cwd)"),
+                ("v", "verify session"),
+                ("V", "verify details"),
                 ("d", "kill"),
                 ("r", "rename"),
                 ("R", "rename project"),
@@ -129,6 +131,11 @@ mod tests {
         assert!(
             s.contains("return to root"),
             "missing c/stale-cwd entry:\n{s}"
+        );
+        assert!(s.contains("verify session"), "missing v/verify entry:\n{s}");
+        assert!(
+            s.contains("verify details"),
+            "missing V/verify-details entry:\n{s}"
         );
         // No modifier-key glyphs leak in (arrows are intentionally kept).
         for glyph in ["⇧", "⇥", "↵", "^"] {

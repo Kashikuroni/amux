@@ -8,6 +8,7 @@ mod modal_kill;
 mod modal_new;
 mod modal_update;
 mod modal_usage_log;
+mod modal_verify;
 mod note;
 mod preview;
 mod sessions;
@@ -63,6 +64,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Mode::List | Mode::Filter | Mode::SelectSession | Mode::Note(_) => {}
         Mode::ConfirmUpdate(m) => modal_update::render(f, m),
         Mode::Git(form) => modal_git::render(f, form),
+        Mode::VerifyDetail(name) => modal_verify::render(f, app, name),
     }
 }
 
