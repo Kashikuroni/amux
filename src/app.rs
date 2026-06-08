@@ -864,6 +864,9 @@ pub struct App {
     /// Latest `dir → GitInfo` from the background git reader (see `git_worker`).
     /// Empty when no worker is attached (the refresh then reads git inline).
     pub git_cache: HashMap<String, crate::git::GitInfo>,
+    /// Per-dir (`cwd`) Unix time of the last git re-read request, so idle
+    /// sessions aren't re-forked every tick (F3). Pruned to live sessions.
+    git_last_enqueue: HashMap<String, i64>,
     /// Background git reader; `None` in tests (git is read synchronously then).
     pub git_worker: Option<crate::git::GitReader>,
     pub error: Option<String>,
@@ -946,6 +949,7 @@ impl App {
             preview: String::new(),
             snapshots: HashMap::new(),
             git_cache: HashMap::new(),
+            git_last_enqueue: HashMap::new(),
             git_worker: None,
             error: None,
             should_quit: false,
@@ -2454,6 +2458,31 @@ pub fn compute_status(prev: Option<u64>, current: u64) -> Status {
         Some(p) if p != current => Status::Running,
         _ => Status::Idle, // first observation OR content unchanged
     }
+}
+
+/// Coarse git re-read interval: even an unchanged pane gets its git re-read at
+/// least this often, so changes that don't alter the pane (e.g. an external
+/// commit) still surface. Pane-content changes re-read immediately.
+pub const GIT_REFRESH_SECS: i64 = 5;
+
+/// Whether to re-read git for a dir this tick: when its pane content changed,
+/// or it hasn't been read within `interval_secs` (covers the first read and
+/// periodic freshness). Pure — the refresh loop supplies the inputs.
+pub fn should_read_git(
+    pane_changed: bool,
+    last_enqueue: Option<i64>,
+    now: i64,
+    interval_secs: i64,
+) -> bool {
+    pane_changed || last_enqueue.map_or(true, |t| now - t >= interval_secs)
+}
+
+/// Whether a session's humanized age label differs between two instants — used
+/// so the preview header's age stays live without a per-frame redraw. Mirrors
+/// `timeutil::humanize_age`'s buckets (seconds under a minute, then minutes…).
+pub fn age_label_changed(created: i64, prev_now: i64, now: i64) -> bool {
+    crate::timeutil::humanize_age(prev_now - created)
+        != crate::timeutil::humanize_age(now - created)
 }
 
 /// The project root for a session directory: the path with any trailing
@@ -5244,5 +5273,40 @@ mod tests {
         // session list and must still return true.
         let mut app = App::new(Config::default());
         assert!(app.refresh(), "refresh requests a redraw in Part A");
+    }
+
+    #[test]
+    fn should_read_git_when_pane_changed() {
+        assert!(should_read_git(true, Some(1000), 1000, 5));
+    }
+
+    #[test]
+    fn should_read_git_first_time() {
+        assert!(should_read_git(false, None, 1000, 5));
+    }
+
+    #[test]
+    fn should_read_git_skips_recent_unchanged() {
+        assert!(!should_read_git(false, Some(1000), 1002, 5));
+    }
+
+    #[test]
+    fn should_read_git_refreshes_when_stale() {
+        assert!(should_read_git(false, Some(1000), 1005, 5));
+    }
+
+    #[test]
+    fn age_label_changes_across_minute_boundary() {
+        assert!(age_label_changed(0, 59, 61));
+    }
+
+    #[test]
+    fn age_label_ticks_every_second_under_a_minute() {
+        assert!(age_label_changed(0, 10, 11));
+    }
+
+    #[test]
+    fn age_label_stable_within_a_minute_bucket() {
+        assert!(!age_label_changed(0, 100, 101));
     }
 }
