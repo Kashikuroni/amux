@@ -334,18 +334,29 @@ fn is_resume_uuid(s: &str) -> bool {
     true
 }
 
-/// Scans pane output for the last `claude --resume <uuid>` command and returns
-/// it as a ready-to-run string. Returns `None` if no valid UUID-shaped token is
-/// found. ANSI escapes are stripped first (capture-pane runs with `-e`). The
-/// command is matched anywhere in the line — the tty echoes `^C` onto the hint
-/// line and Claude may wrap it in prose — and text after the UUID is ignored.
+/// Scans pane output for the last `claude --resume <id>` command and returns
+/// it as a ready-to-run string. ANSI escapes are stripped first (capture-pane
+/// runs with `-e`). The command is matched anywhere in the line — the tty
+/// echoes `^C` onto the hint line and Claude may wrap it in prose — and text
+/// after the token is ignored.
+///
+/// Accepts two token forms emitted by Claude Code:
+///   - bare UUID:  `claude --resume 1a2b3c4d-…`
+///   - quoted name: `claude --resume "my-session-name"` (when the session
+///     has a display name set via `-n` / `--name`)
 pub fn parse_resume_command(pane: &str) -> Option<String> {
     const HINT: &str = "claude --resume ";
     let clean = crate::app::strip_ansi(pane);
     clean.lines().rev().find_map(|line| {
-        let rest = &line[line.rfind(HINT)? + HINT.len()..];
-        let token = rest.split_whitespace().next()?;
-        is_resume_uuid(token).then(|| format!("{HINT}{token}"))
+        let rest = line.get(line.rfind(HINT)? + HINT.len()..)?;
+        if let Some(inner) = rest.strip_prefix('"') {
+            // Quoted session name: extract up to the closing quote.
+            let name = inner.split('"').next().filter(|s| !s.is_empty())?;
+            Some(format!("{HINT}\"{name}\""))
+        } else {
+            let token = rest.split_whitespace().next()?;
+            is_resume_uuid(token).then(|| format!("{HINT}{token}"))
+        }
     })
 }
 
@@ -531,9 +542,34 @@ mod tests {
     }
 
     #[test]
-    fn parse_resume_command_rejects_non_uuid_token() {
+    fn parse_resume_command_rejects_bare_non_uuid_token() {
+        // Bare (unquoted) non-UUID tokens are still rejected.
         assert!(parse_resume_command("claude --resume not-a-uuid").is_none());
         assert!(parse_resume_command("claude --resume 1234").is_none());
+    }
+
+    #[test]
+    fn parse_resume_command_accepts_quoted_session_name() {
+        // Claude prints a quoted name when the session has a display name.
+        let pane = "claude --resume \"doctor-spec-part-b-tdd\"\n";
+        assert_eq!(
+            parse_resume_command(pane),
+            Some("claude --resume \"doctor-spec-part-b-tdd\"".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_resume_command_quoted_name_mid_line() {
+        let pane = "^Cclaude --resume \"my-feature-branch\"\n";
+        assert_eq!(
+            parse_resume_command(pane),
+            Some("claude --resume \"my-feature-branch\"".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_resume_command_rejects_empty_quoted_name() {
+        assert!(parse_resume_command("claude --resume \"\"").is_none());
     }
 
     #[test]
