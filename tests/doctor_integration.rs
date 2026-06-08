@@ -19,7 +19,11 @@ fn detects_and_cleans_a_leaked_amux_server() {
 
     // Build a fake leaked amux server: a session tagged @cm_managed=1.
     let tmux_s = |args: &[&str]| {
-        Command::new("tmux").arg("-S").arg(&path).args(args).status()
+        Command::new("tmux")
+            .arg("-S")
+            .arg(&path)
+            .args(args)
+            .status()
     };
     // Clean any leftover, then create + tag.
     let _ = tmux_s(&["kill-server"]);
@@ -30,7 +34,11 @@ fn detects_and_cleans_a_leaked_amux_server() {
     struct Guard(std::path::PathBuf);
     impl Drop for Guard {
         fn drop(&mut self) {
-            let _ = Command::new("tmux").arg("-S").arg(&self.0).arg("kill-server").status();
+            let _ = Command::new("tmux")
+                .arg("-S")
+                .arg(&self.0)
+                .arg("kill-server")
+                .status();
             let _ = std::fs::remove_file(&self.0);
         }
     }
@@ -38,7 +46,10 @@ fn detects_and_cleans_a_leaked_amux_server() {
 
     // scan() must classify our socket as LeakedAmux.
     let infos = doctor::scan();
-    let mine = infos.iter().find(|i| i.name == name).expect("doctor saw the socket");
+    let mine = infos
+        .iter()
+        .find(|i| i.name == name)
+        .expect("doctor saw the socket");
     assert_eq!(mine.class, doctor::SocketClass::LeakedAmux);
     assert!(mine.panes.has_cm_tags);
 

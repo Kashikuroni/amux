@@ -90,7 +90,13 @@ pub struct SocketInfo {
 /// Resolved by starting/asking the default server, then taking the dirname.
 pub fn socket_dir() -> Option<std::path::PathBuf> {
     let out = Command::new("tmux")
-        .args(["start-server", ";", "display-message", "-p", "#{socket_path}"])
+        .args([
+            "start-server",
+            ";",
+            "display-message",
+            "-p",
+            "#{socket_path}",
+        ])
         .output()
         .ok()?;
     if !out.status.success() {
@@ -102,8 +108,7 @@ pub fn socket_dir() -> Option<std::path::PathBuf> {
 
 /// Query one socket by path: `Some(Panes)` if a server answers, `None` if dead.
 fn query(path: &std::path::Path) -> Option<Panes> {
-    const FMT: &str =
-        "#{session_name}\t#{@cm_managed}\t#{pane_dead}\t#{pane_current_command}";
+    const FMT: &str = "#{session_name}\t#{@cm_managed}\t#{pane_dead}\t#{pane_current_command}";
     let out = Command::new("tmux")
         .arg("-S")
         .arg(path)
@@ -165,12 +170,19 @@ pub fn report(infos: &[SocketInfo]) -> String {
             i.name,
             i.panes.sessions,
             i.panes.dead_panes,
-            if i.class.cleanable() { "  [cleanable]" } else { "" },
+            if i.class.cleanable() {
+                "  [cleanable]"
+            } else {
+                ""
+            },
         );
     }
     let n = infos.iter().filter(|i| i.class.cleanable()).count();
     if n > 0 {
-        let _ = writeln!(s, "\n{n} cleanable — run `amux doctor --clean` to remove them.");
+        let _ = writeln!(
+            s,
+            "\n{n} cleanable — run `amux doctor --clean` to remove them."
+        );
     } else {
         let _ = writeln!(s, "\nNothing to clean.");
     }
@@ -220,27 +232,42 @@ mod tests {
     #[test]
     fn classify_protects_cm_and_default() {
         assert_eq!(classify("cm", Some(true), true), SocketClass::LiveManaged);
-        assert_eq!(classify("default", Some(true), false), SocketClass::UserDefault);
+        assert_eq!(
+            classify("default", Some(true), false),
+            SocketClass::UserDefault
+        );
         // even a dead cm/default file stays protected:
         assert_eq!(classify("cm", None, false), SocketClass::LiveManaged);
     }
 
     #[test]
     fn classify_leaked_amux_is_live_server_with_cm_tags() {
-        assert_eq!(classify("cmtest", Some(true), true), SocketClass::LeakedAmux);
-        assert_eq!(classify("am_test_42247", Some(true), true), SocketClass::LeakedAmux);
+        assert_eq!(
+            classify("cmtest", Some(true), true),
+            SocketClass::LeakedAmux
+        );
+        assert_eq!(
+            classify("am_test_42247", Some(true), true),
+            SocketClass::LeakedAmux
+        );
     }
 
     #[test]
     fn classify_other_live_server_is_protected() {
         // a live non-cm server with no @cm_* tags is the user's own — list only:
-        assert_eq!(classify("mywork", Some(true), false), SocketClass::OtherLive);
+        assert_eq!(
+            classify("mywork", Some(true), false),
+            SocketClass::OtherLive
+        );
     }
 
     #[test]
     fn classify_dead_nonprotected_is_stale_file() {
         assert_eq!(classify("cmtest", None, false), SocketClass::StaleFile);
-        assert_eq!(classify("amtest", Some(false), false), SocketClass::StaleFile);
+        assert_eq!(
+            classify("amtest", Some(false), false),
+            SocketClass::StaleFile
+        );
     }
 
     #[test]

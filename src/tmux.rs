@@ -117,7 +117,13 @@ pub fn isolate_socket(name: &str) -> SocketGuard {
     // delete the file — `kill-server` stops the server but can leave a stale
     // socket file behind, which is exactly the clutter we want to avoid.
     let path = tmux()
-        .args(["start-server", ";", "display-message", "-p", "#{socket_path}"])
+        .args([
+            "start-server",
+            ";",
+            "display-message",
+            "-p",
+            "#{socket_path}",
+        ])
         .output()
         .ok()
         .filter(|o| o.status.success())

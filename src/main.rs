@@ -266,7 +266,12 @@ fn run(
             needs_redraw = false;
         }
 
-        let mut timeout = poll_timeout(any_running, app.tmux_missing, last_refresh.elapsed(), refresh);
+        let mut timeout = poll_timeout(
+            any_running,
+            app.tmux_missing,
+            last_refresh.elapsed(),
+            refresh,
+        );
         if let Some(deadline) = preview_deadline {
             // Don't sleep past a pending preview capture.
             let until = deadline.saturating_duration_since(Instant::now());
@@ -899,7 +904,12 @@ mod tests {
     #[test]
     fn poll_timeout_animates_while_running() {
         assert_eq!(
-            poll_timeout(true, false, Duration::from_millis(10), Duration::from_millis(1500)),
+            poll_timeout(
+                true,
+                false,
+                Duration::from_millis(10),
+                Duration::from_millis(1500)
+            ),
             Duration::from_millis(80),
             "a running session animates the spinner at 80ms"
         );
@@ -909,7 +919,12 @@ mod tests {
     fn poll_timeout_idle_sleeps_until_next_refresh() {
         // 500ms into a 1500ms cycle → ~1000ms remaining.
         assert_eq!(
-            poll_timeout(false, false, Duration::from_millis(500), Duration::from_millis(1500)),
+            poll_timeout(
+                false,
+                false,
+                Duration::from_millis(500),
+                Duration::from_millis(1500)
+            ),
             Duration::from_millis(1000)
         );
     }
@@ -918,19 +933,30 @@ mod tests {
     fn poll_timeout_idle_does_not_wake_at_spinner_rate() {
         // The key idle property: wait far longer than the 80ms spinner tick.
         let t = poll_timeout(false, false, Duration::ZERO, Duration::from_millis(1500));
-        assert!(t > Duration::from_millis(80), "idle must not wake at 80ms, got {t:?}");
+        assert!(
+            t > Duration::from_millis(80),
+            "idle must not wake at 80ms, got {t:?}"
+        );
     }
 
     #[test]
     fn poll_timeout_floors_when_refresh_overdue() {
         // Overdue refresh must not yield a 0ms timeout (busy spin).
-        let t = poll_timeout(false, false, Duration::from_millis(2000), Duration::from_millis(1500));
+        let t = poll_timeout(
+            false,
+            false,
+            Duration::from_millis(2000),
+            Duration::from_millis(1500),
+        );
         assert_eq!(t, Duration::from_millis(1), "floored to 1ms, got {t:?}");
     }
 
     #[test]
     fn poll_timeout_tmux_missing_waits_long() {
         let t = poll_timeout(true, true, Duration::ZERO, Duration::from_millis(1500));
-        assert!(t >= Duration::from_secs(1), "static error screen waits long, got {t:?}");
+        assert!(
+            t >= Duration::from_secs(1),
+            "static error screen waits long, got {t:?}"
+        );
     }
 }
