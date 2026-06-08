@@ -1,4 +1,4 @@
-use crate::app::{collapse_home, App};
+use crate::app::{collapse_home, App, GitCardState};
 use crate::spinner;
 use crate::theme as th;
 use crate::tmux::{Session, Status};
@@ -45,7 +45,7 @@ fn card(
     done: u32,
     total: u32,
     restarting: bool,
-    git_state: crate::app::GitCardState,
+    git_state: GitCardState,
 ) -> ListItem<'static> {
     // Line 1: badge name ........... status. The status is pushed to the far
     // right so it sits in the card's top-right corner and catches the eye.
@@ -118,7 +118,6 @@ fn card(
         Span::styled(th::AGENT_MARK, Style::default().fg(accent)),
         Span::styled(format!(" {}", s.agent), Style::default().fg(accent)),
     ];
-    use crate::app::GitCardState;
     match git_state {
         GitCardState::Repo => {
             if let Some(g) = &s.git {
@@ -174,13 +173,16 @@ fn card(
             }
         }
         GitCardState::Returnable => {
-            l2.push(Span::styled(
-                "   worktree removed · return to root? ".to_string(),
-                Style::default().add_modifier(Modifier::DIM),
-            ));
+            // Chip first so the actionable key survives right-edge clipping on
+            // narrow cards — the explanatory prose clips before the key does.
+            l2.push(Span::raw("   "));
             l2.push(Span::styled(
                 " c ",
                 Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED),
+            ));
+            l2.push(Span::styled(
+                " worktree removed · return to root?",
+                Style::default().add_modifier(Modifier::DIM),
             ));
         }
         GitCardState::NoRepo => {
@@ -988,6 +990,48 @@ mod tests {
     }
 
     #[test]
+    fn returnable_chip_survives_narrow_width() {
+        let s = Session {
+            name: "feat".into(),
+            dir: "/repo/.worktrees/feat".into(),
+            cwd: "/repo/.worktrees/feat".into(),
+            created: 1,
+            agent: "claude".into(),
+            status: Status::Idle,
+            attached: false,
+            git: None,
+            worktree_repo: Some("/repo".into()),
+        };
+        // Width 24: narrow enough that "return to root?" clips, wide enough that
+        // the chip (" c ") fits (it lands at ~col 13-15, well within 24).
+        let width = 24u16;
+        let item = card(
+            &s,
+            0,
+            false,
+            None,
+            width,
+            1,
+            0,
+            0,
+            false,
+            GitCardState::Returnable,
+        );
+        let mut buf = Buffer::empty(ratatui::layout::Rect::new(0, 0, width, 4));
+        let list = ratatui::widgets::List::new(vec![item]);
+        ratatui::widgets::Widget::render(list, buf.area, &mut buf);
+        let text = buf_to_string(&buf);
+        assert!(
+            text.contains(" c "),
+            "key chip must survive narrow width, got: {text}"
+        );
+        assert!(
+            !text.contains("return to root?"),
+            "prose should clip at narrow width, got: {text}"
+        );
+    }
+
+    #[test]
     fn returnable_card_shows_return_to_root_hint() {
         let s = Session {
             name: "feat".into(),
@@ -1010,19 +1054,13 @@ mod tests {
             0,
             0,
             false,
-            crate::app::GitCardState::Returnable,
+            GitCardState::Returnable,
         );
         // Flatten the ListItem to a String by rendering into a Buffer.
         let mut buf = Buffer::empty(ratatui::layout::Rect::new(0, 0, 80, 4));
         let list = ratatui::widgets::List::new(vec![item]);
         ratatui::widgets::Widget::render(list, buf.area, &mut buf);
-        let mut text = String::new();
-        for y in 0..buf.area.height {
-            for x in 0..buf.area.width {
-                text.push_str(buf[(x, y)].symbol());
-            }
-            text.push('\n');
-        }
+        let text = buf_to_string(&buf);
         assert!(text.contains("worktree removed"), "got: {text}");
         assert!(text.contains("return to root?"), "got: {text}");
         assert!(text.contains(" c "), "missing key chip, got: {text}");
