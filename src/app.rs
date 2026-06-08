@@ -2392,6 +2392,37 @@ pub fn project_root(dir: &str) -> &str {
     trimmed
 }
 
+/// How a session's git status should read on its card. Computed from the
+/// background reader's verdict for the session's `cwd` (in `App::git_cache`):
+/// an absent entry means the reader has not answered yet (Loading); `Some(info)`
+/// is a live repo (Repo); `Some(None)` means the cwd is not a repo — either a
+/// removed worktree we can return from (Returnable, when the repo root is known)
+/// or a plain non-repo directory with nowhere to go (NoRepo).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitCardState {
+    Repo,
+    Returnable,
+    NoRepo,
+    Loading,
+}
+
+pub fn git_card_state(
+    cache: &std::collections::HashMap<String, Option<crate::git::GitInfo>>,
+    s: &Session,
+) -> GitCardState {
+    match cache.get(&s.cwd) {
+        Some(Some(_)) => GitCardState::Repo,
+        Some(None) => {
+            if s.worktree_repo.is_some() {
+                GitCardState::Returnable
+            } else {
+                GitCardState::NoRepo
+            }
+        }
+        None => GitCardState::Loading,
+    }
+}
+
 /// The project root for a session: the worktree's repo root (from `@cm_repo`) if
 /// this is a worktree session, otherwise its directory with any `.worktrees/…`
 /// suffix stripped. Sessions sharing a root are one project.
@@ -5073,5 +5104,49 @@ mod tests {
         } else {
             panic!("expected Action::Create");
         }
+    }
+
+    #[test]
+    fn git_card_state_classifies_all_four_states() {
+        use std::collections::HashMap;
+        let mk = |cwd: &str, worktree_repo: Option<&str>| Session {
+            name: "s".into(),
+            dir: cwd.into(),
+            cwd: cwd.into(),
+            created: 1,
+            agent: "claude".into(),
+            status: Status::Idle,
+            attached: false,
+            git: None,
+            worktree_repo: worktree_repo.map(|s| s.into()),
+        };
+        let info = crate::git::GitInfo {
+            branch: "main".into(),
+            added: 0,
+            removed: 0,
+        };
+
+        // Loading: no cache entry.
+        let empty: HashMap<String, Option<crate::git::GitInfo>> = HashMap::new();
+        assert_eq!(
+            git_card_state(&empty, &mk("/a", None)),
+            GitCardState::Loading
+        );
+
+        // Repo: Some(Some(info)).
+        let mut repo = HashMap::new();
+        repo.insert("/a".to_string(), Some(info.clone()));
+        assert_eq!(git_card_state(&repo, &mk("/a", None)), GitCardState::Repo);
+
+        // Returnable: Some(None) + worktree_repo known.
+        let mut gone = HashMap::new();
+        gone.insert("/a".to_string(), None);
+        assert_eq!(
+            git_card_state(&gone, &mk("/a", Some("/repo"))),
+            GitCardState::Returnable
+        );
+
+        // NoRepo: Some(None) + no worktree_repo.
+        assert_eq!(git_card_state(&gone, &mk("/a", None)), GitCardState::NoRepo);
     }
 }
