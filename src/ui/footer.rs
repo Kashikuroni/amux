@@ -91,6 +91,7 @@ fn items_for(mode: &Mode) -> Vec<Item> {
             Some(_) => vec![("esc", "hide", false)],
         },
         Mode::Git(_) => vec![("esc", "cancel", true)],
+        Mode::VerifyDetail(_) => vec![("esc", "close", true)],
     }
 }
 

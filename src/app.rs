@@ -698,6 +698,8 @@ pub enum Mode {
     ConfirmUpdate(UpdateModal),
     /// Git operation panel (promote worktree, delete branch, or batch cleanup).
     Git(GitForm),
+    /// Read-only verification detail for a session (gate results + failures).
+    VerifyDetail(String),
 }
 
 /// Which note `Mode::Note` is editing.
@@ -859,6 +861,7 @@ enum ModeKind {
     UsageLog,
     ConfirmUpdate,
     Git,
+    VerifyDetail,
 }
 
 /// What the right pane renders: the live session preview, the selected session's
@@ -1221,6 +1224,7 @@ impl App {
             Mode::UsageLog => ModeKind::UsageLog,
             Mode::ConfirmUpdate(_) => ModeKind::ConfirmUpdate,
             Mode::Git(_) => ModeKind::Git,
+            Mode::VerifyDetail(_) => ModeKind::VerifyDetail,
         }
     }
 
@@ -1271,6 +1275,10 @@ impl App {
                 None
             }
             ModeKind::Git => self.handle_git_key(key),
+            ModeKind::VerifyDetail => {
+                self.mode = Mode::List;
+                None
+            }
         }
     }
 
@@ -1423,6 +1431,17 @@ impl App {
                     } else {
                         Action::Verify { name }
                     });
+                }
+            }
+            // V: open the verification detail modal (gates + failure output).
+            KeyCode::Char('V') => {
+                if let Some(name) = self.selected_name() {
+                    if matches!(
+                        self.verification.get(&name),
+                        Some(VerificationState::Done(_))
+                    ) {
+                        self.mode = Mode::VerifyDetail(name);
+                    }
                 }
             }
             // Shift+R: rename the selected session's project (display-only).
@@ -5591,5 +5610,19 @@ mod tests {
             stderr_tail: String::new(),
             repro: name.into(),
         }
+    }
+
+    #[test]
+    fn shift_v_opens_detail_only_with_a_verdict() {
+        let mut app = app_with_two_sessions();
+        app.selected = 0;
+        // No verdict → no-op.
+        app.handle_key(key('V'));
+        assert!(matches!(app.mode, Mode::List));
+        // Done verdict → opens detail.
+        app.verification
+            .insert("a".into(), VerificationState::Done(done_verdict(false)));
+        app.handle_key(key('V'));
+        assert!(matches!(app.mode, Mode::VerifyDetail(ref n) if n == "a"));
     }
 }
