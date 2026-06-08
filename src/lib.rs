@@ -2,6 +2,7 @@ pub mod app;
 pub mod browse;
 pub mod clip;
 pub mod config;
+pub mod doctor;
 pub mod editor;
 pub mod git;
 pub mod note;
