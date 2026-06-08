@@ -45,6 +45,7 @@ fn card(
     done: u32,
     total: u32,
     restarting: bool,
+    git_state: crate::app::GitCardState,
 ) -> ListItem<'static> {
     // Line 1: badge name ........... status. The status is pushed to the far
     // right so it sits in the card's top-right corner and catches the eye.
@@ -117,63 +118,85 @@ fn card(
         Span::styled(th::AGENT_MARK, Style::default().fg(accent)),
         Span::styled(format!(" {}", s.agent), Style::default().fg(accent)),
     ];
-    if let Some(g) = &s.git {
-        // Worktree sessions swap the branch glyph (⧉) for the repo-root one (⎇)
-        // and tint it (terracotta vs slate-teal), so "running in a linked
-        // worktree" reads from the marker's shape *and* color — no extra width or
-        // trailing tag. Only the glyph is colored; the branch name stays neutral.
-        let (glyph, glyph_fg) = if crate::app::is_worktree(s) {
-            (th::WORKTREE, WORKTREE_FG)
-        } else {
-            (th::BRANCH, BRANCH_FG)
-        };
-        l2.push(Span::styled(
-            format!("   {glyph} "),
-            Style::default().fg(glyph_fg).add_modifier(Modifier::BOLD),
-        ));
-        l2.push(Span::styled(
-            g.branch.clone(),
-            Style::default()
-                .fg(Color::Reset)
-                .add_modifier(Modifier::DIM),
-        ));
-        // Task counter sits in the left run (so the diff still right-aligns).
-        let counter = if total > 0 {
-            format!("   {done}/{total}")
-        } else {
-            String::new()
-        };
-        if !counter.is_empty() {
+    use crate::app::GitCardState;
+    match git_state {
+        GitCardState::Repo => {
+            if let Some(g) = &s.git {
+                // Worktree sessions swap the branch glyph (⧉) for the repo-root one (⎇)
+                // and tint it (terracotta vs slate-teal), so "running in a linked
+                // worktree" reads from the marker's shape *and* color — no extra width or
+                // trailing tag. Only the glyph is colored; the branch name stays neutral.
+                let (glyph, glyph_fg) = if crate::app::is_worktree(s) {
+                    (th::WORKTREE, WORKTREE_FG)
+                } else {
+                    (th::BRANCH, BRANCH_FG)
+                };
+                l2.push(Span::styled(
+                    format!("   {glyph} "),
+                    Style::default().fg(glyph_fg).add_modifier(Modifier::BOLD),
+                ));
+                l2.push(Span::styled(
+                    g.branch.clone(),
+                    Style::default()
+                        .fg(Color::Reset)
+                        .add_modifier(Modifier::DIM),
+                ));
+                // Task counter sits in the left run (so the diff still right-aligns).
+                let counter = if total > 0 {
+                    format!("   {done}/{total}")
+                } else {
+                    String::new()
+                };
+                if !counter.is_empty() {
+                    l2.push(Span::styled(
+                        counter.clone(),
+                        Style::default().add_modifier(Modifier::DIM),
+                    ));
+                }
+                // Right-align the diff stat to the card's right edge so it lands directly
+                // under the status on line 1 (same width-based padding as line 1).
+                let added = format!("+{}", g.added);
+                let removed = format!("−{}", g.removed);
+                let left2 = INDENT.len()
+                    + 1                            // ✻ agent mark
+                    + 1 + s.agent.chars().count()  // " {agent}"
+                    + 5                            // "   {glyph} " (3 spaces + glyph + space)
+                    + g.branch.chars().count()
+                    + counter.chars().count();
+                let diff_width = added.chars().count() + 1 + removed.chars().count();
+                let pad2 = (width as usize).saturating_sub(left2 + diff_width).max(1);
+                l2.push(Span::raw(" ".repeat(pad2)));
+                l2.push(Span::styled(added, Style::default().fg(Color::Green)));
+                l2.push(Span::styled(
+                    format!(" {removed}"),
+                    Style::default().fg(Color::Red),
+                ));
+            }
+        }
+        GitCardState::Returnable => {
             l2.push(Span::styled(
-                counter.clone(),
+                "   worktree removed · return to root? ".to_string(),
+                Style::default().add_modifier(Modifier::DIM),
+            ));
+            l2.push(Span::styled(
+                " c ",
+                Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED),
+            ));
+        }
+        GitCardState::NoRepo => {
+            l2.push(Span::styled(
+                "   no repo".to_string(),
                 Style::default().add_modifier(Modifier::DIM),
             ));
         }
-        // Right-align the diff stat to the card's right edge so it lands directly
-        // under the status on line 1 (same width-based padding as line 1).
-        let added = format!("+{}", g.added);
-        let removed = format!("−{}", g.removed);
-        let left2 = INDENT.len()
-            + 1                            // ✻ agent mark
-            + 1 + s.agent.chars().count()  // " {agent}"
-            + 5                            // "   {glyph} " (3 spaces + glyph + space)
-            + g.branch.chars().count()
-            + counter.chars().count();
-        let diff_width = added.chars().count() + 1 + removed.chars().count();
-        let pad2 = (width as usize).saturating_sub(left2 + diff_width).max(1);
-        l2.push(Span::raw(" ".repeat(pad2)));
-        l2.push(Span::styled(added, Style::default().fg(Color::Green)));
-        l2.push(Span::styled(
-            format!(" {removed}"),
-            Style::default().fg(Color::Red),
-        ));
-    }
-    // No git info: append the counter to the agent line if the note has tasks.
-    if s.git.is_none() && total > 0 {
-        l2.push(Span::styled(
-            format!("   {done}/{total}"),
-            Style::default().add_modifier(Modifier::DIM),
-        ));
+        GitCardState::Loading => {
+            if total > 0 {
+                l2.push(Span::styled(
+                    format!("   {done}/{total}"),
+                    Style::default().add_modifier(Modifier::DIM),
+                ));
+            }
+        }
     }
     let line2 = Line::from(l2);
 
@@ -389,6 +412,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             .map(|t| crate::note::counts(t))
             .unwrap_or((0, 0));
         let restarting = app.restarting.contains_key(&s.name);
+        let git_state = crate::app::git_card_state(&app.git_cache, s);
         items.push(card(
             s,
             app.spinner_frame,
@@ -399,6 +423,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             done,
             total,
             restarting,
+            git_state,
         ));
     }
 
@@ -503,6 +528,15 @@ mod tests {
             sess("project-b", Status::Idle, None),
         ];
         app.selected = 0;
+        // Populate git_cache so git_card_state returns Repo for project-a.
+        app.git_cache.insert(
+            "~/work/x".into(),
+            Some(GitInfo {
+                branch: "main".into(),
+                added: 12,
+                removed: 4,
+            }),
+        );
         let mut t = Terminal::new(TestBackend::new(60, 16)).unwrap();
         t.draw(|f| render(f, f.area(), &app)).unwrap();
         let buf = t.backend().buffer();
@@ -542,6 +576,15 @@ mod tests {
             }),
         )];
         app.selected = 0;
+        // Populate git_cache so git_card_state returns Repo.
+        app.git_cache.insert(
+            "~/work/x".into(),
+            Some(GitInfo {
+                branch: "main".into(),
+                added: 1,
+                removed: 0,
+            }),
+        );
         let mut t = Terminal::new(TestBackend::new(60, 16)).unwrap();
         t.draw(|f| render(f, f.area(), &app)).unwrap();
         let buf = t.backend().buffer();
@@ -639,6 +682,15 @@ mod tests {
             ),
             sess("project-b", Status::Idle, None),
         ];
+        // Populate git_cache so git_card_state returns Repo for project-a.
+        app.git_cache.insert(
+            "~/work/x".into(),
+            Some(GitInfo {
+                branch: "main".into(),
+                added: 12,
+                removed: 4,
+            }),
+        );
         let mut t = Terminal::new(TestBackend::new(60, 16)).unwrap();
         t.draw(|f| render(f, f.area(), &app)).unwrap();
         let s = buf_to_string(t.backend().buffer());
@@ -672,6 +724,15 @@ mod tests {
                 removed: 4,
             }),
         )];
+        // Populate git_cache so git_card_state returns Repo.
+        app.git_cache.insert(
+            "~/work/x".into(),
+            Some(GitInfo {
+                branch: "main".into(),
+                added: 12,
+                removed: 4,
+            }),
+        );
         let mut t = Terminal::new(TestBackend::new(60, 10)).unwrap();
         t.draw(|f| render(f, f.area(), &app)).unwrap();
         let buf = t.backend().buffer();
@@ -753,6 +814,15 @@ mod tests {
         s.dir = "~/work/x/.worktrees/feature-x".into();
         s.worktree_repo = Some("~/work/x".into());
         app.sessions = vec![s];
+        // Populate git_cache so git_card_state returns Repo (cwd is still "~/work/x").
+        app.git_cache.insert(
+            "~/work/x".into(),
+            Some(GitInfo {
+                branch: "feature-x".into(),
+                added: 3,
+                removed: 1,
+            }),
+        );
         let mut t = Terminal::new(TestBackend::new(80, 8)).unwrap();
         t.draw(|f| render(f, f.area(), &app)).unwrap();
         // Skip row 0 (the SESSIONS header legend carries both glyphs).
@@ -788,6 +858,15 @@ mod tests {
                 removed: 0,
             }),
         )];
+        // Populate git_cache so git_card_state returns Repo.
+        app.git_cache.insert(
+            "~/work/x".into(),
+            Some(GitInfo {
+                branch: "main".into(),
+                added: 0,
+                removed: 0,
+            }),
+        );
         let mut t = Terminal::new(TestBackend::new(80, 8)).unwrap();
         t.draw(|f| render(f, f.area(), &app)).unwrap();
         // Skip row 0 (the SESSIONS header legend carries both glyphs).
@@ -906,5 +985,46 @@ mod tests {
         t.draw(|f| render(f, f.area(), &app)).unwrap();
         let s = buf_to_string(t.backend().buffer());
         assert!(!s.contains("0/0"), "no counter for a taskless note:\n{s}");
+    }
+
+    #[test]
+    fn returnable_card_shows_return_to_root_hint() {
+        let s = Session {
+            name: "feat".into(),
+            dir: "/repo/.worktrees/feat".into(),
+            cwd: "/repo/.worktrees/feat".into(),
+            created: 1,
+            agent: "claude".into(),
+            status: Status::Idle,
+            attached: false,
+            git: None,
+            worktree_repo: Some("/repo".into()),
+        };
+        let item = card(
+            &s,
+            0,
+            false,
+            None,
+            80,
+            1,
+            0,
+            0,
+            false,
+            crate::app::GitCardState::Returnable,
+        );
+        // Flatten the ListItem to a String by rendering into a Buffer.
+        let mut buf = Buffer::empty(ratatui::layout::Rect::new(0, 0, 80, 4));
+        let list = ratatui::widgets::List::new(vec![item]);
+        ratatui::widgets::Widget::render(list, buf.area, &mut buf);
+        let mut text = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                text.push_str(buf[(x, y)].symbol());
+            }
+            text.push('\n');
+        }
+        assert!(text.contains("worktree removed"), "got: {text}");
+        assert!(text.contains("return to root?"), "got: {text}");
+        assert!(text.contains(" c "), "missing key chip, got: {text}");
     }
 }
