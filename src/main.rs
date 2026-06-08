@@ -191,6 +191,10 @@ fn poll_timeout(
     refresh.saturating_sub(since_refresh).max(FLOOR)
 }
 
+/// How long the selected session must stay settled before the loop captures its
+/// preview — coalesces a burst of `j`/`k` into a single tmux capture+resize (F4).
+const PREVIEW_DEBOUNCE: Duration = Duration::from_millis(120);
+
 fn run(
     terminal: &mut Term,
     app: &mut App,
@@ -203,6 +207,8 @@ fn run(
     let mut install_rx: Option<mpsc::Receiver<am::update::UpdateStage>> = None;
     // Draw once on entry; thereafter only when something changed (F2).
     let mut needs_redraw = true;
+    // When the selection changes, capture the new preview after it settles.
+    let mut preview_deadline: Option<Instant> = None;
     loop {
         // Drain background channels; any applied message changes the view.
         while let Ok(acct) = usage_rx.try_recv() {
@@ -252,7 +258,12 @@ fn run(
             needs_redraw = false;
         }
 
-        let timeout = poll_timeout(any_running, app.tmux_missing, last_refresh.elapsed(), refresh);
+        let mut timeout = poll_timeout(any_running, app.tmux_missing, last_refresh.elapsed(), refresh);
+        if let Some(deadline) = preview_deadline {
+            // Don't sleep past a pending preview capture.
+            let until = deadline.saturating_duration_since(Instant::now());
+            timeout = timeout.min(until.max(Duration::from_millis(1)));
+        }
         if event::poll(timeout)? {
             let ev = event::read()?;
             // Any event reaching the loop may change the view; ignored ones
@@ -296,7 +307,12 @@ fn run(
                     }
                     continue;
                 }
-                if let Some(action) = app.handle_key(key) {
+                // Note the selected session before/after: a pure navigation key
+                // (no Action) that changed it arms the preview-capture debounce.
+                let prev_sel = app.selected_name();
+                let action = app.handle_key(key);
+                let nav_changed = action.is_none() && app.selected_name() != prev_sel;
+                if let Some(action) = action {
                     handle_action(terminal, app, action, &mut install_rx)?;
                 }
                 // Persist split width / session order if a key changed them.
@@ -304,6 +320,19 @@ fn run(
                     app.snapshot_state().save();
                     app.dirty = false;
                 }
+                if nav_changed {
+                    // Re-arm on each move so a held key coalesces to one capture.
+                    preview_deadline = Some(Instant::now() + PREVIEW_DEBOUNCE);
+                }
+            }
+        }
+
+        // Selection settled long enough → capture its preview once.
+        if let Some(deadline) = preview_deadline {
+            if Instant::now() >= deadline {
+                app.update_preview();
+                preview_deadline = None;
+                needs_redraw = true;
             }
         }
 
@@ -312,6 +341,9 @@ fn run(
                 needs_redraw = true;
             }
             last_refresh = Instant::now();
+            // refresh() just recaptured the selected session's preview, so any
+            // pending debounce is redundant.
+            preview_deadline = None;
 
             // For sessions awaiting resume: once claude exits, the pane goes
             // dead (kept by remain-on-exit) with the `claude --resume <uuid>`
