@@ -924,6 +924,9 @@ pub struct App {
     pub notes: std::collections::BTreeMap<String, String>,
     /// In-progress reply drafts, keyed by tmux session name.
     pub drafts: std::collections::BTreeMap<String, String>,
+    /// Agent sessions to recreate after a computer reboot (cold start).
+    /// Mirrors `State::sessions`; updated on create/kill/rename/resume.
+    pub session_persist: std::collections::BTreeMap<String, crate::state::PersistedSession>,
     /// Which content the right pane shows.
     pub right_pane: RightPane,
 }
@@ -967,6 +970,7 @@ impl App {
             project_notes: std::collections::BTreeMap::new(),
             notes: std::collections::BTreeMap::new(),
             drafts: std::collections::BTreeMap::new(),
+            session_persist: std::collections::BTreeMap::new(),
             right_pane: RightPane::Preview,
         }
     }
@@ -982,6 +986,7 @@ impl App {
         self.project_notes = state.project_notes;
         self.notes = state.notes;
         self.drafts = state.drafts;
+        self.session_persist = state.sessions;
     }
 
     /// Snapshots the persistable UI state for saving to disk.
@@ -994,6 +999,7 @@ impl App {
             project_notes: self.project_notes.clone(),
             notes: self.notes.clone(),
             drafts: self.drafts.clone(),
+            sessions: self.session_persist.clone(),
         }
     }
 
