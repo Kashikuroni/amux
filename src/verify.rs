@@ -49,13 +49,18 @@ pub fn spawn_verifier() -> Verifier {
                 continue; // cancelled before it ever started
             }
             let opts = RunOptions {
-                default_timeout_s: 300,
                 task_id: Some(req.name.clone()),
-                stream_output: false,
+                ..RunOptions::default()
             };
             let name = req.name.clone();
+            // A clone of the same flag: if the UI receiver is gone, flip it so
+            // `run` (which polls this AtomicBool mid-gate) stops promptly instead
+            // of finishing a heavy build no one is listening to.
+            let cancel = req.cancel.clone();
             let mut on_event = |msg: VerdictMsg| {
-                let _ = res_tx.send((name.clone(), msg));
+                if res_tx.send((name.clone(), msg)).is_err() {
+                    cancel.store(true, Ordering::SeqCst);
+                }
             };
             run(&req.dir, &req.contract, &opts, &req.cancel, &mut on_event);
         }
