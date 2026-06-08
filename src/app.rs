@@ -2474,7 +2474,7 @@ pub fn should_read_git(
     now: i64,
     interval_secs: i64,
 ) -> bool {
-    pane_changed || last_enqueue.map_or(true, |t| now - t >= interval_secs)
+    pane_changed || last_enqueue.is_none_or(|t| now - t >= interval_secs)
 }
 
 /// Whether a session's humanized age label differs between two instants — used
@@ -5297,7 +5297,7 @@ mod tests {
 
     #[test]
     fn age_label_changes_across_minute_boundary() {
-        assert!(age_label_changed(0, 59, 61));
+        assert!(age_label_changed(0, 59, 60));
     }
 
     #[test]
