@@ -1247,16 +1247,18 @@ impl App {
     }
 
     /// Opens the update offer when one is pending, the user is idle in the
-    /// list, and we haven't asked yet this run.
-    pub fn offer_update_if_idle(&mut self) {
+    /// list, and we haven't asked yet this run. Returns true if it opened the
+    /// modal (so the event loop knows to redraw).
+    pub fn offer_update_if_idle(&mut self) -> bool {
         if self.update_prompted || !matches!(self.mode, Mode::List) {
-            return;
+            return false;
         }
         let Some(info) = self.update.clone() else {
-            return;
+            return false;
         };
         self.update_prompted = true;
         self.mode = Mode::ConfirmUpdate(UpdateModal { info, stage: None });
+        true
     }
 
     /// Feeds installer progress in. A hidden modal stays hidden; Done clears
@@ -2248,7 +2250,7 @@ impl App {
     }
 
     /// Re-derives sessions from tmux and recomputes statuses + preview.
-    pub fn refresh(&mut self) {
+    pub fn refresh(&mut self) -> bool {
         match crate::tmux::list_sessions() {
             Ok(mut sessions) => {
                 let selected_name = self.selected_name();
@@ -2334,6 +2336,9 @@ impl App {
             }
             Err(e) => self.error = Some(e.to_string()),
         }
+        // Part A (F2 hook): always request a redraw after a refresh. Part B (F3)
+        // refines this to return whether visible state actually changed.
+        true
     }
 
     /// Removes drafts whose session is gone. Only called from `refresh` with a
@@ -5217,5 +5222,27 @@ mod tests {
             narrow >= wide,
             "narrower width must not reduce the wrapped row count (wide={wide}, narrow={narrow})"
         );
+    }
+
+    #[test]
+    fn offer_update_returns_true_only_when_it_opens_the_modal() {
+        let mut app = App::new(Config::default());
+        // No pending update → nothing opens.
+        assert!(!app.offer_update_if_idle(), "no update → false");
+        // Pending update while idle in the list → opens once, returns true.
+        // `upd_info()` is the existing test helper in this module (src/app.rs).
+        app.update = Some(upd_info());
+        assert!(app.offer_update_if_idle(), "first offer opens the modal → true");
+        // Already prompted this run → no second open.
+        assert!(!app.offer_update_if_idle(), "second call → false");
+    }
+
+    #[test]
+    fn refresh_signals_redraw() {
+        // Part A: refresh always requests a redraw. (Part B refines to real change
+        // detection.) With no tmux worker attached, refresh runs against an empty
+        // session list and must still return true.
+        let mut app = App::new(Config::default());
+        assert!(app.refresh(), "refresh requests a redraw in Part A");
     }
 }
