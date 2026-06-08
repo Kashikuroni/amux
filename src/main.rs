@@ -45,6 +45,7 @@ fn main() -> io::Result<()> {
     app.apply_state(state);
     // Read git off the UI thread so large/slow repos never stall rendering.
     app.attach_git_worker();
+    app.attach_verifier();
     if !tmux::is_available() {
         app.tmux_missing = true;
     } else {

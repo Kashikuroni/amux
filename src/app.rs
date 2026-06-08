@@ -1,6 +1,8 @@
 use crate::config::Config;
 use crate::tmux::{Session, Status};
 use std::collections::HashMap;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -746,6 +748,22 @@ pub enum WorktreeSpec {
     Existing { branch: String },
 }
 
+/// A session's verification status, keyed by session name on `App` (not a
+/// `Session` field — `Session` is rebuilt from tmux every refresh). Rendered in
+/// the card's status slot.
+#[derive(Debug, Clone)]
+pub enum VerificationState {
+    /// A run is in flight: `done`/`total` gates, `current` gate name (may be empty
+    /// before the first GateStarted).
+    Running {
+        total: usize,
+        done: usize,
+        current: String,
+    },
+    /// A finished verdict (passed or failed).
+    Done(amux_verify::Verdict),
+}
+
 /// Side effects the event loop must perform (kept out of `App` so it stays IO-free).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
@@ -909,6 +927,15 @@ pub struct App {
     /// `claude --resume <uuid>` command to appear in their pane output.
     /// Maps session name → restart request (start time + optional cwd override).
     pub restarting: HashMap<String, RestartReq>,
+    /// Per-session verification state, keyed by session name.
+    pub verification: HashMap<String, VerificationState>,
+    /// In-flight cancel flags, keyed by session name (kept out of
+    /// `VerificationState` so that stays pure data).
+    pub verify_cancel: HashMap<String, Arc<AtomicBool>>,
+    /// Unix-secs marking the start of a session's current uninterrupted Running
+    /// spell — used to age out a verdict only after sustained (>=30 s) work.
+    pub running_since: HashMap<String, i64>,
+    pub verify_worker: Option<crate::verify::Verifier>,
     /// User's custom session order *within projects* (by name). Empty = tmux order.
     pub order: Vec<String>,
     /// User's custom project (group) order, by project root path.
@@ -960,6 +987,10 @@ impl App {
             update: None,
             update_prompted: false,
             restarting: HashMap::new(),
+            verification: HashMap::new(),
+            verify_cancel: HashMap::new(),
+            running_since: HashMap::new(),
+            verify_worker: None,
             order: Vec::new(),
             project_order: Vec::new(),
             project_names: std::collections::BTreeMap::new(),
@@ -2199,6 +2230,53 @@ impl App {
     /// Call once at startup. Without it, `refresh` reads git synchronously.
     pub fn attach_git_worker(&mut self) {
         self.git_worker = Some(crate::git::spawn_reader());
+    }
+
+    pub fn attach_verifier(&mut self) {
+        self.verify_worker = Some(crate::verify::spawn_verifier());
+    }
+
+    /// Applies one verification event. Every non-`Started` event is applied only
+    /// while a `Running` entry exists, so a cancelled run (whose state was
+    /// removed) never revives into a `Done` verdict.
+    pub fn apply_verify_event(&mut self, name: &str, msg: amux_verify::VerdictMsg) {
+        use amux_verify::VerdictMsg::*;
+        match msg {
+            Started { total_gates } => {
+                self.verification.insert(
+                    name.to_string(),
+                    VerificationState::Running {
+                        total: total_gates,
+                        done: 0,
+                        current: String::new(),
+                    },
+                );
+            }
+            GateStarted { name: gate, .. } => {
+                if let Some(VerificationState::Running { current, .. }) =
+                    self.verification.get_mut(name)
+                {
+                    *current = gate;
+                }
+            }
+            GateFinished { index, .. } => {
+                if let Some(VerificationState::Running { done, .. }) =
+                    self.verification.get_mut(name)
+                {
+                    *done = index + 1;
+                }
+            }
+            Finished { verdict } => {
+                if matches!(
+                    self.verification.get(name),
+                    Some(VerificationState::Running { .. })
+                ) {
+                    self.verification
+                        .insert(name.to_string(), VerificationState::Done(verdict));
+                    self.verify_cancel.remove(name);
+                }
+            }
+        }
     }
 
     /// Re-derives sessions from tmux and recomputes statuses + preview.
@@ -5273,5 +5351,84 @@ mod tests {
 
         // unknown session, no override → empty
         assert_eq!(respawn_dir(&no_root, &sessions, "ghost"), "");
+    }
+
+    fn done_verdict(passed: bool) -> amux_verify::Verdict {
+        amux_verify::Verdict {
+            task_id: None,
+            passed,
+            gates: vec![],
+        }
+    }
+
+    #[test]
+    fn apply_verify_event_drives_running_then_done() {
+        use amux_verify::VerdictMsg::*;
+        let mut app = app_with_two_sessions();
+        app.apply_verify_event("a", Started { total_gates: 2 });
+        assert!(matches!(
+            app.verification.get("a"),
+            Some(VerificationState::Running {
+                total: 2,
+                done: 0,
+                ..
+            })
+        ));
+        app.apply_verify_event(
+            "a",
+            GateStarted {
+                index: 0,
+                name: "build".into(),
+            },
+        );
+        app.apply_verify_event(
+            "a",
+            GateFinished {
+                index: 0,
+                result: gate_result("build", amux_verify::GateStatus::Passed),
+            },
+        );
+        match app.verification.get("a") {
+            Some(VerificationState::Running { done, current, .. }) => {
+                assert_eq!(*done, 1);
+                assert_eq!(current, "build");
+            }
+            other => panic!("expected Running, got {other:?}"),
+        }
+        app.apply_verify_event(
+            "a",
+            Finished {
+                verdict: done_verdict(true),
+            },
+        );
+        assert!(matches!(
+            app.verification.get("a"),
+            Some(VerificationState::Done(_))
+        ));
+    }
+
+    #[test]
+    fn finished_is_ignored_without_a_running_entry() {
+        // Models a cancelled run: state already removed, trailing Finished must not revive it.
+        let mut app = app_with_two_sessions();
+        app.apply_verify_event(
+            "a",
+            amux_verify::VerdictMsg::Finished {
+                verdict: done_verdict(true),
+            },
+        );
+        assert!(!app.verification.contains_key("a"));
+    }
+
+    fn gate_result(name: &str, status: amux_verify::GateStatus) -> amux_verify::GateResult {
+        amux_verify::GateResult {
+            name: name.into(),
+            status,
+            exit_code: Some(0),
+            duration_ms: 1,
+            stdout_tail: String::new(),
+            stderr_tail: String::new(),
+            repro: name.into(),
+        }
     }
 }
