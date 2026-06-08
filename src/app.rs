@@ -811,6 +811,13 @@ pub enum Action {
         repo_root: String,
         branches: Vec<String>,
     },
+    /// Return a session whose worktree was removed back to its repo root. For a
+    /// Claude session this restarts it (resumed) in `root`; for a shell it sends
+    /// `cd <root>`.
+    ReturnToRoot {
+        name: String,
+        root: String,
+    },
 }
 
 #[derive(Copy, Clone)]
@@ -854,6 +861,15 @@ struct PreviewCache {
     line_count: Option<(u16, u16)>,
 }
 
+/// A session awaiting Claude restart. `root` overrides the respawn directory
+/// (Some when returning to the project root from a removed worktree; None for a
+/// plain `u` restart, which respawns in the session's own dir).
+#[derive(Debug, Clone)]
+pub struct RestartReq {
+    pub started: i64,
+    pub root: Option<String>,
+}
+
 pub struct App {
     pub config: Config,
     pub sessions: Vec<Session>,
@@ -863,7 +879,7 @@ pub struct App {
     pub snapshots: HashMap<String, u64>,
     /// Latest `dir → GitInfo` from the background git reader (see `git_worker`).
     /// Empty when no worker is attached (the refresh then reads git inline).
-    pub git_cache: HashMap<String, crate::git::GitInfo>,
+    pub git_cache: HashMap<String, Option<crate::git::GitInfo>>,
     /// Per-dir (`cwd`) Unix time of the last git re-read request, so idle
     /// sessions aren't re-forked every tick (F3). Pruned to live sessions.
     git_last_enqueue: HashMap<String, i64>,
@@ -917,9 +933,8 @@ pub struct App {
     pub update_prompted: bool,
     /// Sessions that received double Ctrl+C and are waiting for a
     /// `claude --resume <uuid>` command to appear in their pane output.
-    /// Maps session name → `now_unix` when the restart was initiated (for
-    /// the 30-second timeout).
-    pub restarting: HashMap<String, i64>,
+    /// Maps session name → restart request (start time + optional cwd override).
+    pub restarting: HashMap<String, RestartReq>,
     /// User's custom session order *within projects* (by name). Empty = tmux order.
     pub order: Vec<String>,
     /// User's custom project (group) order, by project root path.
@@ -1404,6 +1419,20 @@ impl App {
             // Destructive and adjacent to plain typing (e.g. a reply started
             // without `i`), so it asks for a typed confirmation first.
             KeyCode::Char('u') => self.mode = Mode::ConfirmRestart(String::new()),
+            // Ctrl+R: return a removed-worktree session to its repo root. Only
+            // active when the selected card shows the "return to root" hint. A
+            // Ctrl-chord (not a bare letter) so it can't fire from stray typing
+            // started without `i`. Must precede the plain `r` (rename) arm.
+            KeyCode::Char('r') if ctrl => {
+                if let Some(s) = self.selected_session() {
+                    if git_card_state(&self.git_cache, s) == GitCardState::Returnable {
+                        return Some(Action::ReturnToRoot {
+                            name: s.name.clone(),
+                            root: session_root(s).to_string(),
+                        });
+                    }
+                }
+            }
             KeyCode::Char('r') => {
                 if let Some(name) = self.selected_name() {
                     self.mode = Mode::Rename(RenameForm::new(name));
@@ -2298,7 +2327,7 @@ impl App {
                         }
                     }
                     for s in &mut sessions {
-                        s.git = self.git_cache.get(&s.cwd).cloned();
+                        s.git = self.git_cache.get(&s.cwd).cloned().flatten();
                     }
                     // Gate which dirs to re-read: pane changed, or not read within
                     // GIT_REFRESH_SECS (covers first read + periodic freshness).
@@ -2327,6 +2356,7 @@ impl App {
                 } else {
                     for s in &mut sessions {
                         s.git = crate::git::read(&s.cwd);
+                        self.git_cache.insert(s.cwd.clone(), s.git.clone());
                     }
                 }
                 self.snapshots = new_snaps;
@@ -2515,6 +2545,37 @@ pub fn project_root(dir: &str) -> &str {
     trimmed
 }
 
+/// How a session's git status should read on its card. Computed from the
+/// background reader's verdict for the session's `cwd` (in `App::git_cache`):
+/// an absent entry means the reader has not answered yet (Loading); `Some(info)`
+/// is a live repo (Repo); `Some(None)` means the cwd is not a repo — either a
+/// removed worktree we can return from (Returnable, when the repo root is known)
+/// or a plain non-repo directory with nowhere to go (NoRepo).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitCardState {
+    Repo,
+    Returnable,
+    NoRepo,
+    Loading,
+}
+
+pub fn git_card_state(
+    cache: &std::collections::HashMap<String, Option<crate::git::GitInfo>>,
+    s: &Session,
+) -> GitCardState {
+    match cache.get(&s.cwd) {
+        Some(Some(_)) => GitCardState::Repo,
+        Some(None) => {
+            if s.worktree_repo.is_some() {
+                GitCardState::Returnable
+            } else {
+                GitCardState::NoRepo
+            }
+        }
+        None => GitCardState::Loading,
+    }
+}
+
 /// The project root for a session: the worktree's repo root (from `@cm_repo`) if
 /// this is a worktree session, otherwise its directory with any `.worktrees/…`
 /// suffix stripped. Sessions sharing a root are one project.
@@ -2523,6 +2584,19 @@ pub fn session_root(s: &Session) -> &str {
         Some(r) => r.trim_end_matches('/'),
         None => project_root(&s.dir),
     }
+}
+
+/// The directory to respawn a restarting session in: the `RestartReq.root`
+/// override when set (returning a removed-worktree session to its repo root),
+/// otherwise the session's own `dir`. Empty string if the session is gone.
+pub fn respawn_dir(req: &RestartReq, sessions: &[Session], name: &str) -> String {
+    req.root.clone().unwrap_or_else(|| {
+        sessions
+            .iter()
+            .find(|s| s.name.as_str() == name)
+            .map(|s| s.dir.clone())
+            .unwrap_or_default()
+    })
 }
 
 /// True if the session runs in a worktree rather than the project root — i.e.
@@ -2790,6 +2864,10 @@ mod tests {
 
     fn key(c: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    fn key_ctrl(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
     }
 
     fn temp_git_repo(tag: &str) -> std::path::PathBuf {
@@ -5220,6 +5298,66 @@ mod tests {
     }
 
     #[test]
+    fn git_card_state_classifies_all_four_states() {
+        use std::collections::HashMap;
+        let mk = |cwd: &str, worktree_repo: Option<&str>| Session {
+            name: "s".into(),
+            dir: cwd.into(),
+            cwd: cwd.into(),
+            created: 1,
+            agent: "claude".into(),
+            status: Status::Idle,
+            attached: false,
+            git: None,
+            worktree_repo: worktree_repo.map(|s| s.into()),
+        };
+        let info = crate::git::GitInfo {
+            branch: "main".into(),
+            added: 0,
+            removed: 0,
+        };
+
+        // Loading: no cache entry.
+        let empty: HashMap<String, Option<crate::git::GitInfo>> = HashMap::new();
+        assert_eq!(
+            git_card_state(&empty, &mk("/a", None)),
+            GitCardState::Loading
+        );
+
+        // Repo: Some(Some(info)).
+        let mut repo = HashMap::new();
+        repo.insert("/a".to_string(), Some(info.clone()));
+        assert_eq!(git_card_state(&repo, &mk("/a", None)), GitCardState::Repo);
+
+        // Returnable: Some(None) + worktree_repo known.
+        let mut gone = HashMap::new();
+        gone.insert("/a".to_string(), None);
+        assert_eq!(
+            git_card_state(&gone, &mk("/a", Some("/repo"))),
+            GitCardState::Returnable
+        );
+
+        // NoRepo: Some(None) + no worktree_repo.
+        assert_eq!(git_card_state(&gone, &mk("/a", None)), GitCardState::NoRepo);
+    }
+
+    #[test]
+    fn ctrl_r_returns_to_root_for_returnable_session() {
+        let mut app = app_with_two_sessions();
+        app.sessions[0].worktree_repo = Some("/repo".into());
+        app.git_cache.insert("/a".to_string(), None); // cwd "/a" → confirmed no repo
+        app.selected = 0;
+        let action = app.handle_key(key_ctrl('r'));
+        assert_eq!(
+            action,
+            Some(Action::ReturnToRoot {
+                name: "a".into(),
+                root: "/repo".into()
+            })
+        );
+    }
+
+    #[test]
     fn preview_line_count_is_memoized_per_width() {
         let mut app = App::new(Config::default());
         app.preview = (0..10)
@@ -5265,6 +5403,37 @@ mod tests {
         assert!(
             narrow >= wide,
             "narrower width must not reduce the wrapped row count (wide={wide}, narrow={narrow})"
+        );
+    }
+
+    #[test]
+    fn ctrl_r_is_a_noop_when_not_returnable() {
+        let mut app = app_with_two_sessions(); // no git_cache entry → Loading
+        app.selected = 0;
+        assert_eq!(app.handle_key(key_ctrl('r')), None);
+
+        // Some(None) but no worktree_repo → NoRepo, still a no-op.
+        app.git_cache.insert("/a".to_string(), None);
+        assert_eq!(app.handle_key(key_ctrl('r')), None);
+    }
+
+    #[test]
+    fn plain_r_still_renames_and_ctrl_r_does_not() {
+        // Plain `r` opens rename even for a Returnable session…
+        let mut app = app_with_two_sessions();
+        app.sessions[0].worktree_repo = Some("/repo".into());
+        app.git_cache.insert("/a".to_string(), None); // Returnable
+        app.selected = 0;
+        assert_eq!(app.handle_key(key('r')), None); // rename is modal, not an Action
+        assert!(matches!(app.mode, Mode::Rename(_)), "plain r → rename");
+
+        // …and Ctrl+R on a NON-returnable session neither returns-to-root nor renames.
+        let mut app = app_with_two_sessions(); // no git_cache → Loading
+        app.selected = 0;
+        assert_eq!(app.handle_key(key_ctrl('r')), None);
+        assert!(
+            matches!(app.mode, Mode::List),
+            "ctrl+r must not open rename"
         );
     }
 
@@ -5357,5 +5526,37 @@ mod tests {
             app.preview, "stale",
             "preview capture is deferred to the loop, not done inline on nav"
         );
+    }
+
+    #[test]
+    fn respawn_dir_prefers_root_override_else_session_dir() {
+        let sessions = vec![Session {
+            name: "a".into(),
+            dir: "/a".into(),
+            cwd: "/a".into(),
+            created: 1,
+            agent: "claude".into(),
+            status: Status::Idle,
+            attached: false,
+            git: None,
+            worktree_repo: None,
+        }];
+
+        // root override wins (return-to-root path)
+        let with_root = RestartReq {
+            started: 0,
+            root: Some("/repo".into()),
+        };
+        assert_eq!(respawn_dir(&with_root, &sessions, "a"), "/repo");
+
+        // no override → the session's own dir (plain `u` restart path)
+        let no_root = RestartReq {
+            started: 0,
+            root: None,
+        };
+        assert_eq!(respawn_dir(&no_root, &sessions, "a"), "/a");
+
+        // unknown session, no override → empty
+        assert_eq!(respawn_dir(&no_root, &sessions, "ghost"), "");
     }
 }

@@ -78,8 +78,10 @@ pub fn read(dir: &str) -> Option<GitInfo> {
 pub struct GitReader {
     /// Send the current set of session directories to (re)read.
     pub tx: std::sync::mpsc::Sender<Vec<String>>,
-    /// Receive the latest `dir → GitInfo` results.
-    pub rx: std::sync::mpsc::Receiver<std::collections::HashMap<String, GitInfo>>,
+    /// Receive the latest `dir → verdict` results. `Some(info)` = a repo,
+    /// `None` = read but not a repo (or the dir is gone). An absent key means
+    /// "not yet read".
+    pub rx: std::sync::mpsc::Receiver<std::collections::HashMap<String, Option<GitInfo>>>,
 }
 
 /// Spawns the background git reader thread. It blocks on requests, coalesces to
@@ -89,7 +91,7 @@ pub fn spawn_reader() -> GitReader {
     use std::collections::HashMap;
     use std::sync::mpsc;
     let (req_tx, req_rx) = mpsc::channel::<Vec<String>>();
-    let (res_tx, res_rx) = mpsc::channel::<HashMap<String, GitInfo>>();
+    let (res_tx, res_rx) = mpsc::channel::<HashMap<String, Option<GitInfo>>>();
     std::thread::spawn(move || {
         while let Ok(mut dirs) = req_rx.recv() {
             while let Ok(newer) = req_rx.try_recv() {
@@ -99,9 +101,9 @@ pub fn spawn_reader() -> GitReader {
             dirs.dedup();
             let mut map = HashMap::new();
             for dir in dirs {
-                if let Some(info) = read(&dir) {
-                    map.insert(dir, info);
-                }
+                // A verdict for every dir: Some = repo, None = not a repo / gone.
+                let verdict = read(&dir);
+                map.insert(dir, verdict);
             }
             if res_tx.send(map).is_err() {
                 break; // UI gone
@@ -860,6 +862,38 @@ mod tests {
             .unwrap();
         delete_branch(root, "unmerged").expect_err("unmerged branch must fail");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reader_reports_a_verdict_for_every_dir() {
+        if Command::new("git").arg("--version").output().is_err() {
+            return; // git not installed in this environment
+        }
+        let repo = temp_repo("reader-repo"); // existing helper: inits a git repo, returns PathBuf
+        let repo_s = repo.to_str().unwrap().to_string();
+
+        let plain = std::env::temp_dir().join(format!("reader-plain-{}", std::process::id()));
+        std::fs::create_dir_all(&plain).unwrap();
+        let plain_s = plain.to_str().unwrap().to_string();
+
+        let gone_s = format!("/no/such/dir/reader-{}", std::process::id());
+
+        let reader = spawn_reader();
+        reader
+            .tx
+            .send(vec![repo_s.clone(), plain_s.clone(), gone_s.clone()])
+            .unwrap();
+        let map = reader.rx.recv().unwrap();
+
+        assert!(
+            matches!(map.get(&repo_s), Some(Some(_))),
+            "repo → Some(Some)"
+        );
+        assert_eq!(map.get(&plain_s), Some(&None), "non-repo dir → Some(None)");
+        assert_eq!(map.get(&gone_s), Some(&None), "missing dir → Some(None)");
+
+        let _ = std::fs::remove_dir_all(&plain);
+        let _ = std::fs::remove_dir_all(&repo);
     }
 
     #[test]

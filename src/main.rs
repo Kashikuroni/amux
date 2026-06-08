@@ -362,8 +362,8 @@ fn run(
                 // and respawn; always repaint while it's in flight.
                 needs_redraw = true;
                 let mut to_clear: Vec<String> = Vec::new();
-                for (name, &started) in &app.restarting {
-                    if app.now_unix - started > 30 {
+                for (name, req) in &app.restarting {
+                    if app.now_unix - req.started > 30 {
                         let _ = tmux::set_remain_on_exit(name, false);
                         to_clear.push(name.clone());
                         continue;
@@ -376,12 +376,7 @@ fn run(
                     }
                     if let Ok(pane) = tmux::capture_pane(name) {
                         if let Some(cmd) = tmux::parse_resume_command(&pane) {
-                            let dir = app
-                                .sessions
-                                .iter()
-                                .find(|s| s.name == *name)
-                                .map(|s| s.dir.clone())
-                                .unwrap_or_default();
+                            let dir = am::app::respawn_dir(req, &app.sessions, name);
                             if let Err(e) = tmux::respawn_pane(name, &dir, &cmd) {
                                 app.error = Some(format!("resume: {e}"));
                             }
@@ -586,7 +581,48 @@ fn handle_action(
                     app.error = Some(format!("restart: {e}"));
                     let _ = tmux::set_remain_on_exit(&name, false);
                 } else {
-                    app.restarting.insert(name, now);
+                    app.restarting.insert(
+                        name,
+                        am::app::RestartReq {
+                            started: now,
+                            root: None,
+                        },
+                    );
+                }
+            }
+            app.refresh();
+        }
+        Action::ReturnToRoot { name, root } => {
+            let is_claude = app
+                .sessions
+                .iter()
+                .find(|s| s.name == name)
+                .map(|s| s.agent.split_whitespace().next() == Some("claude"))
+                .unwrap_or(false);
+            if is_claude {
+                // Same pipeline as `u`, but the poll loop respawns in `root`:
+                // remain-on-exit keeps the dead pane with the --resume hint,
+                // Ctrl+C exits Claude, then it is respawned (resumed) in root.
+                let now = app.now_unix;
+                if let Err(e) = tmux::set_remain_on_exit(&name, true) {
+                    app.error = Some(format!("return to root: {e}"));
+                } else if let Err(e) = tmux::send_ctrl_c(&name) {
+                    app.error = Some(format!("return to root: {e}"));
+                    let _ = tmux::set_remain_on_exit(&name, false);
+                } else {
+                    app.restarting.insert(
+                        name,
+                        am::app::RestartReq {
+                            started: now,
+                            root: Some(root),
+                        },
+                    );
+                }
+            } else {
+                // Plain shell: run the cd directly.
+                let cmd = format!("cd {}", tmux::shell_single_quote(&root));
+                if let Err(e) = tmux::send_text(&name, &cmd) {
+                    app.error = Some(format!("return to root: {e}"));
                 }
             }
             app.refresh();

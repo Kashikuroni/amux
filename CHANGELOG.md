@@ -7,6 +7,12 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- Sessions whose pane directory no longer resolves to a git repo now show their
+  state instead of a blank: `no repo`, or `worktree removed · ctrl+r return to root`.
+  Pressing `ctrl+r` returns the session to its project root (resuming Claude in place).
+- `amux doctor [--clean]`: a CLI subcommand that surfaces tmux servers/sockets the
+  dashboard hides (untagged, leaked, or stale) and, with `--clean`, removes the
+  safe ones — never touching the live `cm` server or other users' tmux.
 - `amux-verify`: a standalone workspace crate + CLI that runs the repo's
   verification contract (`.amux/verify.toml`) — ordered gates executed
   without a shell in a worktree, fail-fast cascade, per-gate timeout with
@@ -22,6 +28,11 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   root path, so it survives restarts and session kills — instead of the global
   Inbox. At startup, state entries of projects whose directory no longer exists
   are pruned (note: a project on an unmounted volume counts as deleted).
+- Performance: the UI no longer redraws or wakes at a fixed ~12.5 fps when idle
+  (event-driven render; the ANSI preview is parsed once per change, not per
+  frame), git status is re-read only for sessions whose pane changed (or every
+  few seconds) instead of every session every tick, and rapid `j`/`k` navigation
+  debounces the preview capture instead of forking tmux per keystroke.
 
 ### Removed
 - The global Inbox note; an existing `inbox` value in `state.toml` is ignored.
