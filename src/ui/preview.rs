@@ -1,10 +1,9 @@
 use crate::app::{session_root, App};
 use crate::theme as th;
 use crate::timeutil;
-use ansi_to_tui::IntoText;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span, Text};
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::Frame;
 
@@ -86,21 +85,15 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     // match — otherwise the agent's full-width input box wraps to two rows here.
     app.preview_dims.set((rows[3].width, rows[3].height));
 
-    // Content: parse ANSI from capture-pane into styled Text; fall back to plain.
-    // Drop trailing blank lines (tmux pads the pane), then scroll to the bottom so
-    // the agent's latest output — and any pending prompt — is always visible.
-    let trimmed = app.preview.trim_end_matches(['\n', ' ', '\t']);
-    let text: Text = trimmed
-        .into_text()
-        .unwrap_or_else(|_| Text::raw(trimmed.to_string()));
-    let para = Paragraph::new(text)
-        .wrap(Wrap { trim: false })
-        .style(Style::default().fg(th::TEXT));
-    // Bottom-anchor against the *wrapped* display-row count (one logical line
-    // may wrap to several rows), then offset upward by the user's manual scroll.
-    let total = para.line_count(rows[3].width) as u16;
+    // Content: parsed ANSI is cached on App (rebuilt only when the preview
+    // changes), so a static screen does no ANSI work. Drop trailing blank lines
+    // (tmux pads the pane), then bottom-anchor so the newest output is visible.
+    let total = app.preview_line_count(rows[3].width);
     let bottom = total.saturating_sub(rows[3].height);
     let scroll_y = bottom.saturating_sub(app.preview_scroll);
+    let para = Paragraph::new(app.preview_text())
+        .wrap(Wrap { trim: false })
+        .style(Style::default().fg(th::TEXT));
     f.render_widget(para.scroll((scroll_y, 0)), rows[3]);
 }
 
