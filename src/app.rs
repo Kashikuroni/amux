@@ -845,11 +845,11 @@ pub enum RightPane {
 /// A pure memo of `preview` — holds no logical state — so the "render is
 /// read-only" contract is preserved (cf. the `preview_dims: Cell` pattern).
 #[derive(Default)]
-pub struct PreviewCache {
+struct PreviewCache {
     /// `content_hash(&preview)` the cache was built for.
     hash: u64,
-    /// Parsed, styled preview text (borrowed read-only by the renderer).
-    pub text: Text<'static>,
+    /// Parsed, styled preview text; handed to the renderer as an owned clone.
+    text: Text<'static>,
     /// Memoized wrapped display-row count, keyed by render width: `(width, rows)`.
     line_count: Option<(u16, u16)>,
 }
@@ -886,7 +886,9 @@ pub struct App {
     pub preview_dims: std::cell::Cell<(u16, u16)>,
     /// Parsed-ANSI memo of `preview`; rebuilt only when `preview` changes (F1/F5).
     preview_cache: std::cell::RefCell<PreviewCache>,
-    /// Number of times the preview was (re)parsed — observability for tests.
+    /// Number of times the preview was (re)parsed — test-only observability,
+    /// so it adds nothing to release builds.
+    #[cfg(test)]
     preview_parse_count: std::cell::Cell<u64>,
     /// Last (session, cols, rows) we resized a window to, to skip redundant
     /// `resize-window` calls (which would needlessly reflow the agent).
@@ -957,6 +959,7 @@ impl App {
             preview_scroll: 0,
             preview_dims: std::cell::Cell::new((0, 0)),
             preview_cache: std::cell::RefCell::new(PreviewCache::default()),
+            #[cfg(test)]
             preview_parse_count: std::cell::Cell::new(0),
             preview_sized: None,
             split_pct: 40,
@@ -1299,15 +1302,19 @@ impl App {
             text,
             line_count: None,
         };
+        #[cfg(test)]
         self.preview_parse_count
             .set(self.preview_parse_count.get() + 1);
     }
 
-    /// Parsed preview text, rebuilt only on change. Borrowed read-only by the
-    /// renderer (clones the `Text` into its `Paragraph`, as before).
-    pub fn preview_text(&self) -> std::cell::Ref<'_, PreviewCache> {
+    /// Parsed preview text, rebuilt only on change (F1). Returns an owned clone:
+    /// the renderer pays that clone building its `Paragraph` either way, and an
+    /// owned return keeps `PreviewCache` encapsulated and — crucially — avoids
+    /// holding a `RefCell` borrow across `preview_line_count` (which borrows
+    /// mutably to update its memo).
+    pub fn preview_text(&self) -> Text<'static> {
         self.ensure_preview_cache();
-        self.preview_cache.borrow()
+        self.preview_cache.borrow().text.clone()
     }
 
     /// Wrapped display-row count for `width`, memoized per `(hash, width)` so a
@@ -5184,9 +5191,8 @@ mod tests {
     fn preview_text_returns_parsed_content() {
         let mut app = App::new(Config::default());
         app.preview = "\u{1b}[31mred\u{1b}[0m".into();
-        let cache = app.preview_text();
-        let joined: String = cache
-            .text
+        let text = app.preview_text();
+        let joined: String = text
             .lines
             .iter()
             .flat_map(|l| l.spans.iter())
@@ -5194,5 +5200,22 @@ mod tests {
             .collect();
         assert!(joined.contains("red"), "parsed text missing content: {joined:?}");
         assert!(!joined.contains('\u{1b}'), "escape leaked: {joined:?}");
+    }
+
+    #[test]
+    fn preview_line_count_recomputes_on_width_change() {
+        // The memo keys on width; a narrower width must re-wrap, not return the
+        // stale wide count.
+        let mut app = App::new(Config::default());
+        app.preview = (0..10)
+            .map(|i| format!("word{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let wide = app.preview_line_count(200);
+        let narrow = app.preview_line_count(10);
+        assert!(
+            narrow >= wide,
+            "narrower width must not reduce the wrapped row count (wide={wide}, narrow={narrow})"
+        );
     }
 }
