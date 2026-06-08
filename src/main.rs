@@ -166,12 +166,13 @@ fn restore_terminal(terminal: &mut Term) -> io::Result<()> {
 }
 
 /// How long the event loop should block in `event::poll` this iteration.
+/// Listed in the order the cases are checked:
 ///
+/// - `tmux_missing` shows a static error screen → wake rarely (only a keypress
+///   matters).
 /// - A `Running` session animates the spinner → wake at the 80 ms frame cadence.
 /// - Otherwise (idle) sleep until the next `refresh` is due, floored to 1 ms so a
 ///   just-due refresh doesn't busy-spin at a 0 ms timeout.
-/// - `tmux_missing` shows a static error screen → wake rarely (only a keypress
-///   matters).
 fn poll_timeout(
     any_running: bool,
     tmux_missing: bool,
@@ -180,8 +181,9 @@ fn poll_timeout(
 ) -> Duration {
     const SPINNER_TICK: Duration = Duration::from_millis(80);
     const FLOOR: Duration = Duration::from_millis(1);
+    const IDLE_WAIT: Duration = Duration::from_secs(1);
     if tmux_missing {
-        return Duration::from_secs(1);
+        return IDLE_WAIT;
     }
     if any_running {
         return SPINNER_TICK;
