@@ -2716,6 +2716,24 @@ pub fn compute_status(prev: Option<u64>, current: u64) -> Status {
     }
 }
 
+/// Whether to re-`capture-pane` a session this tick. Gate: capture only when
+/// the pane may have changed — a new session, activity advanced since the last
+/// tick, or it was `Running` last tick. The last clause is conservative:
+/// `session_activity` has 1-second granularity, so a sub-second output burst
+/// can leave the timestamp unchanged — but such a pane is always `Running`, so
+/// it is always re-read. Idle/Waiting panes with unchanged activity are skipped.
+pub fn should_capture(
+    activity: i64,
+    last_seen: Option<i64>,
+    prev_status: Option<&Status>,
+) -> bool {
+    match last_seen {
+        None => true,                          // first observation
+        Some(prev) if activity > prev => true, // output since last tick
+        _ => prev_status == Some(&Status::Running),
+    }
+}
+
 /// Coarse git re-read interval: even an unchanged pane gets its git re-read at
 /// least this often, so changes that don't alter the pane (e.g. an external
 /// commit) still surface. Pane-content changes re-read immediately.
@@ -3655,6 +3673,24 @@ mod tests {
     #[test]
     fn status_is_idle_when_content_unchanged() {
         assert_eq!(compute_status(Some(7), 7), Status::Idle);
+    }
+
+    #[test]
+    fn should_capture_gates_on_activity_and_running() {
+        use crate::tmux::Status;
+        // New session (no last_seen): always capture (first observation).
+        assert!(should_capture(100, None, None));
+        // Activity advanced since last tick: capture.
+        assert!(should_capture(101, Some(100), Some(&Status::Idle)));
+        // Activity unchanged + was Idle: skip.
+        assert!(!should_capture(100, Some(100), Some(&Status::Idle)));
+        // Activity unchanged + was Running: conservative top-up — capture
+        // (1s granularity can miss a sub-second burst).
+        assert!(should_capture(100, Some(100), Some(&Status::Running)));
+        // Activity unchanged + was Waiting: a blocked agent is quiet — skip.
+        assert!(!should_capture(100, Some(100), Some(&Status::Waiting)));
+        // Clock rollback (activity < last_seen) + Idle: not "advanced" — skip.
+        assert!(!should_capture(99, Some(100), Some(&Status::Idle)));
     }
 
     #[test]
