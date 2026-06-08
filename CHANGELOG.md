@@ -37,6 +37,11 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   frame), git status is re-read only for sessions whose pane changed (or every
   few seconds) instead of every session every tick, and rapid `j`/`k` navigation
   debounces the preview capture instead of forking tmux per keystroke.
+- Performance: the session poll no longer forks `tmux capture-pane` for every
+  session every tick. A session's pane is re-captured only when its tmux
+  activity advanced since the last tick (or it was running) — so an all-idle
+  dashboard does one `list-sessions` fork per tick instead of one per session,
+  and the cost scales with active sessions rather than total.
 
 ### Removed
 - The global Inbox note; an existing `inbox` value in `state.toml` is ignored.

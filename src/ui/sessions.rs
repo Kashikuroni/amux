@@ -551,6 +551,7 @@ mod tests {
             attached: false,
             git,
             worktree_repo: None,
+            activity: 0,
         }
     }
 
@@ -1079,6 +1080,7 @@ mod tests {
             attached: false,
             git: None,
             worktree_repo: None,
+            activity: 0,
         };
         let mk = |vs: &crate::app::VerificationState| {
             let item = card(
@@ -1122,6 +1124,7 @@ mod tests {
             attached: false,
             git: None,
             worktree_repo: Some("/repo".into()),
+            activity: 0,
         };
         let item = card(
             &s,

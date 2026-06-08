@@ -421,6 +421,7 @@ mod tests {
             attached: false,
             git: None,
             worktree_repo: None,
+            activity: 0,
         }];
 
         let backend = TestBackend::new(100, 20);
