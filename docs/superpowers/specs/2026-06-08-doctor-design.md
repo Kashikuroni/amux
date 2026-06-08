@@ -9,8 +9,10 @@ dead panes, *other* tmux servers, and orphaned agent processes — is invisible 
 accumulates silently. Doctor enumerates all of it and offers safe, explicit
 cleanup.
 
-Status: **backlog spec** (not yet implemented). Recommended MVP is a CLI
-subcommand; an in-TUI `Mode::Doctor` is a follow-up.
+Status: **v1 implemented** — CLI `amux doctor [--clean]` (see
+`docs/superpowers/plans/2026-06-08-doctor-v1.md`). Deferred to follow-ups:
+orphan-*process* detection/killing (`--clean-orphans`), `--json`, and the in-TUI
+`Mode::Doctor`.
 
 ---
 
