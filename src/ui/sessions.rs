@@ -926,7 +926,13 @@ mod tests {
     fn restarting_card_shows_yellow_restarting_label() {
         let mut app = App::new(Config::default());
         app.sessions = vec![sess("proj", Status::Running, None)];
-        app.restarting.insert("proj".into(), 0);
+        app.restarting.insert(
+            "proj".into(),
+            crate::app::RestartReq {
+                started: 0,
+                root: None,
+            },
+        );
         let mut t = Terminal::new(TestBackend::new(60, 8)).unwrap();
         t.draw(|f| render(f, f.area(), &app)).unwrap();
         let buf = t.backend().buffer();

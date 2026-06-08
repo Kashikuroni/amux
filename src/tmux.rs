@@ -250,6 +250,23 @@ pub fn send_shift_tab(name: &str) -> io::Result<()> {
     run(&["send-keys", "-t", name, "BTab"])
 }
 
+/// Wraps a path in POSIX single quotes so it survives the shell verbatim when
+/// sent via `send_text`. The only character that cannot appear inside single
+/// quotes — `'` itself — is emitted as the standard `'\''` sequence.
+pub fn shell_single_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for ch in s.chars() {
+        if ch == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push('\'');
+    out
+}
+
 /// Sends literal text followed by Enter (a free-text reply).
 pub fn send_text(name: &str, text: &str) -> io::Result<()> {
     run(&["send-keys", "-t", name, "-l", text])?;
@@ -572,5 +589,13 @@ mod tests {
         assert!(!is_resume_uuid("f612324-d83b6-407a-9d74-d89ef7b91f70"));
         // non-hex char
         assert!(!is_resume_uuid("f612324d-83b6-407a-9d74-d89ef7b91f7g"));
+    }
+
+    #[test]
+    fn shell_single_quote_wraps_and_escapes() {
+        assert_eq!(shell_single_quote("/repo/main"), "'/repo/main'");
+        assert_eq!(shell_single_quote("/has space"), "'/has space'");
+        // A single quote closes, escapes, reopens: it's a → 'a'\''b'
+        assert_eq!(shell_single_quote("a'b"), "'a'\\''b'");
     }
 }

@@ -264,8 +264,8 @@ fn run(
             // pane is left for inspection; kill with `d` or retry `u`).
             if !app.restarting.is_empty() {
                 let mut to_clear: Vec<String> = Vec::new();
-                for (name, &started) in &app.restarting {
-                    if app.now_unix - started > 30 {
+                for (name, req) in &app.restarting {
+                    if app.now_unix - req.started > 30 {
                         let _ = tmux::set_remain_on_exit(name, false);
                         to_clear.push(name.clone());
                         continue;
@@ -278,12 +278,13 @@ fn run(
                     }
                     if let Ok(pane) = tmux::capture_pane(name) {
                         if let Some(cmd) = tmux::parse_resume_command(&pane) {
-                            let dir = app
-                                .sessions
-                                .iter()
-                                .find(|s| s.name == *name)
-                                .map(|s| s.dir.clone())
-                                .unwrap_or_default();
+                            let dir = req.root.clone().unwrap_or_else(|| {
+                                app.sessions
+                                    .iter()
+                                    .find(|s| s.name == *name)
+                                    .map(|s| s.dir.clone())
+                                    .unwrap_or_default()
+                            });
                             if let Err(e) = tmux::respawn_pane(name, &dir, &cmd) {
                                 app.error = Some(format!("resume: {e}"));
                             }
@@ -488,7 +489,13 @@ fn handle_action(
                     app.error = Some(format!("restart: {e}"));
                     let _ = tmux::set_remain_on_exit(&name, false);
                 } else {
-                    app.restarting.insert(name, now);
+                    app.restarting.insert(
+                        name,
+                        am::app::RestartReq {
+                            started: now,
+                            root: None,
+                        },
+                    );
                 }
             }
             app.refresh();

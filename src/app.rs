@@ -837,6 +837,15 @@ pub enum RightPane {
     ProjectNote,
 }
 
+/// A session awaiting Claude restart. `root` overrides the respawn directory
+/// (Some when returning to the project root from a removed worktree; None for a
+/// plain `u` restart, which respawns in the session's own dir).
+#[derive(Debug, Clone)]
+pub struct RestartReq {
+    pub started: i64,
+    pub root: Option<String>,
+}
+
 pub struct App {
     pub config: Config,
     pub sessions: Vec<Session>,
@@ -891,9 +900,8 @@ pub struct App {
     pub update_prompted: bool,
     /// Sessions that received double Ctrl+C and are waiting for a
     /// `claude --resume <uuid>` command to appear in their pane output.
-    /// Maps session name → `now_unix` when the restart was initiated (for
-    /// the 30-second timeout).
-    pub restarting: HashMap<String, i64>,
+    /// Maps session name → restart request (start time + optional cwd override).
+    pub restarting: HashMap<String, RestartReq>,
     /// User's custom session order *within projects* (by name). Empty = tmux order.
     pub order: Vec<String>,
     /// User's custom project (group) order, by project root path.
