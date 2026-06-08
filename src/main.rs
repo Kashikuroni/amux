@@ -33,6 +33,13 @@ fn install_panic_hook() {
 }
 
 fn main() -> io::Result<()> {
+    // `amux doctor [--clean]` runs the diagnostic and exits; everything else is
+    // the TUI. Kept argv-trivial — no parser dependency.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|a| a == "doctor") {
+        return am::doctor::run(&args[1..]);
+    }
+
     let config = Config::load();
     let refresh = Duration::from_millis(config.refresh_interval_ms.max(100));
     let mut app = App::new(config);
