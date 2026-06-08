@@ -57,6 +57,7 @@ fn main() -> io::Result<()> {
         app.tmux_missing = true;
     } else {
         app.refresh();
+        restore_sessions(&mut app);
     }
 
     install_panic_hook();
@@ -385,6 +386,11 @@ fn run(
                             let dir = am::app::respawn_dir(req, &app.sessions, name);
                             if let Err(e) = tmux::respawn_pane(name, &dir, &cmd) {
                                 app.error = Some(format!("resume: {e}"));
+                            } else {
+                                if let Some(ps) = app.session_persist.get_mut(name) {
+                                    ps.resume_cmd = Some(cmd.clone());
+                                    app.dirty = true;
+                                }
                             }
                             let _ = tmux::set_remain_on_exit(name, false);
                             to_clear.push(name.clone());
@@ -451,23 +457,46 @@ fn handle_action(
             model,
             effort,
         } => {
-            let (command, label) = if terminal {
+            let (command, label, resume_cmd) = if terminal {
                 let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
                 let label = tmux::shell_basename(&shell).to_string();
-                (shell, label)
+                (shell, label, None)
             } else {
-                // Flags go into the command only; the label (@cm_agent, the
-                // session list) stays the bare agent. The binary is resolved
-                // to an absolute path so the tmux server's (possibly stale)
-                // PATH cannot break the launch.
-                (
-                    resolve_agent_command_for_tmux(&am::app::compose_agent_command(
-                        &agent,
-                        model.as_deref(),
-                        effort.as_deref(),
-                    )),
-                    agent.clone(),
-                )
+                // For Claude sessions inject --session-id <uuid> so the conversation
+                // is resumable from cold start without needing a prior clean restart.
+                let (base, resume_cmd) = if agent == "claude" {
+                    match generate_uuid() {
+                        Some(uuid) => {
+                            let cmd = am::app::compose_agent_command(
+                                &agent,
+                                model.as_deref(),
+                                effort.as_deref(),
+                            ) + &format!(" --session-id {uuid}");
+                            let rc = format!("claude --resume {uuid}");
+                            (cmd, Some(rc))
+                        }
+                        None => (
+                            am::app::compose_agent_command(
+                                &agent,
+                                model.as_deref(),
+                                effort.as_deref(),
+                            ),
+                            None,
+                        ),
+                    }
+                } else {
+                    (
+                        am::app::compose_agent_command(
+                            &agent,
+                            model.as_deref(),
+                            effort.as_deref(),
+                        ),
+                        None,
+                    )
+                };
+                // The binary is resolved to an absolute path so the tmux server's
+                // (possibly stale) PATH cannot break the launch.
+                (resolve_agent_command_for_tmux(&base), agent.clone(), resume_cmd)
             };
             let result = match worktree {
                 None => tmux::new_session(&name, &dir, &command, &label),
@@ -475,6 +504,16 @@ fn handle_action(
             };
             if let Err(e) = result {
                 app.error = Some(e.to_string());
+            } else if !terminal {
+                app.session_persist.insert(
+                    name.clone(),
+                    am::state::PersistedSession {
+                        dir: dir.clone(),
+                        agent: agent.clone(),
+                        resume_cmd,
+                    },
+                );
+                app.dirty = true;
             }
             app.refresh();
         }
@@ -501,6 +540,7 @@ fn handle_action(
                 }
                 app.notes.remove(&name);
                 app.drafts.remove(&name);
+                app.session_persist.remove(&name);
                 app.dirty = true;
             }
             app.refresh();
@@ -515,6 +555,10 @@ fn handle_action(
                 }
                 if let Some(draft) = app.drafts.remove(&old) {
                     app.drafts.insert(new.clone(), draft);
+                    app.dirty = true;
+                }
+                if let Some(ps) = app.session_persist.remove(&old) {
+                    app.session_persist.insert(new.clone(), ps);
                     app.dirty = true;
                 }
             }
@@ -812,6 +856,18 @@ fn create_worktree_session(
     }
 }
 
+/// Generates a random UUID v4 via `uuidgen`, lowercased. Returns `None` if
+/// `uuidgen` is unavailable or fails (session is still created, just without
+/// a pre-assigned ID).
+fn generate_uuid() -> Option<String> {
+    let out = std::process::Command::new("uuidgen").output().ok()?;
+    out.status.success().then(|| {
+        String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .to_lowercase()
+    })
+}
+
 /// Rewrites the first word of an agent command to the absolute executable path
 /// visible to amux itself. tmux panes inherit the tmux server's environment,
 /// which may have an older PATH than the shell that launched amux.
@@ -827,6 +883,38 @@ fn resolve_agent_command_for_tmux(command: &str) -> String {
     };
     let suffix = command.strip_prefix(bin).unwrap_or("");
     format!("{path}{suffix}")
+}
+
+/// Recreates any persisted agent sessions that are absent from the live tmux
+/// server. Called once at startup: after a computer reboot the tmux server is
+/// gone and all sessions need to be rebuilt from state.
+///
+/// For Claude Code: respawns with the saved `--resume <uuid>` command so the
+/// conversation history is preserved. Falls back to a fresh session if no UUID
+/// was saved (e.g. the session was never restarted cleanly while amux was open).
+/// For Codex and other agents: starts a fresh session in the saved directory.
+fn restore_sessions(app: &mut App) {
+    let existing: std::collections::HashSet<String> =
+        app.sessions.iter().map(|s| s.name.clone()).collect();
+    let to_restore: Vec<(String, am::state::PersistedSession)> = app
+        .session_persist
+        .iter()
+        .filter(|(name, _)| !existing.contains(*name))
+        .map(|(n, ps)| (n.clone(), ps.clone()))
+        .collect();
+    if to_restore.is_empty() {
+        return;
+    }
+    for (name, ps) in &to_restore {
+        let command = match &ps.resume_cmd {
+            Some(cmd) => resolve_agent_command_for_tmux(cmd),
+            None => resolve_agent_command_for_tmux(&ps.agent),
+        };
+        if let Err(e) = tmux::new_session(name, &ps.dir, &command, &ps.agent) {
+            eprintln!("am: cold-start restore '{name}': {e}");
+        }
+    }
+    app.refresh();
 }
 
 /// First column of the right (preview) pane: 2-col left margin + left-pane

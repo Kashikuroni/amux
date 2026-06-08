@@ -7,6 +7,19 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+/// Per-session data persisted across restarts. Enough to recreate a session
+/// after a computer reboot: the working directory, the agent, and (for Claude
+/// Code) the last known `--resume <uuid>` command.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PersistedSession {
+    pub dir: String,
+    pub agent: String,
+    /// For Claude Code: the `claude --resume <uuid>` command from the last
+    /// clean shutdown / restart. `None` for fresh or non-Claude sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_cmd: Option<String>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct State {
@@ -32,6 +45,9 @@ pub struct State {
     /// In-progress reply drafts (the `i` composer), keyed by tmux session
     /// name. A draft lives exactly as long as its session.
     pub drafts: BTreeMap<String, String>,
+    /// Agent sessions to restore on cold start (e.g. after a computer reboot),
+    /// keyed by tmux session name. Shell/terminal sessions are excluded.
+    pub sessions: BTreeMap<String, PersistedSession>,
 }
 
 fn state_path() -> Option<PathBuf> {
@@ -97,6 +113,7 @@ mod tests {
             project_notes: BTreeMap::new(),
             notes: BTreeMap::new(),
             drafts: BTreeMap::new(),
+            sessions: BTreeMap::new(),
         };
         let toml = toml::to_string(&s).unwrap();
         let back: State = toml::from_str(&toml).unwrap();
@@ -181,5 +198,47 @@ mod tests {
         };
         assert!(!s.prune_missing_projects(|_| true));
         assert!(s.project_notes.contains_key("/p"));
+    }
+
+    #[test]
+    fn persisted_session_roundtrips_through_toml() {
+        let s = State {
+            sessions: BTreeMap::from([
+                (
+                    "work".to_string(),
+                    PersistedSession {
+                        dir: "/home/u/work".to_string(),
+                        agent: "claude".to_string(),
+                        resume_cmd: Some(
+                            "claude --resume 12345678-1234-1234-1234-1234567890ab".to_string(),
+                        ),
+                    },
+                ),
+                (
+                    "side".to_string(),
+                    PersistedSession {
+                        dir: "/home/u/side".to_string(),
+                        agent: "codex".to_string(),
+                        resume_cmd: None,
+                    },
+                ),
+            ]),
+            ..Default::default()
+        };
+        let toml = toml::to_string(&s).unwrap();
+        let back: State = toml::from_str(&toml).unwrap();
+        assert_eq!(back.sessions.get("work").unwrap().agent, "claude");
+        assert_eq!(
+            back.sessions.get("work").unwrap().resume_cmd.as_deref(),
+            Some("claude --resume 12345678-1234-1234-1234-1234567890ab")
+        );
+        assert_eq!(back.sessions.get("side").unwrap().agent, "codex");
+        assert!(back.sessions.get("side").unwrap().resume_cmd.is_none());
+    }
+
+    #[test]
+    fn old_state_without_sessions_key_still_loads() {
+        let s: State = toml::from_str("split_pct = 40").unwrap();
+        assert!(s.sessions.is_empty());
     }
 }
