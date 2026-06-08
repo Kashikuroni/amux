@@ -24,6 +24,7 @@ pub fn render(f: &mut Frame) {
                 ("N", "new in project"),
                 ("i", "reply to agent"),
                 ("1-9", "answer prompt"),
+                ("c", "return to root (stale cwd)"),
                 ("d", "kill"),
                 ("r", "rename"),
                 ("R", "rename project"),
@@ -125,6 +126,10 @@ mod tests {
             "bottom group clipped:\n{s}"
         );
         assert!(s.contains("restart"), "missing u/restart entry:\n{s}");
+        assert!(
+            s.contains("return to root"),
+            "missing c/stale-cwd entry:\n{s}"
+        );
         // No modifier-key glyphs leak in (arrows are intentionally kept).
         for glyph in ["⇧", "⇥", "↵", "^"] {
             assert!(!s.contains(glyph), "stale key glyph {glyph}:\n{s}");
