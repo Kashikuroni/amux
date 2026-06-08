@@ -486,17 +486,17 @@ fn handle_action(
                     }
                 } else {
                     (
-                        am::app::compose_agent_command(
-                            &agent,
-                            model.as_deref(),
-                            effort.as_deref(),
-                        ),
+                        am::app::compose_agent_command(&agent, model.as_deref(), effort.as_deref()),
                         None,
                     )
                 };
                 // The binary is resolved to an absolute path so the tmux server's
                 // (possibly stale) PATH cannot break the launch.
-                (resolve_agent_command_for_tmux(&base), agent.clone(), resume_cmd)
+                (
+                    resolve_agent_command_for_tmux(&base),
+                    agent.clone(),
+                    resume_cmd,
+                )
             };
             let result = match worktree {
                 None => tmux::new_session(&name, &dir, &command, &label),
@@ -861,11 +861,9 @@ fn create_worktree_session(
 /// a pre-assigned ID).
 fn generate_uuid() -> Option<String> {
     let out = std::process::Command::new("uuidgen").output().ok()?;
-    out.status.success().then(|| {
-        String::from_utf8_lossy(&out.stdout)
-            .trim()
-            .to_lowercase()
-    })
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_lowercase())
 }
 
 /// Rewrites the first word of an agent command to the absolute executable path

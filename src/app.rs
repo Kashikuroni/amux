@@ -2775,11 +2775,7 @@ pub fn compute_status(prev: Option<u64>, current: u64) -> Status {
 /// `session_activity` has 1-second granularity, so a sub-second output burst
 /// can leave the timestamp unchanged — but such a pane is always `Running`, so
 /// it is always re-read. Idle/Waiting panes with unchanged activity are skipped.
-pub fn should_capture(
-    activity: i64,
-    last_seen: Option<i64>,
-    prev_status: Option<&Status>,
-) -> bool {
+pub fn should_capture(activity: i64, last_seen: Option<i64>, prev_status: Option<&Status>) -> bool {
     match last_seen {
         None => true,                          // first observation
         Some(prev) if activity > prev => true, // output since last tick
@@ -3800,7 +3796,11 @@ mod tests {
 
         // Refresh 1: both new → both captured.
         app.refresh();
-        assert_eq!(app.capture_count.get(), 2, "first tick captures every session");
+        assert_eq!(
+            app.capture_count.get(),
+            2,
+            "first tick captures every session"
+        );
         assert_eq!(app.sessions.len(), 2, "both managed sessions listed");
         assert_eq!(app.snapshots.len(), 2, "snapshot recorded for each");
 
