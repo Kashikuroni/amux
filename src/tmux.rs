@@ -5,7 +5,7 @@ use std::process::Command;
 /// Order: name, path, created, @cm_managed, @cm_agent, attached-client-count,
 /// @cm_repo, active-pane cwd (resolves via the session's current window).
 pub const LIST_FORMAT: &str =
-    "#{session_name}\t#{session_path}\t#{session_created}\t#{@cm_managed}\t#{@cm_agent}\t#{session_attached}\t#{@cm_repo}\t#{pane_current_path}";
+    "#{session_name}\t#{session_path}\t#{session_created}\t#{@cm_managed}\t#{@cm_agent}\t#{session_attached}\t#{@cm_repo}\t#{pane_current_path}\t#{session_activity}";
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Status {
@@ -34,6 +34,9 @@ pub struct Session {
     pub git: Option<crate::git::GitInfo>,
     /// Repo root if this session runs in a `cm`-created worktree; None otherwise.
     pub worktree_repo: Option<String>,
+    /// `#{session_activity}` — epoch seconds of the session's last activity.
+    /// Drives capture-gating: a pane is re-captured only when this advances.
+    pub activity: i64,
 }
 
 /// Parses `tmux list-sessions` output, keeping only sessions marked `@cm_managed=1`.
@@ -43,7 +46,7 @@ pub fn parse_sessions(output: &str) -> Vec<Session> {
 }
 
 fn parse_line(line: &str) -> Option<Session> {
-    let mut f = line.splitn(8, '\t');
+    let mut f = line.splitn(9, '\t');
     let name = f.next()?.to_string();
     let dir = f.next()?.to_string();
     let created = f.next()?.trim().parse::<i64>().ok()?;
@@ -65,6 +68,10 @@ fn parse_line(line: &str) -> Option<Session> {
         Some(p) if !p.is_empty() => p.to_string(),
         _ => dir.clone(),
     };
+    let activity = f
+        .next()
+        .and_then(|s| s.trim().parse::<i64>().ok())
+        .unwrap_or(0);
     Some(Session {
         name,
         dir,
@@ -75,6 +82,7 @@ fn parse_line(line: &str) -> Option<Session> {
         attached,
         git: None,
         worktree_repo,
+        activity,
     })
 }
 
@@ -590,6 +598,18 @@ mod tests {
         let sessions = parse_sessions(out);
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].name, "solo");
+    }
+
+    #[test]
+    fn parses_session_activity() {
+        // 9th tab-field is #{session_activity} (epoch secs). Older fixtures without
+        // it default to 0.
+        let out = "act\t/d\t1\t1\tclaude\t0\t\t/d\t1780955306";
+        let s = &parse_sessions(out)[0];
+        assert_eq!(s.activity, 1780955306);
+
+        let no_activity = "old\t/d\t1\t1\tclaude\t0\t";
+        assert_eq!(parse_sessions(no_activity)[0].activity, 0);
     }
 
     #[test]

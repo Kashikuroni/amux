@@ -120,6 +120,7 @@ mod tests {
             attached: false,
             git: None,
             worktree_repo: None,
+            activity: 0,
         }];
         app.now_unix = 0;
         // ANSI green "hello" — ansi-to-tui must not leave escape bytes in the buffer
@@ -146,6 +147,7 @@ mod tests {
             attached: false,
             git: None,
             worktree_repo: None,
+            activity: 0,
         }];
         let mut t = Terminal::new(TestBackend::new(50, 10)).unwrap();
         t.draw(|f| render(f, f.area(), &app)).unwrap();
@@ -168,6 +170,7 @@ mod tests {
             attached: false,
             git: None,
             worktree_repo: None,
+            activity: 0,
         }];
         app.now_unix = 0;
         // A line far wider than the 20-col backend; with wrapping the tail
@@ -193,6 +196,7 @@ mod tests {
             attached: false,
             git: None,
             worktree_repo: None,
+            activity: 0,
         }];
         app.usage = Some(Usage {
             five_hour: Some(Window {
@@ -232,6 +236,7 @@ mod tests {
             attached: false,
             git: None,
             worktree_repo: None,
+            activity: 0,
         }];
         app.usage = Some(Usage {
             five_hour: Some(Window {
@@ -269,6 +274,7 @@ mod tests {
             attached: false,
             git: None,
             worktree_repo: None,
+            activity: 0,
         }];
         app.usage = Some(Usage {
             five_hour: Some(Window {
@@ -302,6 +308,7 @@ mod tests {
             attached: false,
             git: None,
             worktree_repo: None,
+            activity: 0,
         }];
         app.usage = Some(Usage {
             five_hour: Some(Window {
@@ -334,6 +341,7 @@ mod tests {
             attached: false,
             git: None,
             worktree_repo: None,
+            activity: 0,
         }];
         app.now_unix = 0;
         app.preview_scroll = 0;

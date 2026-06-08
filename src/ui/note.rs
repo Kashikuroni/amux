@@ -152,6 +152,7 @@ mod tests {
             attached: false,
             git: None,
             worktree_repo: None,
+            activity: 0,
         }];
         app.project_notes.insert(
             "/home/u/proj".into(),

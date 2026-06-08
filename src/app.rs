@@ -3218,6 +3218,7 @@ mod tests {
                 attached: false,
                 git: None,
                 worktree_repo: None,
+                activity: 0,
             },
             Session {
                 name: "b".into(),
@@ -3229,6 +3230,7 @@ mod tests {
                 attached: false,
                 git: None,
                 worktree_repo: None,
+                activity: 0,
             },
         ];
         app
@@ -3245,6 +3247,7 @@ mod tests {
             attached: false,
             git: None,
             worktree_repo: None,
+            activity: 0,
         }
     }
 
@@ -5320,6 +5323,7 @@ mod tests {
                 removed: 0,
             }),
             worktree_repo: worktree_repo.map(|r| r.into()),
+            activity: 0,
         }
     }
 
@@ -5528,6 +5532,7 @@ mod tests {
             attached: false,
             git: None,
             worktree_repo: worktree_repo.map(|s| s.into()),
+            activity: 0,
         };
         let info = crate::git::GitInfo {
             branch: "main".into(),
@@ -5764,6 +5769,7 @@ mod tests {
             attached: false,
             git: None,
             worktree_repo: None,
+            activity: 0,
         }];
 
         // root override wins (return-to-root path)
