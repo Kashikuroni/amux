@@ -24,7 +24,7 @@ pub fn render(f: &mut Frame) {
                 ("N", "new in project"),
                 ("i", "reply to agent"),
                 ("1-9", "answer prompt"),
-                ("c", "return to root (stale cwd)"),
+                ("ctrl+r", "return to root (stale cwd)"),
                 ("d", "kill"),
                 ("r", "rename"),
                 ("R", "rename project"),

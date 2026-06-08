@@ -1,8 +1,22 @@
 # Design: graceful git state for a stale session cwd + return-to-root
 
 **Date:** 2026-06-08
-**Status:** Approved (brainstorming) — ready for plan
+**Status:** Implemented. **Amended post-review** (see below).
 **Scope:** `am` TUI (root crate). No change to `crates/amux-verify`.
+
+> **Amendment (2026-06-08, during finishing):** two presentation/binding decisions
+> below were revised after the feature was built. They supersede the matching
+> details in the body (which is kept as the original design record):
+> 1. **Key: `c` → `Ctrl+R`.** A bare `c` could fire from stray typing started
+>    without `i`; a Ctrl-chord can't. `Ctrl+C` was unavailable (it is the app's
+>    global quit, intercepted in `main.rs` before key dispatch), so `Ctrl+R`
+>    ("return to root"). The `Char('r') if ctrl` arm precedes the plain `r`
+>    (rename) arm.
+> 2. **Hint style: REVERSED button chip → footer-style hotkey.** Line 2 renders
+>    `worktree removed · ctrl+r return to root` with `ctrl+r` BOLD and the prose
+>    DIM (the footer's key/label contrast), not a reversed chip. Like the footer,
+>    it clips silently on very narrow cards (so the earlier "chip survives narrow
+>    width" guarantee no longer applies).
 
 ## Problem
 

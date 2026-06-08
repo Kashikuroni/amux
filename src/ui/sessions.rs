@@ -173,15 +173,19 @@ fn card(
             }
         }
         GitCardState::Returnable => {
-            // Chip first so the actionable key survives right-edge clipping on
-            // narrow cards — the explanatory prose clips before the key does.
-            l2.push(Span::raw("   "));
+            // A footer-style hotkey hint (bold key, dim text), not a button chip:
+            // the `ctrl+r` reads at full strength while the surrounding prose
+            // recedes. Like the footer, it clips silently on very narrow cards.
             l2.push(Span::styled(
-                " c ",
-                Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED),
+                "   worktree removed · ",
+                Style::default().add_modifier(Modifier::DIM),
             ));
             l2.push(Span::styled(
-                " worktree removed · return to root?",
+                "ctrl+r",
+                Style::default().add_modifier(Modifier::BOLD),
+            ));
+            l2.push(Span::styled(
+                " return to root",
                 Style::default().add_modifier(Modifier::DIM),
             ));
         }
@@ -996,48 +1000,6 @@ mod tests {
     }
 
     #[test]
-    fn returnable_chip_survives_narrow_width() {
-        let s = Session {
-            name: "feat".into(),
-            dir: "/repo/.worktrees/feat".into(),
-            cwd: "/repo/.worktrees/feat".into(),
-            created: 1,
-            agent: "claude".into(),
-            status: Status::Idle,
-            attached: false,
-            git: None,
-            worktree_repo: Some("/repo".into()),
-        };
-        // Width 24: narrow enough that "return to root?" clips, wide enough that
-        // the chip (" c ") fits (it lands at ~col 13-15, well within 24).
-        let width = 24u16;
-        let item = card(
-            &s,
-            0,
-            false,
-            None,
-            width,
-            1,
-            0,
-            0,
-            false,
-            GitCardState::Returnable,
-        );
-        let mut buf = Buffer::empty(ratatui::layout::Rect::new(0, 0, width, 4));
-        let list = ratatui::widgets::List::new(vec![item]);
-        ratatui::widgets::Widget::render(list, buf.area, &mut buf);
-        let text = buf_to_string(&buf);
-        assert!(
-            text.contains(" c "),
-            "key chip must survive narrow width, got: {text}"
-        );
-        assert!(
-            !text.contains("return to root?"),
-            "prose should clip at narrow width, got: {text}"
-        );
-    }
-
-    #[test]
     fn returnable_card_shows_return_to_root_hint() {
         let s = Session {
             name: "feat".into(),
@@ -1068,7 +1030,19 @@ mod tests {
         ratatui::widgets::Widget::render(list, buf.area, &mut buf);
         let text = buf_to_string(&buf);
         assert!(text.contains("worktree removed"), "got: {text}");
-        assert!(text.contains("return to root?"), "got: {text}");
-        assert!(text.contains(" c "), "missing key chip, got: {text}");
+        assert!(text.contains("ctrl+r return to root"), "got: {text}");
+        // A footer-style hotkey, not a button: no REVERSED chip on the card.
+        let no_reversed = (0..buf.area.height).all(|y| {
+            (0..buf.area.width).all(|x| {
+                !buf[(x, y)]
+                    .style()
+                    .add_modifier
+                    .contains(Modifier::REVERSED)
+            })
+        });
+        assert!(
+            no_reversed,
+            "hint must be a footer-style hotkey, not a reversed chip:\n{text}"
+        );
     }
 }

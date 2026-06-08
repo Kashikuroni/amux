@@ -8,8 +8,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 - Sessions whose pane directory no longer resolves to a git repo now show their
-  state instead of a blank: `no repo`, or `worktree removed · return to root? c`.
-  Pressing `c` returns the session to its project root (resuming Claude in place).
+  state instead of a blank: `no repo`, or `worktree removed · ctrl+r return to root`.
+  Pressing `ctrl+r` returns the session to its project root (resuming Claude in place).
 - `amux-verify`: a standalone workspace crate + CLI that runs the repo's
   verification contract (`.amux/verify.toml`) — ordered gates executed
   without a shell in a worktree, fail-fast cascade, per-gate timeout with

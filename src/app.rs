@@ -1351,9 +1351,11 @@ impl App {
             // Destructive and adjacent to plain typing (e.g. a reply started
             // without `i`), so it asks for a typed confirmation first.
             KeyCode::Char('u') => self.mode = Mode::ConfirmRestart(String::new()),
-            // c: return a removed-worktree session to its repo root. Only active
-            // when the selected card shows the "return to root?" prompt.
-            KeyCode::Char('c') => {
+            // Ctrl+R: return a removed-worktree session to its repo root. Only
+            // active when the selected card shows the "return to root" hint. A
+            // Ctrl-chord (not a bare letter) so it can't fire from stray typing
+            // started without `i`. Must precede the plain `r` (rename) arm.
+            KeyCode::Char('r') if ctrl => {
                 if let Some(s) = self.selected_session() {
                     if git_card_state(&self.git_cache, s) == GitCardState::Returnable {
                         return Some(Action::ReturnToRoot {
@@ -2738,6 +2740,10 @@ mod tests {
 
     fn key(c: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    fn key_ctrl(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
     }
 
     fn temp_git_repo(tag: &str) -> std::path::PathBuf {
@@ -5191,12 +5197,12 @@ mod tests {
     }
 
     #[test]
-    fn c_returns_to_root_for_returnable_session() {
+    fn ctrl_r_returns_to_root_for_returnable_session() {
         let mut app = app_with_two_sessions();
         app.sessions[0].worktree_repo = Some("/repo".into());
         app.git_cache.insert("/a".to_string(), None); // cwd "/a" → confirmed no repo
         app.selected = 0;
-        let action = app.handle_key(key('c'));
+        let action = app.handle_key(key_ctrl('r'));
         assert_eq!(
             action,
             Some(Action::ReturnToRoot {
@@ -5207,14 +5213,34 @@ mod tests {
     }
 
     #[test]
-    fn c_is_a_noop_when_not_returnable() {
+    fn ctrl_r_is_a_noop_when_not_returnable() {
         let mut app = app_with_two_sessions(); // no git_cache entry → Loading
         app.selected = 0;
-        assert_eq!(app.handle_key(key('c')), None);
+        assert_eq!(app.handle_key(key_ctrl('r')), None);
 
         // Some(None) but no worktree_repo → NoRepo, still a no-op.
         app.git_cache.insert("/a".to_string(), None);
-        assert_eq!(app.handle_key(key('c')), None);
+        assert_eq!(app.handle_key(key_ctrl('r')), None);
+    }
+
+    #[test]
+    fn plain_r_still_renames_and_ctrl_r_does_not() {
+        // Plain `r` opens rename even for a Returnable session…
+        let mut app = app_with_two_sessions();
+        app.sessions[0].worktree_repo = Some("/repo".into());
+        app.git_cache.insert("/a".to_string(), None); // Returnable
+        app.selected = 0;
+        assert_eq!(app.handle_key(key('r')), None); // rename is modal, not an Action
+        assert!(matches!(app.mode, Mode::Rename(_)), "plain r → rename");
+
+        // …and Ctrl+R on a NON-returnable session neither returns-to-root nor renames.
+        let mut app = app_with_two_sessions(); // no git_cache → Loading
+        app.selected = 0;
+        assert_eq!(app.handle_key(key_ctrl('r')), None);
+        assert!(
+            matches!(app.mode, Mode::List),
+            "ctrl+r must not open rename"
+        );
     }
 
     #[test]
