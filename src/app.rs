@@ -833,6 +833,14 @@ pub enum Action {
         name: String,
         root: String,
     },
+    /// Verify a session's worktree against its `.amux/verify.toml`.
+    Verify {
+        name: String,
+    },
+    /// Cancel the in-flight verification for a session.
+    CancelVerify {
+        name: String,
+    },
 }
 
 #[derive(Copy, Clone)]
@@ -1399,6 +1407,22 @@ impl App {
             KeyCode::Char('r') => {
                 if let Some(name) = self.selected_name() {
                     self.mode = Mode::Rename(RenameForm::new(name));
+                }
+            }
+            // v: verify the selected session against its contract. A second v
+            // while it runs cancels it. Plain letter (non-destructive: read-only
+            // checks, itself cancellable) per the feature doc.
+            KeyCode::Char('v') if !ctrl => {
+                if let Some(name) = self.selected_name() {
+                    let running = matches!(
+                        self.verification.get(&name),
+                        Some(VerificationState::Running { .. })
+                    );
+                    return Some(if running {
+                        Action::CancelVerify { name }
+                    } else {
+                        Action::Verify { name }
+                    });
                 }
             }
             // Shift+R: rename the selected session's project (display-only).
@@ -5418,6 +5442,37 @@ mod tests {
             },
         );
         assert!(!app.verification.contains_key("a"));
+    }
+
+    #[test]
+    fn v_starts_then_cancels_verification() {
+        let mut app = app_with_two_sessions();
+        app.selected = 0;
+        // No state → Verify.
+        assert_eq!(
+            app.handle_key(key('v')),
+            Some(Action::Verify { name: "a".into() })
+        );
+        // Running → CancelVerify.
+        app.verification.insert(
+            "a".into(),
+            VerificationState::Running {
+                total: 1,
+                done: 0,
+                current: String::new(),
+            },
+        );
+        assert_eq!(
+            app.handle_key(key('v')),
+            Some(Action::CancelVerify { name: "a".into() })
+        );
+        // Done → Verify (re-run).
+        app.verification
+            .insert("a".into(), VerificationState::Done(done_verdict(true)));
+        assert_eq!(
+            app.handle_key(key('v')),
+            Some(Action::Verify { name: "a".into() })
+        );
     }
 
     fn gate_result(name: &str, status: amux_verify::GateStatus) -> amux_verify::GateResult {

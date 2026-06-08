@@ -530,6 +530,47 @@ fn handle_action(
             }
             app.refresh();
         }
+        Action::Verify { name } => {
+            let dir = app
+                .sessions
+                .iter()
+                .find(|s| s.name == name)
+                .map(|s| s.dir.clone());
+            match dir {
+                None => app.error = Some(format!("session '{name}' not found")),
+                Some(dir) => match am::verify::load_contract(std::path::Path::new(&dir)) {
+                    Ok(contract) => {
+                        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                        app.verify_cancel.insert(name.clone(), cancel.clone());
+                        app.verification.insert(
+                            name.clone(),
+                            am::app::VerificationState::Running {
+                                total: contract.gates.len(),
+                                done: 0,
+                                current: String::new(),
+                            },
+                        );
+                        if let Some(w) = &app.verify_worker {
+                            let _ = w.tx.send(am::verify::VerifyRequest {
+                                name: name.clone(),
+                                dir: std::path::PathBuf::from(&dir),
+                                contract,
+                                cancel,
+                            });
+                        }
+                    }
+                    Err(e) => app.error = Some(e),
+                },
+            }
+            app.refresh();
+        }
+        Action::CancelVerify { name } => {
+            if let Some(c) = app.verify_cancel.remove(&name) {
+                c.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            app.verification.remove(&name);
+            app.refresh();
+        }
         Action::PromoteWorktree { name, branch } => {
             let session = app.sessions.iter().find(|s| s.name == name);
             let Some(s) = session else {
