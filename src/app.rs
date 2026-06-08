@@ -2734,6 +2734,19 @@ pub fn should_capture(
     }
 }
 
+/// Status for a session whose capture was skipped this tick (its screen is
+/// identical to the previous tick): `Waiting` if a prompt is still on screen,
+/// else `Idle`. Reproduces what re-capturing unchanged content would yield —
+/// `compute_status` returns `Idle` for an unchanged hash, and a present prompt
+/// overlays `Waiting`.
+pub fn status_when_idle(cached_prompt_present: bool) -> Status {
+    if cached_prompt_present {
+        Status::Waiting
+    } else {
+        Status::Idle
+    }
+}
+
 /// Coarse git re-read interval: even an unchanged pane gets its git re-read at
 /// least this often, so changes that don't alter the pane (e.g. an external
 /// commit) still surface. Pane-content changes re-read immediately.
@@ -3691,6 +3704,15 @@ mod tests {
         assert!(!should_capture(100, Some(100), Some(&Status::Waiting)));
         // Clock rollback (activity < last_seen) + Idle: not "advanced" — skip.
         assert!(!should_capture(99, Some(100), Some(&Status::Idle)));
+    }
+
+    #[test]
+    fn status_when_idle_maps_prompt_to_waiting() {
+        use crate::tmux::Status;
+        // Screen unchanged: a present prompt means the agent is still blocked.
+        assert_eq!(status_when_idle(true), Status::Waiting);
+        // No prompt on screen: idle.
+        assert_eq!(status_when_idle(false), Status::Idle);
     }
 
     #[test]
