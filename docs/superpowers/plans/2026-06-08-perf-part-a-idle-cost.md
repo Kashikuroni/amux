@@ -265,12 +265,16 @@ the `// Content:` comment through the final `f.render_widget(...)`) with:
     let total = app.preview_line_count(rows[3].width);
     let bottom = total.saturating_sub(rows[3].height);
     let scroll_y = bottom.saturating_sub(app.preview_scroll);
-    let cache = app.preview_text();
-    let para = Paragraph::new(cache.text.clone())
+    let para = Paragraph::new(app.preview_text())
         .wrap(Wrap { trim: false })
         .style(Style::default().fg(th::TEXT));
     f.render_widget(para.scroll((scroll_y, 0)), rows[3]);
 ```
+
+> `App::preview_text()` returns an owned `Text<'static>` (the cache stays
+> private), so call it directly inside `Paragraph::new` — no `.clone()` and no
+> borrow held across `preview_line_count`. Compute `preview_line_count` first
+> (it borrows the cache mutably to update its memo), then `preview_text`.
 
 > The `use ansi_to_tui::IntoText;` import at the top of `preview.rs` is now
 > unused. Remove that line to avoid an unused-import warning.
