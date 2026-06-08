@@ -26,19 +26,22 @@ am-cwd-test  am_t_60624  am_test_42247  am_test_45941
 amt3  amtest  amtest2  cmtest  cmdbg          ← 9 leaked servers
 ```
 
-The 9 `am*`/`cmtest`/`cmdbg` sockets are **leaked tmux servers from amux's own
-integration/debug test runs** (dates Jun 2–4). Each is a separate tmux server
-that may still hold sessions running `claude`/`sh`, plus their multi-process node
-trees — burning CPU and context switches that never show under amux's own PID and
-that the amux list never reveals. The user could not find them because amux, by
-construction, looks only at `cm`.
+The 9 `am*`/`cmtest`/`cmdbg` sockets are **stale tmux servers/socket files left
+over from manual and historical test/debug runs** (dates Jun 2–4) — leftover
+runtime artifacts, not anything the *current* code creates (a repo-wide search
+found no code referencing those names). Each may still hold sessions running
+`claude`/`sh`, plus their multi-process node trees — burning CPU and context
+switches that never show under amux's own PID and that the amux list never
+reveals. The user could not find them because amux, by construction, looks only
+at `cm`.
 
 Two distinct problems surfaced:
 1. **No visibility** into anything outside `cm` + `@cm_managed` → ghosts hang
-   unseen. (Doctor solves this.)
-2. **Leak source:** the test suite spins up tmux servers on temp sockets and does
-   not always `kill-server` on teardown, so they accumulate. (Separate fix —
-   see [Related](#related-not-doctor).)
+   unseen, and they are runtime artifacts (a code fix can't retroactively remove
+   them). (Doctor solves this.)
+2. **Test isolation** (since fixed — see [Related](#related-not-doctor)): the
+   integration tests ran against the live `cm` socket, so `cargo test` polluted
+   the user's real amux. They now isolate onto a throwaway socket.
 
 ---
 
@@ -159,14 +162,23 @@ Defer until the CLI version proves the detection logic.
 
 ---
 
-## Related (not doctor): fix the leak at the source
+## Related (not doctor): test isolation — DONE
 
-The socket pile-up originates in tests that create tmux servers on temp sockets
-(`tests/tmux_integration.rs`, `crates/amux-verify/tests/cli.rs`) without a
-guaranteed `kill-server` on teardown. Independent of doctor, those tests should
-tear down their server (RAII guard / `Drop`, or an explicit `kill-server` in a
-finally-style block) so sockets stop accumulating. Doctor cleans the symptom;
-this prevents the cause. Track as a separate small task.
+Investigation correction: the *current* tests were NOT the source of the leaked
+`am*` sockets. The only tmux-touching test, `tests/tmux_integration.rs`, ran
+against the production `cm` socket with `Drop` guards that kill the sessions they
+create — so it cleaned up its sessions but **polluted the user's live `cm`
+server** during `cargo test` (and could leave sessions on `cm` if hard-killed).
+The leaked `am*`/`cmtest`/`cmdbg` sockets are historical/manual artifacts no
+current code creates.
+
+Fixed independently of doctor: `tmux::isolate_socket(name)` (a `#[doc(hidden)]`
+test hook backed by a thread-local socket override, thread-safe under cargo's
+parallel tests) routes each integration test onto a throwaway socket and, on
+guard drop, `kill-server`s it AND removes the lingering socket file (tmux's
+`kill-server` does not reliably unlink it). Result: `cargo test` never touches
+`cm` and leaves zero tmux state behind. Doctor still cleans the *historical*
+runtime artifacts, which no code fix can retroactively remove.
 
 ---
 

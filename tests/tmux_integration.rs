@@ -9,6 +9,9 @@ fn new_list_rename_capture_kill_roundtrip() {
         return;
     }
 
+    // Run on a throwaway socket, killed on drop — never touches the live `cm`.
+    let _sock = tmux::isolate_socket(&format!("cm_it_rt_{}", std::process::id()));
+
     let name = format!("cm_it_{}", std::process::id());
     let renamed = format!("{name}_r");
     // Clean any leftovers from a previous failed run.
@@ -61,6 +64,9 @@ fn restart_lifecycle_remain_on_exit_capture_respawn() {
         eprintln!("skipping: tmux not available");
         return;
     }
+
+    // Run on a throwaway socket, killed on drop — never touches the live `cm`.
+    let _sock = tmux::isolate_socket(&format!("cm_it_restart_{}", std::process::id()));
 
     let name = format!("cm_it_restart_{}", std::process::id());
     let _ = tmux::kill_session(&name);
@@ -122,6 +128,9 @@ fn worktree_session_reports_repo_and_cleans_up() {
         eprintln!("skipping: tmux or git not available");
         return;
     }
+
+    // Run on a throwaway socket, killed on drop — never touches the live `cm`.
+    let _sock = tmux::isolate_socket(&format!("am_wt_it_{}", std::process::id()));
 
     // Build a throwaway git repo with one commit on `main`.
     let repo = std::env::temp_dir().join(format!("am_wt_it_{}", std::process::id()));
@@ -194,6 +203,9 @@ fn existing_branch_worktree_create_and_reuse() {
         eprintln!("skipping: tmux or git not available");
         return;
     }
+
+    // Run on a throwaway socket, killed on drop — never touches the live `cm`.
+    let _sock = tmux::isolate_socket(&format!("am_exwt_{}", std::process::id()));
 
     let repo = std::env::temp_dir().join(format!("am_exwt_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&repo);

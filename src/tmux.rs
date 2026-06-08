@@ -82,11 +82,67 @@ fn parse_line(line: &str) -> Option<Session> {
 /// the user's default tmux server.
 const SOCKET: &str = "cm";
 
-/// A `tmux` command pre-pointed at our private socket.
+thread_local! {
+    /// Per-thread tmux socket override. `None` in production → the shared `cm`
+    /// socket. Integration tests set this (via [`isolate_socket`]) to a
+    /// throwaway socket so `cargo test` never touches the user's live `cm`
+    /// server. Thread-local so cargo's parallel tests don't race on it.
+    static SOCKET_OVERRIDE: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The tmux socket name for the current thread: a test override if set, else `cm`.
+fn socket() -> String {
+    SOCKET_OVERRIDE
+        .with(|o| o.borrow().clone())
+        .unwrap_or_else(|| SOCKET.to_string())
+}
+
+/// A `tmux` command pre-pointed at our private socket (or a test override).
 fn tmux() -> Command {
     let mut c = Command::new("tmux");
-    c.args(["-L", SOCKET]);
+    c.arg("-L").arg(socket());
     c
+}
+
+/// **Test-only.** Routes every tmux call on the current thread to a throwaway
+/// socket named `name`, and `kill-server`s that socket when the returned guard
+/// drops — so an integration test runs in full isolation from the user's live
+/// `cm` server and leaves no tmux state behind, even on panic. Not for
+/// production use; exposed only because integration tests are a separate crate.
+#[doc(hidden)]
+pub fn isolate_socket(name: &str) -> SocketGuard {
+    SOCKET_OVERRIDE.with(|o| *o.borrow_mut() = Some(name.to_string()));
+    // Capture the socket path now (start the server, ask its path) so Drop can
+    // delete the file — `kill-server` stops the server but can leave a stale
+    // socket file behind, which is exactly the clutter we want to avoid.
+    let path = tmux()
+        .args(["start-server", ";", "display-message", "-p", "#{socket_path}"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|p| !p.is_empty());
+    SocketGuard { path }
+}
+
+/// Guard returned by [`isolate_socket`]: kills the throwaway server, removes its
+/// (possibly lingering) socket file, and clears the per-thread override on drop.
+#[doc(hidden)]
+pub struct SocketGuard {
+    path: Option<String>,
+}
+
+impl Drop for SocketGuard {
+    fn drop(&mut self) {
+        // Nuke the throwaway server (and all its sessions) while the override is
+        // still active, clear it, then remove the lingering socket file.
+        let _ = run(&["kill-server"]);
+        SOCKET_OVERRIDE.with(|o| *o.borrow_mut() = None);
+        if let Some(p) = &self.path {
+            let _ = std::fs::remove_file(p);
+        }
+    }
 }
 
 /// Runs a tmux subcommand, returning an error containing stderr on failure.
