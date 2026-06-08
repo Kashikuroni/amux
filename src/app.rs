@@ -808,6 +808,13 @@ pub enum Action {
         repo_root: String,
         branches: Vec<String>,
     },
+    /// Return a session whose worktree was removed back to its repo root. For a
+    /// Claude session this restarts it (resumed) in `root`; for a shell it sends
+    /// `cd <root>`.
+    ReturnToRoot {
+        name: String,
+        root: String,
+    },
 }
 
 #[derive(Copy, Clone)]
@@ -1344,6 +1351,18 @@ impl App {
             // Destructive and adjacent to plain typing (e.g. a reply started
             // without `i`), so it asks for a typed confirmation first.
             KeyCode::Char('u') => self.mode = Mode::ConfirmRestart(String::new()),
+            // c: return a removed-worktree session to its repo root. Only active
+            // when the selected card shows the "return to root?" prompt.
+            KeyCode::Char('c') => {
+                if let Some(s) = self.selected_session() {
+                    if git_card_state(&self.git_cache, s) == GitCardState::Returnable {
+                        return Some(Action::ReturnToRoot {
+                            name: s.name.clone(),
+                            root: session_root(s).to_string(),
+                        });
+                    }
+                }
+            }
             KeyCode::Char('r') => {
                 if let Some(name) = self.selected_name() {
                     self.mode = Mode::Rename(RenameForm::new(name));
@@ -5156,5 +5175,32 @@ mod tests {
 
         // NoRepo: Some(None) + no worktree_repo.
         assert_eq!(git_card_state(&gone, &mk("/a", None)), GitCardState::NoRepo);
+    }
+
+    #[test]
+    fn c_returns_to_root_for_returnable_session() {
+        let mut app = app_with_two_sessions();
+        app.sessions[0].worktree_repo = Some("/repo".into());
+        app.git_cache.insert("/a".to_string(), None); // cwd "/a" → confirmed no repo
+        app.selected = 0;
+        let action = app.handle_key(key('c'));
+        assert_eq!(
+            action,
+            Some(Action::ReturnToRoot {
+                name: "a".into(),
+                root: "/repo".into()
+            })
+        );
+    }
+
+    #[test]
+    fn c_is_a_noop_when_not_returnable() {
+        let mut app = app_with_two_sessions(); // no git_cache entry → Loading
+        app.selected = 0;
+        assert_eq!(app.handle_key(key('c')), None);
+
+        // Some(None) but no worktree_repo → NoRepo, still a no-op.
+        app.git_cache.insert("/a".to_string(), None);
+        assert_eq!(app.handle_key(key('c')), None);
     }
 }

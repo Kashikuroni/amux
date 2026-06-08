@@ -500,6 +500,41 @@ fn handle_action(
             }
             app.refresh();
         }
+        Action::ReturnToRoot { name, root } => {
+            let is_claude = app
+                .sessions
+                .iter()
+                .find(|s| s.name == name)
+                .map(|s| s.agent.split_whitespace().next() == Some("claude"))
+                .unwrap_or(false);
+            if is_claude {
+                // Same pipeline as `u`, but the poll loop respawns in `root`:
+                // remain-on-exit keeps the dead pane with the --resume hint,
+                // Ctrl+C exits Claude, then it is respawned (resumed) in root.
+                let now = app.now_unix;
+                if let Err(e) = tmux::set_remain_on_exit(&name, true) {
+                    app.error = Some(format!("return to root: {e}"));
+                } else if let Err(e) = tmux::send_ctrl_c(&name) {
+                    app.error = Some(format!("return to root: {e}"));
+                    let _ = tmux::set_remain_on_exit(&name, false);
+                } else {
+                    app.restarting.insert(
+                        name,
+                        am::app::RestartReq {
+                            started: now,
+                            root: Some(root),
+                        },
+                    );
+                }
+            } else {
+                // Plain shell: run the cd directly.
+                let cmd = format!("cd {}", tmux::shell_single_quote(&root));
+                if let Err(e) = tmux::send_text(&name, &cmd) {
+                    app.error = Some(format!("return to root: {e}"));
+                }
+            }
+            app.refresh();
+        }
         Action::PromoteWorktree { name, branch } => {
             let session = app.sessions.iter().find(|s| s.name == name);
             let Some(s) = session else {
