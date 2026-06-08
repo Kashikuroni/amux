@@ -458,7 +458,7 @@ fn poll_timeout_tmux_missing_waits_long() {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cargo test --bin am poll_timeout`
+Run: `cargo test --bin amux poll_timeout`
 Expected: FAIL — `cannot find function poll_timeout`.
 
 - [ ] **Step 3: Implement `poll_timeout`**
@@ -493,7 +493,7 @@ fn poll_timeout(
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cargo test --bin am poll_timeout`
+Run: `cargo test --bin amux poll_timeout`
 Expected: PASS (5 passed).
 
 - [ ] **Step 5: Commit**
