@@ -199,13 +199,12 @@ fn run(
     update_rx: &mpsc::Receiver<am::update::UpdateInfo>,
 ) -> io::Result<()> {
     let start = Instant::now();
-    let tick = Duration::from_millis(80);
     let mut last_refresh = Instant::now();
-    // Progress of an in-flight self-update install, if any.
     let mut install_rx: Option<mpsc::Receiver<am::update::UpdateStage>> = None;
+    // Draw once on entry; thereafter only when something changed (F2).
+    let mut needs_redraw = true;
     loop {
-        app.spinner_frame = am::spinner::frame_index(start.elapsed().as_millis());
-        // Drain account updates; keep the last good value on a failed fetch.
+        // Drain background channels; any applied message changes the view.
         while let Ok(acct) = usage_rx.try_recv() {
             if acct.usage.is_some() {
                 app.usage = acct.usage;
@@ -216,20 +215,44 @@ fn run(
             if acct.plan.is_some() {
                 app.plan = acct.plan;
             }
+            needs_redraw = true;
         }
         while let Ok(info) = update_rx.try_recv() {
             app.update = Some(info);
+            needs_redraw = true;
         }
         if let Some(rx) = &install_rx {
             while let Ok(stage) = rx.try_recv() {
                 app.set_update_stage(stage);
+                needs_redraw = true;
             }
         }
-        app.offer_update_if_idle();
-        terminal.draw(|f| ui::draw(f, app))?;
 
-        if event::poll(tick)? {
+        // Advance the spinner; only a running session animates, and only an
+        // actual frame change needs a redraw.
+        let prev_frame = app.spinner_frame;
+        app.spinner_frame = am::spinner::frame_index(start.elapsed().as_millis());
+        let any_running = app
+            .sessions
+            .iter()
+            .any(|s| s.status == am::tmux::Status::Running);
+        if any_running && app.spinner_frame != prev_frame {
+            needs_redraw = true;
+        }
+        if app.offer_update_if_idle() {
+            needs_redraw = true;
+        }
+
+        if needs_redraw {
+            terminal.draw(|f| ui::draw(f, app))?;
+            needs_redraw = false;
+        }
+
+        let timeout = poll_timeout(any_running, app.tmux_missing, last_refresh.elapsed(), refresh);
+        if event::poll(timeout)? {
             let ev = event::read()?;
+            // Any consumed input may change the view.
+            needs_redraw = true;
             if let Event::Paste(text) = &ev {
                 if !app.tmux_missing {
                     app.handle_paste(text);
@@ -280,7 +303,9 @@ fn run(
         }
 
         if !app.tmux_missing && last_refresh.elapsed() >= refresh {
-            app.refresh();
+            if app.refresh() {
+                needs_redraw = true;
+            }
             last_refresh = Instant::now();
 
             // For sessions awaiting resume: once claude exits, the pane goes
