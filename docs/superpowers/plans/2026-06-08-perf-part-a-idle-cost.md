@@ -33,10 +33,10 @@ Expected: builds clean.
 
 - [ ] **Step 2: Record idle CPU + wakeups, warm case**
 
-Launch `./target/release/am` with ≥1 session present. Leave the screen fully
+Launch `./target/release/amux` with ≥1 session present. Leave the screen fully
 static (no keypresses) for ≥30 s. In another terminal capture, for the `amux` PID:
 
-Run: `top -l 6 -s 5 -pid "$(pgrep -x am | head -1)" -stats pid,cpu,idlew`
+Run: `top -l 6 -s 5 -pid "$(pgrep -x amux | head -1)" -stats pid,cpu,idlew`
 (macOS: `idlew` = idle wakeups; or use Activity Monitor → the `amux` row → %CPU and
 "Idle Wake Ups").
 
@@ -52,7 +52,7 @@ Repeat Step 2 with 0 sessions. Record:
 
 - [ ] **Step 4 (optional): Confirm the render hotspot**
 
-Run: `cargo flamegraph --bin am` (leave idle ~30 s, then quit). Note the combined
+Run: `cargo flamegraph --bin amux` (leave idle ~30 s, then quit). Note the combined
 share of `ansi_to_tui` (`IntoText`) + `Paragraph::line_count` in the profile:
 `____%`. This is the share Task 1–2 should remove.
 
@@ -746,7 +746,7 @@ Verify and check off:
 
 - [ ] **Step 3 (optional): Re-profile**
 
-Run: `cargo flamegraph --bin am`, leave idle ~30 s. Confirm `ansi_to_tui` /
+Run: `cargo flamegraph --bin amux`, leave idle ~30 s. Confirm `ansi_to_tui` /
 `Paragraph::line_count` no longer appear in the idle profile.
 
 - [ ] **Step 4: Commit the recorded results**
