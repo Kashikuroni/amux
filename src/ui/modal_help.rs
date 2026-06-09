@@ -1,11 +1,69 @@
+use crate::app::{App, HelpTab};
 use crate::theme as th;
-use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Clear, Paragraph};
+use ratatui::widgets::{Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
-pub fn render(f: &mut Frame) {
+pub fn render(f: &mut Frame, app: &App) {
+    // Tab strip: Keys | Changelog. The active tab bolds; the rest is dim.
+    let dim = Style::default().fg(th::DIM);
+    let active = Style::default().fg(th::AMBER).add_modifier(Modifier::BOLD);
+    let keys_style = if app.help_tab == HelpTab::Keys {
+        active
+    } else {
+        dim
+    };
+    let cl_style = if app.help_tab == HelpTab::Changelog {
+        active
+    } else {
+        dim
+    };
+    let header = Line::from(vec![
+        Span::styled("KEYS", keys_style),
+        Span::styled("  ·  ", dim),
+        Span::styled("CHANGELOG", cl_style),
+        Span::styled("    tab switch · esc close", dim),
+    ]);
+
+    let (mut lines, scroll) = match app.help_tab {
+        HelpTab::Keys => (keys_lines(), 0),
+        HelpTab::Changelog => {
+            let entries = crate::changelog::parse(crate::changelog::raw());
+            (
+                super::modal_whatsnew::changelog_lines(&entries),
+                app.help_scroll,
+            )
+        }
+    };
+    let mut all = vec![header, Line::from("")];
+    all.append(&mut lines);
+
+    // Fixed-size box that doesn't change between the Keys and Changelog tabs;
+    // either tab scrolls (ctrl+j/k) if its content overflows.
+    let area = super::centered(40, 80, f.area());
+    let inner_h = area.height.saturating_sub(2);
+
+    let para = Paragraph::new(all)
+        .block(
+            th::panel()
+                .border_style(th::chrome(th::BORDER_HI))
+                .title(" help ")
+                .style(Style::default().bg(th::BG_RAISED)),
+        )
+        .wrap(Wrap { trim: false });
+    // Clamp to the wrapped row count, not the logical line count — long lines in
+    // this narrow box wrap, so `all.len()` would cap the scroll short of bottom.
+    let total = para.line_count(area.width) as u16;
+    let max_scroll = total.saturating_sub(inner_h);
+    let scroll = scroll.min(max_scroll);
+
+    f.render_widget(Clear, area);
+    f.render_widget(para.scroll((scroll, 0)), area);
+}
+
+/// The keybinding reference as styled lines (the Keys tab body).
+fn keys_lines() -> Vec<Line<'static>> {
     let groups: [(&str, &[(&str, &str)]); 4] = [
         (
             "Navigation",
@@ -55,16 +113,7 @@ pub fn render(f: &mut Frame) {
             ],
         ),
     ];
-    let mut lines = vec![
-        Line::from(vec![
-            Span::styled(
-                "? Help",
-                Style::default().fg(th::AMBER).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("   keys & shortcuts", Style::default().fg(th::DIM)),
-        ]),
-        Line::from(""),
-    ];
+    let mut lines: Vec<Line<'static>> = Vec::new();
     for (title, items) in groups {
         lines.push(Line::from(Span::styled(
             title,
@@ -73,48 +122,32 @@ pub fn render(f: &mut Frame) {
         for (k, label) in items {
             lines.push(Line::from(vec![
                 Span::styled(format!("  {k:<12}"), Style::default().fg(th::AMBER_HI)),
-                Span::styled(*label, Style::default().fg(th::TEXT)),
+                Span::styled(label.to_string(), Style::default().fg(th::TEXT)),
             ]));
         }
         lines.push(Line::from(""));
     }
-    // Size the panel to its content (lines + top/bottom border), centered and
-    // clamped to the screen — so nothing clips and large terminals get no empty
-    // box. Width is a fixed share wide enough for the longest "key  label" row.
-    let screen = f.area();
-    let h = (lines.len() as u16 + 2).min(screen.height);
-    let w = ((screen.width as u32 * 60 / 100) as u16).min(screen.width);
-    let area = Rect {
-        x: screen.x + screen.width.saturating_sub(w) / 2,
-        y: screen.y + screen.height.saturating_sub(h) / 2,
-        width: w,
-        height: h,
-    };
-    f.render_widget(Clear, area);
-    f.render_widget(
-        Paragraph::new(lines).block(
-            th::panel()
-                .border_style(th::chrome(th::BORDER_HI))
-                .title(" help ")
-                .style(Style::default().bg(th::BG_RAISED)),
-        ),
-        area,
-    );
+    lines
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::App;
+    use crate::config::Config;
     use crate::ui::testutil::buf_to_string;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     #[test]
     fn help_lists_groups_and_keys() {
-        // Tall enough that the content-sized panel renders every group.
-        let mut t = Terminal::new(TestBackend::new(80, 40)).unwrap();
-        t.draw(render).unwrap();
+        let app = App::new(Config::default()); // default tab: Keys
+                                               // Wide+tall enough that the fixed (40%) box shows every Keys row at
+                                               // scroll 0 without wrap splitting the labels across rows.
+        let mut t = Terminal::new(TestBackend::new(140, 80)).unwrap();
+        t.draw(|f| render(f, &app)).unwrap();
         let s = buf_to_string(t.backend().buffer());
-        assert!(s.contains("Help"));
+        assert!(s.contains("KEYS"), "tab strip:\n{s}");
+        assert!(s.contains("CHANGELOG"), "tab strip:\n{s}");
         assert!(s.contains("Navigation"));
         assert!(s.contains("attach"));
         assert!(s.contains("filter"));
@@ -141,5 +174,17 @@ mod tests {
         for glyph in ["⇧", "⇥", "↵", "^"] {
             assert!(!s.contains(glyph), "stale key glyph {glyph}:\n{s}");
         }
+    }
+
+    #[test]
+    fn help_changelog_tab_shows_versions() {
+        let mut app = App::new(Config::default());
+        app.help_tab = HelpTab::Changelog;
+        let mut t = Terminal::new(TestBackend::new(80, 40)).unwrap();
+        t.draw(|f| render(f, &app)).unwrap();
+        let s = buf_to_string(t.backend().buffer());
+        assert!(s.contains("CHANGELOG"), "tab strip:\n{s}");
+        // Newest-first: the latest released version heads the changelog.
+        assert!(s.contains("v0.5.1"), "changelog version header:\n{s}");
     }
 }

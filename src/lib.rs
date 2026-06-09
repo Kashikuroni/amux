@@ -1,5 +1,6 @@
 pub mod app;
 pub mod browse;
+pub mod changelog;
 pub mod clip;
 pub mod config;
 pub mod doctor;

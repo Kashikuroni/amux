@@ -29,7 +29,11 @@ fn items_for(mode: &Mode) -> Vec<Item> {
             ("enter", "restart", false),
             ("esc", "cancel", false),
         ],
-        Mode::Help => vec![("esc", "close", true), ("q", "quit", false)],
+        Mode::Help => vec![
+            ("tab", "keys/changelog", true),
+            ("esc", "close", false),
+            ("q", "quit", false),
+        ],
         Mode::Rename(_) => vec![("enter", "rename", true), ("esc", "cancel", false)],
         Mode::RenameProject(_) => {
             vec![("enter", "rename project", true), ("esc", "cancel", false)]
@@ -93,6 +97,7 @@ fn items_for(mode: &Mode) -> Vec<Item> {
         },
         Mode::Git(_) => vec![("esc", "cancel", true)],
         Mode::VerifyDetail(_) => vec![("esc", "close", true)],
+        Mode::WhatsNew => vec![("ctrl+j/k", "scroll", true), ("any key", "close", false)],
     }
 }
 

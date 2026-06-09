@@ -267,6 +267,31 @@ pub fn stash_pop(dir: &str) -> std::io::Result<()> {
     git_run(dir, &["stash", "pop"])
 }
 
+/// Check out an existing `branch` in `repo_root`.
+pub fn checkout(repo_root: &str, branch: &str) -> std::io::Result<()> {
+    git_run(repo_root, &["checkout", branch])
+}
+
+/// Promote a worktree's branch into the main repo: stash any dirty changes in
+/// the worktree (so they aren't lost), remove the worktree, check out `branch`
+/// in `repo_root`, then pop the stash back. Stashes live in the shared `.git`,
+/// so a stash pushed in the worktree pops cleanly in `repo_root`. Done entirely
+/// via git (no keystrokes), so it is safe to run after the agent has exited —
+/// nothing is typed into the agent's prompt. Errors short-circuit; a clean
+/// worktree skips the stash/pop entirely.
+pub fn promote_worktree(repo_root: &str, worktree_dir: &str, branch: &str) -> std::io::Result<()> {
+    let dirty = is_dirty(worktree_dir);
+    if dirty {
+        stash_push(worktree_dir)?;
+    }
+    remove_worktree(repo_root, worktree_dir)?;
+    checkout(repo_root, branch)?;
+    if dirty {
+        stash_pop(repo_root)?;
+    }
+    Ok(())
+}
+
 /// Appends `entry` as its own line to `<repo_root>/.gitignore` if not already
 /// present (exact-line match). Creates the file when missing.
 pub fn ensure_gitignore(repo_root: &str, entry: &str) -> std::io::Result<()> {
@@ -460,6 +485,71 @@ mod tests {
 
         remove_worktree(root, wt_s).expect("remove");
         assert!(!wt.exists(), "worktree dir gone after remove");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn checkout_switches_current_branch() {
+        if Command::new("git").arg("--version").output().is_err() {
+            return;
+        }
+        let dir = temp_repo("checkout");
+        let root = dir.to_str().unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["branch", "feature"])
+            .output()
+            .unwrap();
+        checkout(root, "feature").expect("checkout");
+        assert_eq!(current_branch(root).as_deref(), Some("feature"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn promote_worktree_removes_wt_checks_out_branch_and_restores_changes() {
+        if Command::new("git").arg("--version").output().is_err() {
+            return;
+        }
+        let dir = temp_repo("promote");
+        let root = dir.to_str().unwrap();
+        let wt = dir.join(".worktrees").join("feature-x");
+        let wt_s = wt.to_str().unwrap();
+        add_worktree(root, wt_s, "feature-x", "main").expect("add");
+        // Dirty the worktree: a tracked edit plus an untracked file.
+        std::fs::write(wt.join("f.txt"), "changed\n").unwrap();
+        std::fs::write(wt.join("new.txt"), "new\n").unwrap();
+
+        promote_worktree(root, wt_s, "feature-x").expect("promote");
+
+        // Worktree gone, root switched to the branch, dirty changes restored.
+        assert!(!wt.exists(), "worktree removed");
+        assert_eq!(current_branch(root).as_deref(), Some("feature-x"));
+        assert_eq!(
+            std::fs::read_to_string(dir.join("f.txt")).unwrap(),
+            "changed\n",
+            "tracked change restored into root"
+        );
+        assert!(dir.join("new.txt").exists(), "untracked change restored");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn promote_worktree_clean_has_no_stash_to_pop() {
+        if Command::new("git").arg("--version").output().is_err() {
+            return;
+        }
+        let dir = temp_repo("promote_clean");
+        let root = dir.to_str().unwrap();
+        let wt = dir.join(".worktrees").join("feature-y");
+        let wt_s = wt.to_str().unwrap();
+        add_worktree(root, wt_s, "feature-y", "main").expect("add");
+
+        // No changes in the worktree → clean promote must still succeed (and not
+        // fail trying to pop a nonexistent stash).
+        promote_worktree(root, wt_s, "feature-y").expect("promote clean");
+        assert!(!wt.exists(), "worktree removed");
+        assert_eq!(current_branch(root).as_deref(), Some("feature-y"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

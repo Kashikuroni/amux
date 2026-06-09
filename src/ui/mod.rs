@@ -2,6 +2,7 @@ mod empty;
 mod error;
 mod footer;
 mod header;
+mod markdown;
 mod modal_git;
 mod modal_help;
 mod modal_kill;
@@ -9,6 +10,7 @@ mod modal_new;
 mod modal_update;
 mod modal_usage_log;
 mod modal_verify;
+mod modal_whatsnew;
 mod note;
 mod preview;
 mod sessions;
@@ -55,7 +57,7 @@ pub fn draw(f: &mut Frame, app: &App) {
             modal_kill::render(f, form, s);
         }
         Mode::ConfirmRestart(buffer) => draw_confirm_restart_modal(f, buffer),
-        Mode::Help => modal_help::render(f),
+        Mode::Help => modal_help::render(f, app),
         Mode::Reply(form) => draw_reply_modal(f, form),
         Mode::RenameProject(form) => draw_project_rename_modal(f, form),
         Mode::UsageLog => modal_usage_log::render(f, app),
@@ -65,13 +67,14 @@ pub fn draw(f: &mut Frame, app: &App) {
         Mode::ConfirmUpdate(m) => modal_update::render(f, m),
         Mode::Git(form) => modal_git::render(f, form),
         Mode::VerifyDetail(name) => modal_verify::render(f, app, name),
+        Mode::WhatsNew => modal_whatsnew::render(f, app),
     }
 }
 
 /// Multi-line reply composer: text wraps to the box width and the hardware
 /// cursor tracks the edit position, so a long message is always fully visible.
 fn draw_reply_modal(f: &mut Frame, form: &ReplyForm) {
-    let area = centered(35, 33, f.area());
+    let area = centered(NARROW_MODAL_PCT, 33, f.area());
     f.render_widget(Clear, area);
     let block = th::panel()
         .border_style(th::chrome(th::BORDER_HI))
@@ -320,6 +323,10 @@ fn draw_body(f: &mut Frame, area: Rect, app: &App) {
     }
 }
 
+/// Width (% of screen) shared by the narrow text modals — the `i` reply
+/// composer and the What's New panel — so they read at the same column.
+pub(crate) const NARROW_MODAL_PCT: u16 = 35;
+
 /// Centered Rect helper shared with modal submodules (Task 10).
 /// A centered rectangle `pct_x`/`pct_y` percent of the screen.
 /// Pass even percentages: `(100 - pct)` is halved with integer division, so
@@ -406,6 +413,35 @@ mod tests {
         assert_eq!(cursor_rowcol(&rows, 3), (1, 0));
         // cursor at end sits at the end of the last row.
         assert_eq!(cursor_rowcol(&rows, 6), (1, 3));
+    }
+
+    #[test]
+    fn centered_returns_exact_percent_width() {
+        // Guards modal widths: the helper must yield exactly pct_x of the area
+        // (e.g. the Help panel at 60%, the narrow text modals at 35%).
+        let r = centered(
+            60,
+            80,
+            Rect {
+                x: 0,
+                y: 0,
+                width: 100,
+                height: 40,
+            },
+        );
+        assert_eq!(r.width, 60);
+        assert_eq!(r.x, 20, "and centered");
+        let n = centered(
+            NARROW_MODAL_PCT,
+            72,
+            Rect {
+                x: 0,
+                y: 0,
+                width: 100,
+                height: 40,
+            },
+        );
+        assert_eq!(n.width, NARROW_MODAL_PCT);
     }
 
     #[test]

@@ -50,6 +50,17 @@ fn main() -> io::Result<()> {
         state.save();
     }
     app.apply_state(state);
+    // One-shot "What's New": diff the version recorded last run against this
+    // build, then record the current version (saved immediately so the modal
+    // shows exactly once, even if the app later crashes before a normal save).
+    let current_version = env!("CARGO_PKG_VERSION");
+    app.whats_new = am::changelog::whats_new_on_upgrade(
+        app.last_version.as_deref(),
+        current_version,
+        am::changelog::raw(),
+    );
+    app.last_version = Some(current_version.to_string());
+    app.snapshot_state().save();
     // Read git off the UI thread so large/slow repos never stall rendering.
     app.attach_git_worker();
     app.attach_verifier();
@@ -58,6 +69,10 @@ fn main() -> io::Result<()> {
     } else {
         app.refresh();
         restore_sessions(&mut app);
+        // Surface the upgrade notes over the live dashboard.
+        if !app.whats_new.is_empty() {
+            app.mode = am::app::Mode::WhatsNew;
+        }
     }
 
     install_panic_hook();
@@ -290,21 +305,46 @@ fn run(
                 continue;
             }
             if let Event::Mouse(m) = &ev {
-                match m.kind {
-                    MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-                        // Only scroll the preview when the cursor is over the right
-                        // panel. The boundary is: x=2 margin + left-panel width.
-                        let screen = terminal.size().unwrap_or_default();
-                        let split_col = preview_boundary_col(screen.width, app.split_pct);
-                        if m.column >= split_col {
-                            if m.kind == MouseEventKind::ScrollUp {
-                                app.preview_scroll_up(3);
-                            } else {
-                                app.preview_scroll_down(3);
+                if matches!(
+                    m.kind,
+                    MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                ) {
+                    let up = m.kind == MouseEventKind::ScrollUp;
+                    // Wheel up → toward the top (smaller offset); down → further.
+                    let wheel = |cur: u16| {
+                        if up {
+                            cur.saturating_sub(3)
+                        } else {
+                            cur.saturating_add(3)
+                        }
+                    };
+                    // A scrollable modal captures the wheel so it never leaks to
+                    // the preview underneath. Only the bare list scrolls the
+                    // preview (and only when the cursor is over the right panel).
+                    match &app.mode {
+                        am::app::Mode::WhatsNew => {
+                            app.whats_new_scroll = wheel(app.whats_new_scroll)
+                        }
+                        am::app::Mode::Help => app.help_scroll = wheel(app.help_scroll),
+                        am::app::Mode::UsageLog => {
+                            app.usage_log_scroll = wheel(app.usage_log_scroll)
+                        }
+                        am::app::Mode::List
+                        | am::app::Mode::Filter
+                        | am::app::Mode::SelectSession => {
+                            let screen = terminal.size().unwrap_or_default();
+                            let split_col = preview_boundary_col(screen.width, app.split_pct);
+                            if m.column >= split_col {
+                                if up {
+                                    app.preview_scroll_up(3);
+                                } else {
+                                    app.preview_scroll_down(3);
+                                }
                             }
                         }
+                        // Other modals/overlays swallow the wheel.
+                        _ => {}
                     }
-                    _ => {} // clicks/moves ignored
                 }
                 continue;
             }
@@ -381,9 +421,27 @@ fn run(
                     if !tmux::pane_dead(name).unwrap_or(false) {
                         continue;
                     }
+                    // Now that the agent has exited and no longer holds the
+                    // worktree as its cwd, run any deferred promote git work
+                    // (stash → remove worktree → checkout → pop) before the
+                    // respawn drops Claude back in the repo root.
+                    // If a promote git step fails, the worktree still exists —
+                    // respawn the agent back in it (restore in place) rather
+                    // than stranding it in the repo root.
+                    let mut respawn_override: Option<String> = None;
+                    if let Some(op) = &req.promote {
+                        if let Err(e) =
+                            am::git::promote_worktree(&op.repo_root, &op.worktree_dir, &op.branch)
+                        {
+                            app.error = Some(format!("promote failed, restored in worktree: {e}"));
+                            respawn_override = Some(op.worktree_dir.clone());
+                        }
+                    }
                     if let Ok(pane) = tmux::capture_pane(name) {
                         if let Some(cmd) = tmux::parse_resume_command(&pane) {
-                            let dir = am::app::respawn_dir(req, &app.sessions, name);
+                            let dir = respawn_override
+                                .clone()
+                                .unwrap_or_else(|| am::app::respawn_dir(req, &app.sessions, name));
                             if let Err(e) = tmux::respawn_pane(name, &dir, &cmd) {
                                 app.error = Some(format!("resume: {e}"));
                             } else {
@@ -540,8 +598,37 @@ fn handle_action(
                 }
                 app.notes.remove(&name);
                 app.drafts.remove(&name);
-                app.session_persist.remove(&name);
+                // Leave the `session_persist` entry: the upcoming refresh sees
+                // the tmux session gone and moves it into recents (so a killed
+                // agent can be re-spawned), then drops it from persist.
                 app.dirty = true;
+            }
+            app.refresh();
+        }
+        Action::RestoreRecent { name } => {
+            if let Some(pos) = app.recents.iter().position(|r| r.name == name) {
+                let r = app.recents[pos].clone();
+                // Resume the agent if we have a `--resume` command, else a fresh
+                // session in the saved dir — same path as cold-start restore.
+                let command = match &r.resume_cmd {
+                    Some(cmd) => resolve_agent_command_for_tmux(cmd),
+                    None => resolve_agent_command_for_tmux(&r.agent),
+                };
+                if let Err(e) = tmux::new_session(&r.name, &r.dir, &command, &r.agent) {
+                    app.error = Some(format!("restore '{}': {e}", r.name));
+                } else {
+                    app.recents.remove(pos);
+                    app.session_persist.insert(
+                        r.name.clone(),
+                        am::state::PersistedSession {
+                            dir: r.dir.clone(),
+                            agent: r.agent.clone(),
+                            resume_cmd: r.resume_cmd.clone(),
+                        },
+                    );
+                    app.left_tab = am::app::LeftTab::Current; // show the live result
+                    app.dirty = true;
+                }
             }
             app.refresh();
         }
@@ -636,6 +723,7 @@ fn handle_action(
                         am::app::RestartReq {
                             started: now,
                             root: None,
+                            promote: None,
                         },
                     );
                 }
@@ -665,6 +753,7 @@ fn handle_action(
                         am::app::RestartReq {
                             started: now,
                             root: Some(root),
+                            promote: None,
                         },
                     );
                 }
@@ -726,6 +815,7 @@ fn handle_action(
                 return Ok(());
             };
             let worktree_dir = s.dir.clone();
+            let is_claude = s.agent.split_whitespace().next() == Some("claude");
             let repo_root = match s
                 .worktree_repo
                 .clone()
@@ -738,44 +828,49 @@ fn handle_action(
                     return Ok(());
                 }
             };
-            // Re-check dirtiness at dispatch time (not at modal-open time) so
-            // the decision reflects the actual worktree state when the user confirms.
-            let dirty = am::git::is_dirty(&worktree_dir);
-            if dirty {
-                if let Err(e) = am::git::stash_push(&worktree_dir) {
-                    app.error = Some(format!("git stash failed: {e}"));
-                    app.refresh();
-                    return Ok(());
-                }
-            }
-            if let Err(e) = am::git::remove_worktree(&repo_root, &worktree_dir) {
-                let msg = if dirty {
-                    format!("worktree removal failed (stash preserved as stash@{{0}}): {e}")
-                } else {
-                    format!("worktree removal failed — session left in worktree: {e}")
-                };
-                app.error = Some(msg);
-                app.refresh();
-                return Ok(());
-            }
-            fn sh_squote(s: &str) -> String {
-                format!("'{}'", s.replace('\'', "'\\''"))
-            }
-            let cmd = if dirty {
-                format!(
-                    "cd {} && git checkout {} && git stash pop",
-                    sh_squote(&repo_root),
-                    sh_squote(&branch)
-                )
-            } else {
-                format!(
-                    "cd {} && git checkout {}",
-                    sh_squote(&repo_root),
-                    sh_squote(&branch)
-                )
+            let promote = am::app::PromoteOp {
+                repo_root: repo_root.clone(),
+                worktree_dir: worktree_dir.clone(),
+                branch: branch.clone(),
             };
-            if let Err(e) = am::tmux::send_text(&name, &cmd) {
-                app.error = Some(format!("send_keys failed: {e}"));
+            if is_claude {
+                // The agent owns the pane, so the cd/checkout can't be typed —
+                // it would land in Claude's prompt. Exit Claude first (the
+                // proven return-to-root pipeline: remain-on-exit keeps the dead
+                // pane with the `--resume` hint, Ctrl+C exits it), defer the git
+                // work to the poll loop once the pane is dead, then respawn
+                // Claude resumed in the repo root.
+                let now = app.now_unix;
+                if let Err(e) = tmux::set_remain_on_exit(&name, true) {
+                    app.error = Some(format!("promote: {e}"));
+                } else if let Err(e) = tmux::send_ctrl_c(&name) {
+                    app.error = Some(format!("promote: {e}"));
+                    let _ = tmux::set_remain_on_exit(&name, false);
+                } else {
+                    app.restarting.insert(
+                        name,
+                        am::app::RestartReq {
+                            started: now,
+                            root: Some(repo_root),
+                            promote: Some(promote),
+                        },
+                    );
+                }
+            } else {
+                // Plain shell: do the git work directly, then send a `cd` so the
+                // shell leaves the now-removed worktree dir.
+                if let Err(e) = am::git::promote_worktree(
+                    &promote.repo_root,
+                    &promote.worktree_dir,
+                    &promote.branch,
+                ) {
+                    app.error = Some(format!("promote failed: {e}"));
+                } else {
+                    let cmd = format!("cd {}", tmux::shell_single_quote(&repo_root));
+                    if let Err(e) = tmux::send_text(&name, &cmd) {
+                        app.error = Some(format!("promote: cd failed: {e}"));
+                    }
+                }
             }
             app.refresh();
         }

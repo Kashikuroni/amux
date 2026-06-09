@@ -703,6 +703,8 @@ pub enum Mode {
     Git(GitForm),
     /// Read-only verification detail for a session (gate results + failures).
     VerifyDetail(String),
+    /// One-shot "What's New" changelog shown after an upgrade.
+    WhatsNew,
 }
 
 /// Which note `Mode::Note` is editing.
@@ -788,6 +790,10 @@ pub enum Action {
         name: String,
         remove_worktree: bool,
     },
+    /// Re-spawn a recently-stopped session from the Recent tab.
+    RestoreRecent {
+        name: String,
+    },
     Rename {
         old: String,
         new: String,
@@ -865,6 +871,7 @@ enum ModeKind {
     ConfirmUpdate,
     Git,
     VerifyDetail,
+    WhatsNew,
 }
 
 /// What the right pane renders: the live session preview, the selected session's
@@ -897,6 +904,19 @@ struct PreviewCache {
 pub struct RestartReq {
     pub started: i64,
     pub root: Option<String>,
+    /// When Some, the worktree-promote git work to run once the agent has
+    /// exited and before respawning it in `root` — so the `cd`/checkout never
+    /// gets typed into the (running) agent's prompt. See [`crate::git::promote_worktree`].
+    pub promote: Option<PromoteOp>,
+}
+
+/// Deferred worktree-promote operation carried by a [`RestartReq`]: stash +
+/// remove the worktree, check out `branch` in `repo_root`, pop the stash.
+#[derive(Debug, Clone)]
+pub struct PromoteOp {
+    pub repo_root: String,
+    pub worktree_dir: String,
+    pub branch: String,
 }
 
 pub struct App {
@@ -912,10 +932,6 @@ pub struct App {
     /// Per-dir (`cwd`) Unix time of the last git re-read request, so idle
     /// sessions aren't re-forked every tick (F3). Pruned to live sessions.
     git_last_enqueue: HashMap<String, i64>,
-    /// Last `#{session_activity}` seen per session (by name). Capture-gating
-    /// reads this to skip panes that produced no output since the last tick.
-    /// Pruned to live sessions each refresh, like `git_last_enqueue`.
-    pub last_activity: HashMap<String, i64>,
     /// Background git reader; `None` in tests (git is read synchronously then).
     pub git_worker: Option<crate::git::GitReader>,
     pub error: Option<String>,
@@ -1000,8 +1016,40 @@ pub struct App {
     /// Agent sessions to recreate after a computer reboot (cold start).
     /// Mirrors `State::sessions`; updated on create/kill/rename/resume.
     pub session_persist: std::collections::BTreeMap<String, crate::state::PersistedSession>,
+    /// Recently-stopped agent sessions (newest first, capped), shown in the
+    /// "Recent" tab and re-spawnable from there. Mirrors `State::recents`.
+    pub recents: Vec<crate::state::RecentSession>,
+    /// App version seen on the last run (persisted), for one-shot "What's New".
+    pub last_version: Option<String>,
+    /// Changelog sections to show in the What's New modal this session (empty
+    /// unless this run is a detected upgrade). Set once at startup.
+    pub whats_new: Vec<crate::changelog::Entry>,
+    /// Scroll offset (lines) for the What's New modal.
+    pub whats_new_scroll: u16,
+    /// Which left-pane tab is shown: live sessions or recently-stopped ones.
+    pub left_tab: LeftTab,
+    /// Which tab the Help (`?`) screen shows.
+    pub help_tab: HelpTab,
+    /// Scroll offset (lines) for the Help → Changelog tab.
+    pub help_scroll: u16,
     /// Which content the right pane shows.
     pub right_pane: RightPane,
+}
+
+/// Left-pane tab: the live session list, or the recently-stopped sessions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LeftTab {
+    #[default]
+    Current,
+    Recent,
+}
+
+/// Help-screen tab: the keybinding reference, or the changelog history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HelpTab {
+    #[default]
+    Keys,
+    Changelog,
 }
 
 impl App {
@@ -1015,7 +1063,6 @@ impl App {
             snapshots: HashMap::new(),
             git_cache: HashMap::new(),
             git_last_enqueue: HashMap::new(),
-            last_activity: HashMap::new(),
             git_worker: None,
             error: None,
             should_quit: false,
@@ -1055,6 +1102,13 @@ impl App {
             notes: std::collections::BTreeMap::new(),
             drafts: std::collections::BTreeMap::new(),
             session_persist: std::collections::BTreeMap::new(),
+            recents: Vec::new(),
+            last_version: None,
+            whats_new: Vec::new(),
+            whats_new_scroll: 0,
+            left_tab: LeftTab::Current,
+            help_tab: HelpTab::Keys,
+            help_scroll: 0,
             right_pane: RightPane::Preview,
         }
     }
@@ -1071,6 +1125,8 @@ impl App {
         self.notes = state.notes;
         self.drafts = state.drafts;
         self.session_persist = state.sessions;
+        self.recents = state.recents;
+        self.last_version = state.last_version;
     }
 
     /// Snapshots the persistable UI state for saving to disk.
@@ -1084,6 +1140,8 @@ impl App {
             notes: self.notes.clone(),
             drafts: self.drafts.clone(),
             sessions: self.session_persist.clone(),
+            recents: self.recents.clone(),
+            last_version: self.last_version.clone(),
         }
     }
 
@@ -1197,6 +1255,8 @@ impl App {
     }
 
     /// Indices into `self.sessions` that match the active filter (all if none).
+    /// Matches the session name OR its path (creation dir or live cwd), so a
+    /// query can name a directory contained in the path.
     pub fn visible_indices(&self) -> Vec<usize> {
         match &self.filter {
             None => (0..self.sessions.len()).collect(),
@@ -1205,7 +1265,11 @@ impl App {
                 self.sessions
                     .iter()
                     .enumerate()
-                    .filter(|(_, s)| s.name.to_lowercase().contains(&q))
+                    .filter(|(_, s)| {
+                        s.name.to_lowercase().contains(&q)
+                            || s.dir.to_lowercase().contains(&q)
+                            || s.cwd.to_lowercase().contains(&q)
+                    })
                     .map(|(i, _)| i)
                     .collect()
             }
@@ -1213,7 +1277,13 @@ impl App {
     }
 
     /// The session currently highlighted (mapping `selected` through the filter).
+    /// Always `None` on the Recent tab — there `selected` indexes the recents
+    /// list, so every session-operating key (attach, kill, reply, promote,
+    /// preview) is inert until the user switches back to Current.
     pub fn selected_session(&self) -> Option<&Session> {
+        if self.left_tab != LeftTab::Current {
+            return None;
+        }
         let vis = self.visible_indices();
         vis.get(self.selected).and_then(|&i| self.sessions.get(i))
     }
@@ -1222,8 +1292,53 @@ impl App {
         self.selected_session().map(|s| s.name.clone())
     }
 
+    /// Recently-stopped sessions matching the active name filter (newest first),
+    /// shown on the Recent tab. Mirrors `visible_indices` for the Current tab.
+    pub fn recents_filtered(&self) -> Vec<&crate::state::RecentSession> {
+        match &self.filter {
+            None => self.recents.iter().collect(),
+            Some(q) => {
+                let q = q.to_lowercase();
+                self.recents
+                    .iter()
+                    .filter(|r| {
+                        r.name.to_lowercase().contains(&q) || r.dir.to_lowercase().contains(&q)
+                    })
+                    .collect()
+            }
+        }
+    }
+
+    /// Number of selectable rows in the active left tab.
+    fn active_list_len(&self) -> usize {
+        match self.left_tab {
+            LeftTab::Current => self.visible_indices().len(),
+            LeftTab::Recent => self.recents_filtered().len(),
+        }
+    }
+
+    /// The highlighted recent entry on the Recent tab (None on the Current tab
+    /// or when the filtered list is empty).
+    pub fn selected_recent(&self) -> Option<&crate::state::RecentSession> {
+        if self.left_tab != LeftTab::Recent {
+            return None;
+        }
+        self.recents_filtered().get(self.selected).copied()
+    }
+
+    /// Switch between the Current and Recent tabs, resetting the cursor and any
+    /// active name filter so the new tab starts clean.
+    pub fn toggle_left_tab(&mut self) {
+        self.left_tab = match self.left_tab {
+            LeftTab::Current => LeftTab::Recent,
+            LeftTab::Recent => LeftTab::Current,
+        };
+        self.selected = 0;
+        self.filter = None;
+    }
+
     pub fn select_next(&mut self) {
-        let n = self.visible_indices().len();
+        let n = self.active_list_len();
         if n == 0 {
             return;
         }
@@ -1231,7 +1346,7 @@ impl App {
     }
 
     pub fn select_prev(&mut self) {
-        let n = self.visible_indices().len();
+        let n = self.active_list_len();
         if n == 0 {
             return;
         }
@@ -1243,7 +1358,7 @@ impl App {
     }
 
     fn clamp_selection(&mut self) {
-        let n = self.visible_indices().len();
+        let n = self.active_list_len();
         if n == 0 {
             self.selected = 0;
         } else if self.selected >= n {
@@ -1272,6 +1387,7 @@ impl App {
             Mode::ConfirmUpdate(_) => ModeKind::ConfirmUpdate,
             Mode::Git(_) => ModeKind::Git,
             Mode::VerifyDetail(_) => ModeKind::VerifyDetail,
+            Mode::WhatsNew => ModeKind::WhatsNew,
         }
     }
 
@@ -1279,10 +1395,35 @@ impl App {
         match self.mode_kind() {
             ModeKind::List => self.handle_list_key(key),
             ModeKind::Help => {
-                if latin_code(key.code) == KeyCode::Char('q') {
-                    self.should_quit = true;
+                let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+                match latin_code(key.code) {
+                    KeyCode::Char('q') => {
+                        self.should_quit = true;
+                        self.mode = Mode::List;
+                    }
+                    // Toggle Keys ↔ Changelog, resetting the changelog scroll.
+                    KeyCode::Tab => {
+                        self.help_tab = match self.help_tab {
+                            HelpTab::Keys => HelpTab::Changelog,
+                            HelpTab::Changelog => HelpTab::Keys,
+                        };
+                        self.help_scroll = 0;
+                    }
+                    KeyCode::Char('j') if ctrl => {
+                        self.help_scroll = self.help_scroll.saturating_add(3);
+                    }
+                    KeyCode::PageDown => {
+                        self.help_scroll = self.help_scroll.saturating_add(10);
+                    }
+                    KeyCode::Char('k') if ctrl => {
+                        self.help_scroll = self.help_scroll.saturating_sub(3);
+                    }
+                    KeyCode::PageUp => {
+                        self.help_scroll = self.help_scroll.saturating_sub(10);
+                    }
+                    // esc / ? / any other key closes.
+                    _ => self.mode = Mode::List,
                 }
-                self.mode = Mode::List;
                 None
             }
             ModeKind::ConfirmDelete => self.handle_confirm_key(key),
@@ -1324,6 +1465,26 @@ impl App {
             ModeKind::Git => self.handle_git_key(key),
             ModeKind::VerifyDetail => {
                 self.mode = Mode::List;
+                None
+            }
+            ModeKind::WhatsNew => {
+                let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+                match latin_code(key.code) {
+                    KeyCode::Char('j') if ctrl => {
+                        self.whats_new_scroll = self.whats_new_scroll.saturating_add(3);
+                    }
+                    KeyCode::PageDown => {
+                        self.whats_new_scroll = self.whats_new_scroll.saturating_add(10);
+                    }
+                    KeyCode::Char('k') if ctrl => {
+                        self.whats_new_scroll = self.whats_new_scroll.saturating_sub(3);
+                    }
+                    KeyCode::PageUp => {
+                        self.whats_new_scroll = self.whats_new_scroll.saturating_sub(10);
+                    }
+                    // Any other key dismisses the one-shot modal.
+                    _ => self.mode = Mode::List,
+                }
                 None
             }
         }
@@ -1544,16 +1705,29 @@ impl App {
                     return Some(Action::SendShiftTab { name });
                 }
             }
-            KeyCode::Char('?') => self.mode = Mode::Help,
+            KeyCode::Char('?') => {
+                self.help_scroll = 0;
+                self.mode = Mode::Help;
+            }
             KeyCode::Char('L') => {
                 self.usage_log_scroll = 0;
                 self.mode = Mode::UsageLog;
             }
             KeyCode::Enter | KeyCode::Char('o') => {
-                if let Some(name) = self.selected_name() {
+                if self.left_tab == LeftTab::Recent {
+                    if let Some(r) = self.selected_recent() {
+                        return Some(Action::RestoreRecent {
+                            name: r.name.clone(),
+                        });
+                    }
+                } else if let Some(name) = self.selected_name() {
                     return Some(Action::Attach(name));
                 }
             }
+            // Switch the left pane between the live (Current) and recently-
+            // stopped (Recent) session lists. Only in preview layout; with a
+            // note focused, Tab cycles note targets (handled below).
+            KeyCode::Tab if self.right_pane == RightPane::Preview => self.toggle_left_tab(),
             KeyCode::Char('/') => {
                 self.filter = Some(String::new());
                 self.selected = 0;
@@ -2500,8 +2674,9 @@ impl App {
                     self.last_clock_minute = minute;
                     changed = true;
                 }
-                // Prev status by name (last tick's view), snapshotted before the
-                // loop so we don't borrow `self.sessions` while mutating maps.
+                // Previous statuses by name, for carry-forward when a capture
+                // fails (a dying session / transient tmux error) — a momentary
+                // failure must not flip a working session to Idle.
                 let prev_status: HashMap<String, Status> = self
                     .sessions
                     .iter()
@@ -2511,27 +2686,26 @@ impl App {
                 let mut new_prompts = HashMap::new();
                 let mut new_preview = None;
                 for s in &mut sessions {
-                    let last_seen = self.last_activity.get(&s.name).copied();
-                    let gate = should_capture(s.activity, last_seen, prev_status.get(&s.name));
-                    // Only fork `capture-pane` when the pane may have changed.
-                    let captured = if gate {
-                        #[cfg(test)]
-                        self.capture_count.set(self.capture_count.get() + 1);
-                        crate::tmux::capture_pane(&s.name).ok()
-                    } else {
-                        None
-                    };
-                    match captured {
+                    // Every session is read every tick: status must reflect
+                    // whether the agent is working regardless of selection. Only
+                    // the selected session pays for the deeper scrollback below.
+                    #[cfg(test)]
+                    self.capture_count.set(self.capture_count.get() + 1);
+                    match crate::tmux::capture_pane(&s.name).ok() {
                         Some(content) => {
                             let h = content_hash(&content);
-                            s.status = compute_status(self.snapshots.get(&s.name).copied(), h);
-                            new_snaps.insert(s.name.clone(), h);
                             let opts = parse_prompt(&content);
-                            if !opts.is_empty() {
-                                s.status = Status::Waiting;
+                            let has_prompt = !opts.is_empty();
+                            s.status = derive_status(
+                                &content,
+                                self.snapshots.get(&s.name).copied(),
+                                h,
+                                has_prompt,
+                            );
+                            new_snaps.insert(s.name.clone(), h);
+                            if has_prompt {
                                 new_prompts.insert(s.name.clone(), opts);
                             }
-                            self.last_activity.insert(s.name.clone(), s.activity);
                             if selected_name.as_deref() == Some(s.name.as_str()) {
                                 new_preview = Some(
                                     crate::tmux::capture_scrollback(&s.name, 500)
@@ -2539,11 +2713,9 @@ impl App {
                                 );
                             }
                         }
-                        // Skipped (gated) OR capture failed: carry forward last
-                        // tick's snapshot + prompt so `new_snaps` stays complete
-                        // (an entry for every live session — else the next tick
-                        // falsely sees a change), and keep the selected session's
-                        // preview instead of blanking it.
+                        // Capture failed: carry forward last tick's snapshot,
+                        // prompt, status, and (when selected) preview so a
+                        // transient error doesn't blank or flip the session.
                         None => {
                             if let Some(h) = self.snapshots.get(&s.name).copied() {
                                 new_snaps.insert(s.name.clone(), h);
@@ -2551,7 +2723,9 @@ impl App {
                             if let Some(opts) = self.prompts.get(&s.name).cloned() {
                                 new_prompts.insert(s.name.clone(), opts);
                             }
-                            s.status = status_when_idle(new_prompts.contains_key(&s.name));
+                            if let Some(st) = prev_status.get(&s.name) {
+                                s.status = st.clone();
+                            }
                             if selected_name.as_deref() == Some(s.name.as_str()) {
                                 new_preview = Some(self.preview.clone());
                             }
@@ -2609,17 +2783,47 @@ impl App {
                     }
                 }
                 self.snapshots = new_snaps;
-                // Prune activity bookkeeping for sessions that are gone (same
-                // pattern as the git-cache prune above).
-                let live_names: std::collections::HashSet<&str> =
-                    sessions.iter().map(|s| s.name.as_str()).collect();
-                self.last_activity
-                    .retain(|k, _| live_names.contains(k.as_str()));
                 let prompts_changed = self.prompts != new_prompts;
                 self.prompts = new_prompts;
                 let new_sessions = apply_grouped_order(&self.project_order, &self.order, sessions);
                 let sessions_changed = self.sessions != new_sessions;
+                // Names live last tick, captured before the overwrite — drives
+                // stopped-session detection below.
+                let prev_names: Vec<String> =
+                    self.sessions.iter().map(|s| s.name.clone()).collect();
                 self.sessions = new_sessions;
+
+                // Recents: a session live last tick but gone now (and not
+                // mid-restart) has stopped — move its persisted data into the
+                // recents registry so it can be re-spawned from the "Recent" tab.
+                let live_names: std::collections::HashSet<String> =
+                    self.sessions.iter().map(|s| s.name.clone()).collect();
+                let restarting: std::collections::HashSet<String> =
+                    self.restarting.keys().cloned().collect();
+                for name in stopped_session_names(&prev_names, &live_names, &restarting) {
+                    if let Some(ps) = self.session_persist.remove(&name) {
+                        crate::state::push_recent(
+                            &mut self.recents,
+                            crate::state::RecentSession {
+                                name,
+                                dir: ps.dir,
+                                agent: ps.agent,
+                                resume_cmd: ps.resume_cmd,
+                            },
+                        );
+                        self.dirty = true;
+                    }
+                }
+                // Keep persisted dirs pointing where each agent actually is (so
+                // cold-start restore is accurate after a promote/return-to-root).
+                for s in &self.sessions {
+                    if let Some(ps) = self.session_persist.get_mut(&s.name) {
+                        if persisted_dir_stale(&ps.dir, &s.cwd) {
+                            ps.dir = s.cwd.clone();
+                            self.dirty = true;
+                        }
+                    }
+                }
                 // Drain verification events / age out verdicts; a verification
                 // change must also force a redraw (folded into `changed` below).
                 let verify_changed = self.poll_verifications();
@@ -2761,6 +2965,30 @@ pub fn content_hash(s: &str) -> u64 {
     h.finish()
 }
 
+/// Whether a persisted session's stored dir should be refreshed to the live
+/// pane cwd: only when the live cwd is known (non-empty) and actually differs.
+/// Keeps cold-start restore pointing where the agent currently is (e.g. after a
+/// worktree promote / return-to-root moves it to the repo root).
+pub fn persisted_dir_stale(persisted_dir: &str, live_cwd: &str) -> bool {
+    !live_cwd.is_empty() && live_cwd != persisted_dir
+}
+
+/// Names that were live last tick but are absent now and not mid-restart — i.e.
+/// sessions that stopped (killed, crashed, or exited). Used to move them into
+/// the recents registry. Excludes `restarting` so a session bouncing through
+/// the resume pipeline isn't mistaken for a stop.
+pub fn stopped_session_names(
+    prev_names: &[String],
+    live_names: &std::collections::HashSet<String>,
+    restarting: &std::collections::HashSet<String>,
+) -> Vec<String> {
+    prev_names
+        .iter()
+        .filter(|n| !live_names.contains(*n) && !restarting.contains(*n))
+        .cloned()
+        .collect()
+}
+
 /// First observation (no previous snapshot) is `Idle`; changed → `Running`.
 pub fn compute_status(prev: Option<u64>, current: u64) -> Status {
     match prev {
@@ -2769,30 +2997,39 @@ pub fn compute_status(prev: Option<u64>, current: u64) -> Status {
     }
 }
 
-/// Whether to re-`capture-pane` a session this tick. Gate: capture only when
-/// the pane may have changed — a new session, activity advanced since the last
-/// tick, or it was `Running` last tick. The last clause is conservative:
-/// `session_activity` has 1-second granularity, so a sub-second output burst
-/// can leave the timestamp unchanged — but such a pane is always `Running`, so
-/// it is always re-read. Idle/Waiting panes with unchanged activity are skipped.
-pub fn should_capture(activity: i64, last_seen: Option<i64>, prev_status: Option<&Status>) -> bool {
-    match last_seen {
-        None => true,                          // first observation
-        Some(prev) if activity > prev => true, // output since last tick
-        _ => prev_status == Some(&Status::Running),
-    }
+/// Substrings that mark an agent as actively working (and interruptible).
+/// Claude Code renders "esc to interrupt" in its status line while busy and
+/// drops it once it's idle awaiting input, so its presence is a positive
+/// "working" signal that doesn't depend on the screen changing between ticks.
+/// Add markers here as other agents' indicators become known.
+const WORKING_MARKERS: &[&str] = &["esc to interrupt"];
+
+/// Whether the captured pane shows an agent actively working, by scanning for a
+/// known [`WORKING_MARKERS`] substring. Agents without a known marker return
+/// `false` here and fall back to frame-diffing in [`derive_status`].
+pub fn is_working(content: &str) -> bool {
+    WORKING_MARKERS.iter().any(|m| content.contains(m))
 }
 
-/// Status for a session whose capture was skipped this tick (its screen is
-/// identical to the previous tick): `Waiting` if a prompt is still on screen,
-/// else `Idle`. Reproduces what re-capturing unchanged content would yield —
-/// `compute_status` returns `Idle` for an unchanged hash, and a present prompt
-/// overlays `Waiting`.
-pub fn status_when_idle(cached_prompt_present: bool) -> Status {
-    if cached_prompt_present {
+/// Derive a session's status from freshly-captured pane content. Precedence:
+/// 1. a pending numbered prompt → `Waiting` (blocked on the user);
+/// 2. a working-animation marker → `Running` (actively working — independent of
+///    whether the frame changed, so a thinking agent on a static screen still
+///    reads `Running`);
+/// 3. otherwise frame-diff via [`compute_status`] (changed → `Running`, else
+///    `Idle`) — the fallback for agents without a known marker.
+pub fn derive_status(
+    content: &str,
+    prev_hash: Option<u64>,
+    current_hash: u64,
+    has_prompt: bool,
+) -> Status {
+    if has_prompt {
         Status::Waiting
+    } else if is_working(content) {
+        Status::Running
     } else {
-        Status::Idle
+        compute_status(prev_hash, current_hash)
     }
 }
 
@@ -3738,35 +3975,124 @@ mod tests {
     }
 
     #[test]
-    fn should_capture_gates_on_activity_and_running() {
-        use crate::tmux::Status;
-        // New session (no last_seen): always capture (first observation).
-        assert!(should_capture(100, None, None));
-        // Activity advanced since last tick: capture.
-        assert!(should_capture(101, Some(100), Some(&Status::Idle)));
-        // Activity unchanged + was Idle: skip.
-        assert!(!should_capture(100, Some(100), Some(&Status::Idle)));
-        // Activity unchanged + was Running: conservative top-up — capture
-        // (1s granularity can miss a sub-second burst).
-        assert!(should_capture(100, Some(100), Some(&Status::Running)));
-        // Activity unchanged + was Waiting: a blocked agent is quiet — skip.
-        assert!(!should_capture(100, Some(100), Some(&Status::Waiting)));
-        // Clock rollback (activity < last_seen) + Idle: not "advanced" — skip.
-        assert!(!should_capture(99, Some(100), Some(&Status::Idle)));
+    fn persisted_dir_stale_only_when_live_cwd_differs_and_known() {
+        assert!(persisted_dir_stale("/a", "/b"), "differing cwd is stale");
+        assert!(!persisted_dir_stale("/a", "/a"), "same cwd not stale");
+        assert!(
+            !persisted_dir_stale("/a", ""),
+            "unknown (empty) cwd never overwrites"
+        );
     }
 
     #[test]
-    fn status_when_idle_maps_prompt_to_waiting() {
-        use crate::tmux::Status;
-        // Screen unchanged: a present prompt means the agent is still blocked.
-        assert_eq!(status_when_idle(true), Status::Waiting);
-        // No prompt on screen: idle.
-        assert_eq!(status_when_idle(false), Status::Idle);
+    fn tab_toggles_left_tab_and_resets_cursor() {
+        let mut app = App::new(crate::config::Config::default());
+        app.selected = 3;
+        assert_eq!(app.left_tab, LeftTab::Current);
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.left_tab, LeftTab::Recent);
+        assert_eq!(app.selected, 0, "cursor resets on tab switch");
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.left_tab, LeftTab::Current);
     }
 
     #[test]
-    fn refresh_skips_capture_for_quiet_sessions() {
-        use crate::tmux::{self, Status};
+    fn enter_on_recent_tab_restores_highlighted_entry() {
+        let mut app = App::new(crate::config::Config::default());
+        app.recents = vec![crate::state::RecentSession {
+            name: "old".into(),
+            dir: "/d".into(),
+            agent: "claude".into(),
+            resume_cmd: None,
+        }];
+        app.left_tab = LeftTab::Recent;
+        app.selected = 0;
+        let act = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(act, Some(Action::RestoreRecent { name }) if name == "old"));
+    }
+
+    #[test]
+    fn tab_toggles_help_tab_and_esc_closes() {
+        let mut app = App::new(crate::config::Config::default());
+        app.mode = Mode::Help;
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.help_tab, HelpTab::Changelog);
+        assert!(matches!(app.mode, Mode::Help), "Tab stays within help");
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.help_tab, HelpTab::Keys);
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(matches!(app.mode, Mode::List), "Esc closes help");
+    }
+
+    #[test]
+    fn selected_session_is_none_on_recent_tab() {
+        // Session-operating keys must be inert on the Recent tab.
+        let mut app = App::new(crate::config::Config::default());
+        app.left_tab = LeftTab::Recent;
+        assert!(app.selected_session().is_none());
+        assert!(app.selected_name().is_none());
+    }
+
+    #[test]
+    fn stopped_session_names_are_gone_and_not_restarting() {
+        use std::collections::HashSet;
+        let prev = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let live: HashSet<String> = ["a".to_string(), "c".to_string()].into_iter().collect();
+        let restarting: HashSet<String> = HashSet::new();
+        assert_eq!(stopped_session_names(&prev, &live, &restarting), vec!["b"]);
+
+        // A session mid-restart is not "stopped" even though it's momentarily
+        // absent from the live list.
+        let live2: HashSet<String> = ["a".to_string()].into_iter().collect();
+        let restarting2: HashSet<String> = ["b".to_string()].into_iter().collect();
+        assert!(stopped_session_names(&prev, &live2, &restarting2).contains(&"c".to_string()));
+        assert!(!stopped_session_names(&prev, &live2, &restarting2).contains(&"b".to_string()));
+    }
+
+    #[test]
+    fn is_working_detects_claude_interrupt_marker() {
+        // Claude Code renders "esc to interrupt" while busy/interruptible.
+        assert!(is_working(
+            "✻ Cogitating… (12s · ↑ 1.2k tokens · esc to interrupt)"
+        ));
+        // Idle prompt box: no working marker.
+        assert!(!is_working(
+            "│ > Try \"fix the build\"        │\n? for shortcuts"
+        ));
+        assert!(!is_working(""));
+    }
+
+    #[test]
+    fn derive_status_prioritizes_prompt_then_marker_then_diff() {
+        use crate::tmux::Status;
+        let busy = "✻ Working… (esc to interrupt)";
+        let quiet = "$ ";
+        // A pending prompt means blocked on the user — Waiting wins even if a
+        // working marker is somehow also present and the frame is unchanged.
+        assert_eq!(
+            derive_status(busy, Some(1), 1, true),
+            Status::Waiting,
+            "prompt overrides everything"
+        );
+        // Working marker present + frame UNCHANGED → Running. This is the fix:
+        // a thinking agent with a static screen is still working.
+        assert_eq!(
+            derive_status(busy, Some(1), 1, false),
+            Status::Running,
+            "marker means Running regardless of frame diff"
+        );
+        // No marker, frame changed → Running (fallback for agents without a
+        // known marker).
+        assert_eq!(derive_status(quiet, Some(1), 2, false), Status::Running);
+        // No marker, frame unchanged → Idle.
+        assert_eq!(derive_status(quiet, Some(1), 1, false), Status::Idle);
+        // No marker, first observation (no prev hash) → Idle.
+        assert_eq!(derive_status(quiet, None, 1, false), Status::Idle);
+    }
+
+    #[test]
+    fn refresh_captures_every_session_every_tick() {
+        use crate::tmux::{self};
         if !tmux::is_available() {
             eprintln!("skipping: tmux not available");
             return;
@@ -3786,15 +4112,14 @@ mod tests {
             }
         }
         let _g = Guard(vec![n1.clone(), n2.clone()]);
-        // Silent agents: `sleep` emits nothing, so activity never advances.
+        // Silent agents: `sleep` emits nothing, so the pane never changes.
         tmux::new_session(&n1, dir, "sleep 60", "bash").expect("n1");
         tmux::new_session(&n2, dir, "sleep 60", "bash").expect("n2");
-        // Let the initial pane draw settle so its activity is recorded by refresh 1.
         std::thread::sleep(std::time::Duration::from_millis(400));
 
         let mut app = App::new(crate::config::Config::default());
 
-        // Refresh 1: both new → both captured.
+        // Refresh 1: both captured.
         app.refresh();
         assert_eq!(
             app.capture_count.get(),
@@ -3804,20 +4129,17 @@ mod tests {
         assert_eq!(app.sessions.len(), 2, "both managed sessions listed");
         assert_eq!(app.snapshots.len(), 2, "snapshot recorded for each");
 
-        // Refresh 2: both quiet (no output) and Idle → both skipped.
+        // Refresh 2: both quiet AND non-changing, yet both must be captured
+        // again — status is the core function, so every session is read every
+        // tick regardless of activity or selection. (No capture-gating.)
         let before = app.capture_count.get();
         app.refresh();
         assert_eq!(
             app.capture_count.get(),
-            before,
-            "quiet idle sessions must not be re-captured"
+            before + 2,
+            "every session is re-captured each tick"
         );
-        // Completeness invariant: skipped sessions stay in snapshots and stay Idle
-        // (must not flip to Running for lack of a fresh snapshot).
-        assert_eq!(app.snapshots.len(), 2, "skipped sessions kept in snapshots");
-        for s in &app.sessions {
-            assert_eq!(s.status, Status::Idle, "quiet session stays Idle");
-        }
+        assert_eq!(app.snapshots.len(), 2, "snapshots stay complete");
     }
 
     #[test]
@@ -4563,6 +4885,48 @@ mod tests {
         let vis = app.visible_indices();
         assert_eq!(vis, vec![1]);
         assert_eq!(app.selected_name().as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn filter_matches_by_path_not_just_name() {
+        let mut app = App::new(crate::config::Config::default());
+        app.sessions = vec![
+            at("alpha", "/home/u/backend"),
+            at("beta", "/home/u/frontend"),
+        ];
+        // Query matches a directory in the path, not the session name.
+        app.filter = Some("backend".into());
+        assert_eq!(
+            app.visible_indices(),
+            vec![0],
+            "session whose path contains the query is shown"
+        );
+    }
+
+    #[test]
+    fn recents_filter_matches_by_path() {
+        let mut app = App::new(crate::config::Config::default());
+        app.recents = vec![
+            crate::state::RecentSession {
+                name: "alpha".into(),
+                dir: "/home/u/backend".into(),
+                agent: "claude".into(),
+                resume_cmd: None,
+            },
+            crate::state::RecentSession {
+                name: "beta".into(),
+                dir: "/home/u/frontend".into(),
+                agent: "claude".into(),
+                resume_cmd: None,
+            },
+        ];
+        app.filter = Some("frontend".into());
+        let f = app.recents_filtered();
+        assert_eq!(f.len(), 1);
+        assert_eq!(
+            f[0].name, "beta",
+            "recent whose dir contains the query is shown"
+        );
     }
 
     #[test]
@@ -5939,6 +6303,7 @@ mod tests {
         let with_root = RestartReq {
             started: 0,
             root: Some("/repo".into()),
+            promote: None,
         };
         assert_eq!(respawn_dir(&with_root, &sessions, "a"), "/repo");
 
@@ -5946,6 +6311,7 @@ mod tests {
         let no_root = RestartReq {
             started: 0,
             root: None,
+            promote: None,
         };
         assert_eq!(respawn_dir(&no_root, &sessions, "a"), "/a");
 

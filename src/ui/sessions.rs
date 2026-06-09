@@ -368,26 +368,52 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         let dim = Style::default()
             .fg(Color::Reset)
             .add_modifier(Modifier::DIM);
-        vec![
-            Span::styled("SESSIONS", Style::default().fg(Color::Reset)),
-            Span::styled("  j k or ↑↓ navigate · s select", dim),
+        let active = Style::default()
+            .fg(Color::Reset)
+            .add_modifier(Modifier::BOLD);
+        let cur = if app.left_tab == crate::app::LeftTab::Current {
+            active
+        } else {
+            dim
+        };
+        let rec = if app.left_tab == crate::app::LeftTab::Recent {
+            active
+        } else {
+            dim
+        };
+        // Obsidian-style sidebar tabs: Current (live) | Recent (stopped).
+        let mut spans = vec![
+            Span::styled("CURRENT", cur),
+            Span::styled("  ", dim),
+            Span::styled(format!("RECENT ({})", app.recents.len()), rec),
+            Span::styled("  tab", dim),
+        ];
+        if app.left_tab == crate::app::LeftTab::Recent {
+            spans.push(Span::styled("   ↵ restore · / search", dim));
+        } else {
             // Legend for the branch-glyph markers, tinted to match the cards.
-            Span::styled("    ", dim),
-            Span::styled(
+            spans.push(Span::styled("   ", dim));
+            spans.push(Span::styled(
                 th::BRANCH,
                 Style::default().fg(BRANCH_FG).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" repo · ", dim),
-            Span::styled(
+            ));
+            spans.push(Span::styled(" repo · ", dim));
+            spans.push(Span::styled(
                 th::WORKTREE,
                 Style::default()
                     .fg(WORKTREE_FG)
                     .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" worktree", dim),
-        ]
+            ));
+            spans.push(Span::styled(" worktree", dim));
+        }
+        spans
     };
     f.render_widget(Paragraph::new(Line::from(label)), rows[0]);
+
+    if app.left_tab == crate::app::LeftTab::Recent {
+        render_recents(f, rows[1], app);
+        return;
+    }
 
     let vis = app.visible_indices();
     let sel = if vis.is_empty() {
@@ -498,6 +524,54 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     if selected_has_prompt {
         paint_prompt_frame(f.buffer_mut(), list_area);
     }
+}
+
+/// Renders the Recent tab: recently-stopped sessions (newest first), filtered by
+/// the active search, each row showing name, agent and dir. Enter on the
+/// highlighted row re-spawns it (handled in the key layer).
+fn render_recents(f: &mut Frame, area: Rect, app: &App) {
+    let recents = app.recents_filtered();
+    let dim = Style::default()
+        .fg(Color::Reset)
+        .add_modifier(Modifier::DIM);
+    if recents.is_empty() {
+        let msg = if app.recents.is_empty() {
+            "  no recently-stopped sessions"
+        } else {
+            "  no matches"
+        };
+        f.render_widget(Paragraph::new(Line::from(Span::styled(msg, dim))), area);
+        return;
+    }
+    const RIGHT_PAD: u16 = 2;
+    let list_area = Rect {
+        width: area.width.saturating_sub(RIGHT_PAD),
+        ..area
+    };
+    let sel = app.selected.min(recents.len() - 1);
+    let items: Vec<ListItem> = recents
+        .iter()
+        .map(|r| {
+            let agent = r.agent.split_whitespace().next().unwrap_or("");
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    format!("  {}", r.name),
+                    Style::default()
+                        .fg(Color::Reset)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("  {agent}"),
+                    Style::default().fg(agent_accent(&r.agent)),
+                ),
+                Span::styled(format!("  {}", collapse_home(&r.dir)), dim),
+            ]))
+        })
+        .collect();
+    let list = List::new(items).highlight_style(Style::default().bg(th::SEL_BG));
+    let mut state = ListState::default();
+    state.select(Some(sel));
+    f.render_stateful_widget(list, list_area, &mut state);
 }
 
 #[cfg(test)]
@@ -827,6 +901,23 @@ mod tests {
     }
 
     #[test]
+    fn recent_tab_lists_recent_sessions() {
+        let mut app = App::new(Config::default());
+        app.recents = vec![crate::state::RecentSession {
+            name: "ghost".into(),
+            dir: "/tmp/x".into(),
+            agent: "claude".into(),
+            resume_cmd: None,
+        }];
+        app.left_tab = crate::app::LeftTab::Recent;
+        let mut t = Terminal::new(TestBackend::new(60, 8)).unwrap();
+        t.draw(|f| render(f, f.area(), &app)).unwrap();
+        let s = buf_to_string(t.backend().buffer());
+        assert!(s.contains("RECENT"), "tab header missing:\n{s}");
+        assert!(s.contains("ghost"), "recent entry not listed:\n{s}");
+    }
+
+    #[test]
     fn header_shows_branch_glyph_legend() {
         let mut app = App::new(Config::default());
         app.sessions = vec![sess("proj", Status::Idle, None)];
@@ -983,6 +1074,7 @@ mod tests {
             crate::app::RestartReq {
                 started: 0,
                 root: None,
+                promote: None,
             },
         );
         let mut t = Terminal::new(TestBackend::new(60, 8)).unwrap();

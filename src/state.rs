@@ -20,6 +20,31 @@ pub struct PersistedSession {
     pub resume_cmd: Option<String>,
 }
 
+/// A recently-stopped agent session, kept so the user can re-spawn it from the
+/// "Recent" tab. Same recreate-able payload as [`PersistedSession`] plus the
+/// session name (recents is an ordered list, not a name-keyed map).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RecentSession {
+    pub name: String,
+    pub dir: String,
+    pub agent: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_cmd: Option<String>,
+}
+
+/// Maximum number of recently-stopped sessions retained (newest first). Pushing
+/// past this evicts the oldest.
+pub const MAX_RECENTS: usize = 20;
+
+/// Record a stopped session at the front of `recents`: any existing entry with
+/// the same name is removed first (so a re-stopped session moves to the front
+/// without duplicating), then the list is truncated to [`MAX_RECENTS`].
+pub fn push_recent(recents: &mut Vec<RecentSession>, entry: RecentSession) {
+    recents.retain(|e| e.name != entry.name);
+    recents.insert(0, entry);
+    recents.truncate(MAX_RECENTS);
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct State {
@@ -48,6 +73,13 @@ pub struct State {
     /// Agent sessions to restore on cold start (e.g. after a computer reboot),
     /// keyed by tmux session name. Shell/terminal sessions are excluded.
     pub sessions: BTreeMap<String, PersistedSession>,
+    /// Recently-stopped agent sessions (newest first, capped at [`MAX_RECENTS`])
+    /// the user can re-spawn from the "Recent" tab. Maintained via [`push_recent`].
+    pub recents: Vec<RecentSession>,
+    /// App version seen on the last run, so an upgrade can show "What's New"
+    /// exactly once. `None` on a first-ever launch (no modal then).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_version: Option<String>,
 }
 
 fn state_path() -> Option<PathBuf> {
@@ -114,6 +146,8 @@ mod tests {
             notes: BTreeMap::new(),
             drafts: BTreeMap::new(),
             sessions: BTreeMap::new(),
+            recents: Vec::new(),
+            last_version: Some("0.5.0".into()),
         };
         let toml = toml::to_string(&s).unwrap();
         let back: State = toml::from_str(&toml).unwrap();
@@ -240,5 +274,51 @@ mod tests {
     fn old_state_without_sessions_key_still_loads() {
         let s: State = toml::from_str("split_pct = 40").unwrap();
         assert!(s.sessions.is_empty());
+    }
+
+    fn rec(name: &str) -> RecentSession {
+        RecentSession {
+            name: name.to_string(),
+            dir: format!("/d/{name}"),
+            agent: "claude".to_string(),
+            resume_cmd: None,
+        }
+    }
+
+    #[test]
+    fn push_recent_dedups_by_name_newest_first_capped() {
+        let mut r: Vec<RecentSession> = Vec::new();
+        for i in 0..25 {
+            push_recent(&mut r, rec(&format!("s{i}")));
+        }
+        assert_eq!(r.len(), MAX_RECENTS, "capped at the limit");
+        assert_eq!(r[0].name, "s24", "newest is first");
+        assert_eq!(
+            r.last().unwrap().name,
+            "s5",
+            "oldest beyond the cap evicted"
+        );
+
+        // Re-pushing an existing name moves it to front without duplicating,
+        // and doesn't grow the list.
+        push_recent(&mut r, rec("s10"));
+        assert_eq!(r[0].name, "s10", "re-pushed entry jumps to front");
+        assert_eq!(
+            r.iter().filter(|e| e.name == "s10").count(),
+            1,
+            "no duplicate entry"
+        );
+        assert_eq!(r.len(), MAX_RECENTS, "still capped");
+    }
+
+    #[test]
+    fn recents_roundtrip_through_toml() {
+        let s = State {
+            recents: vec![rec("a"), rec("b")],
+            ..Default::default()
+        };
+        let back: State = toml::from_str(&toml::to_string(&s).unwrap()).unwrap();
+        assert_eq!(back.recents.len(), 2);
+        assert_eq!(back.recents[0].name, "a");
     }
 }
