@@ -1,6 +1,6 @@
 [package]
 name = "amux"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2021"
 description = "A terminal cockpit for AI coding agents: manage parallel tmux sessions running Claude Code, Codex, Gemini, Aider and more — with live previews, git worktrees, and per-session markdown notes."
 license = "MIT OR Apache-2.0"
@@ -36,6 +36,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
 ansi-to-tui = "7"
+# Markdown parser only (no CLI/getopts/simd extras) — feeds the changelog
+# renderer in ui::markdown.
+pulldown-cmark = { version = "0.12", default-features = false }
 amux-verify = { path = "crates/amux-verify" }
 
 [workspace]

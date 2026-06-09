@@ -6,6 +6,38 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-06-09
+
+### Added
+- **What's New**: after an upgrade, a one-shot modal shows the changelog entries
+  for every version since the one last run (skipped on a first install). Backed
+  by the project `CHANGELOG.md` embedded in the binary.
+- Help (`?`) is now tabbed — **Keys** and **Changelog** (`tab` to switch) — with
+  the changelog rendered as Markdown (headings, `code`, **bold**, lists) and
+  scrollable.
+- **Recent** sessions: a second sidebar tab next to Current. A stopped/killed
+  agent session is kept (last 20, persisted) and can be re-spawned with `enter`.
+- Filtering (`/`) now matches a session's **path** (dir or live cwd), not just
+  its name — both for live sessions and the Recent tab.
+
+### Fixed
+- Preview no longer freezes and the status no longer sticks at `idle` while an
+  agent is working: status now reads a working-animation marker
+  (`esc to interrupt`) with a frame-diff fallback, and every session is captured
+  each tick (reverting the over-aggressive capture-gating from 0.5.0).
+- Worktree promote (`ctrl+g`) no longer types `cd … && git checkout …` into a
+  running agent's prompt: the agent is stopped, the git work runs, then it is
+  respawned in the repo root. If removal fails, the agent is restored in place.
+- Persisted session directories are kept in sync with each agent's live cwd, so
+  cold-start restore points where the session actually is after a promote /
+  return-to-root.
+- What's New / Help scroll now reaches the bottom in the narrow modal (the cap
+  used the wrapped row count instead of the logical line count).
+
+### Changed
+- Backfilled the changelog with the previously undocumented `0.2.0`–`0.4.1`
+  releases.
+
 ## [0.5.0] - 2026-06-09
 
 ### Added
@@ -47,6 +79,60 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Removed
 - The global Inbox note; an existing `inbox` value in `state.toml` is ignored.
+
+## [0.4.1] - 2026-06-05
+
+### Fixed
+- Maintenance release: packaging/CI fixes for the macOS release assets. No
+  functional changes to the app.
+
+## [0.4.0] - 2026-06-05
+
+### Added
+- Git operations panel: `Ctrl+g` on a worktree session **promotes** its branch
+  into the repo root (stash → remove worktree → checkout → pop), and `Ctrl+l`
+  opens branch **delete**/batch **cleanup** of merged branches.
+- The create form gained a **worktree** checkbox that gates the branch/base
+  pickers, so a new session can fork a branch + worktree in one flow.
+
+### Fixed
+- Escape single quotes when building the promote shell command (shell-injection
+  hardening), and quote `repo_root`/branch consistently.
+- `Ctrl+g` on a protected or non-git session now shows a clear error instead of
+  doing nothing; re-check `is_dirty` at dispatch time so the stash decision
+  matches the actual worktree state.
+
+## [0.3.0] - 2026-06-04
+
+### Added
+- **Self-update**: a background check against GitHub Releases, download + verify
+  (sha256), atomic binary swap, and `exec` restart — surfaced as an
+  offer/progress modal, an update badge, and footer hints, triggered when idle.
+- Mouse wheel scrolls the preview pane; mouse mode stays on during attach.
+
+### Changed
+- The preview subtitle shows the **project name** instead of the full path, with
+  the age/project/branch row dimmed for hierarchy.
+
+## [0.2.0] - 2026-06-04
+
+### Added
+- **Usage-log** modal (`Shift+L`): a full-screen log of recent OAuth
+  (usage/profile) calls, scrollable, with copy.
+- Create-form **branch picker** replacing the worktree toggle, with
+  `hjkl`/arrow navigation, a Claude **model list + effort slider**, base-branch
+  search, and `--model`/`--effort` passed through to the spawned command.
+- Per-project **notes** on `T`.
+- The `i` composer keeps a per-session **reply draft** whose lifetime is tied to
+  its session (dropped on kill/rename/prune), with `Ctrl-y` copy and `Ctrl-x`
+  clear.
+
+### Fixed
+- Usage poller backs off on the last fetch result (not cumulatively) with a
+  clearer `401` message; persistent `429`/`401` errors resolved.
+- `opencode` agent not found.
+- Flush tick-dirtied state on exit so a quit right after a background tick
+  doesn't lose changes.
 
 ## [0.1.0] - 2026-06-03
 
