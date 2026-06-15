@@ -1,0 +1,18 @@
+[package]
+name = "amux-desktop"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+description = "Desktop GUI for amux (egui)"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/kashikuroni/amux"
+publish = false
+
+[[bin]]
+name = "amux-desktop"
+path = "src/main.rs"
+
+[dependencies]
+amux-core = { path = "../amux-core" }
+eframe = "0.34"
+egui = "0.34"

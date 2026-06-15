@@ -37,4 +37,4 @@ amux-core = { path = "crates/amux-core" }
 amux-tui = { path = "crates/amux-tui" }
 
 [workspace]
-members = ["crates/amux-verify", "crates/amux-core", "crates/amux-tui"]
+members = ["crates/amux-verify", "crates/amux-core", "crates/amux-tui", "crates/amux-desktop"]
