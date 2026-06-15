@@ -3,7 +3,11 @@ name = "amux-core"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.82"
+description = "Core domain types and business logic for amux"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/kashikuroni/amux"
+# Distribution story is amux's GitHub releases; revisit if ever published.
+publish = false
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
