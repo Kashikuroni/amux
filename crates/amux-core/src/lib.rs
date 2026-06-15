@@ -11,4 +11,5 @@ pub mod state;
 pub mod timeutil;
 pub mod tmux;
 pub mod update;
+pub mod usage;
 pub mod verify;
