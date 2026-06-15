@@ -23,6 +23,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "amux-core"
+version = "0.1.0"
+dependencies = [
+ "amux-verify",
+ "serde",
+ "serde_json",
+ "toml",
+]
+
+[[package]]
 name = "amux-verify"
 version = "0.1.0"
 dependencies = [

@@ -42,4 +42,4 @@ pulldown-cmark = { version = "0.12", default-features = false }
 amux-verify = { path = "crates/amux-verify" }
 
 [workspace]
-members = ["crates/amux-verify"]
+members = ["crates/amux-verify", "crates/amux-core"]
