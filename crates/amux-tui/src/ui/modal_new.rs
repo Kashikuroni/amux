@@ -1,0 +1,835 @@
+use crate::app::{
+    abbreviate_path, compose_agent_command, expand_tilde, resolve_agent_path, CreateField,
+    CreateForm, CLAUDE_MODELS, CUSTOM_AGENT_SLOT,
+};
+use crate::theme as th;
+use ratatui::layout::{Alignment, Rect};
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Clear, Paragraph};
+use ratatui::Frame;
+use std::path::Path;
+
+/// A 1-row rect at (x, y) of width w, clamped so nothing draws past `bottom`.
+/// Returns None when there's no room left, so callers can stop early.
+fn row(x: u16, y: u16, w: u16, bottom: u16) -> Option<Rect> {
+    if y >= bottom {
+        return None;
+    }
+    Some(Rect {
+        x,
+        y,
+        width: w,
+        height: 1,
+    })
+}
+
+/// Width of the left label column (longest label, "directory" = 9, plus gutter).
+const LABEL_W: usize = 11;
+/// Columns a sub-line indents to align under the value column (label + "▍ ").
+const VALUE_INDENT: u16 = LABEL_W as u16 + 2;
+
+/// Quiet, lowercase left label, padded to the column width.
+fn lbl(text: &str) -> Span<'static> {
+    Span::styled(
+        format!("{text:<LABEL_W$}"),
+        Style::default().add_modifier(Modifier::DIM),
+    )
+}
+
+/// Paints the focused row with a faint full-width band (the same cue the session
+/// list uses for selection); leaves unfocused rows on the terminal background.
+fn band(p: Paragraph<'_>, focused: bool) -> Paragraph<'_> {
+    if focused {
+        p.style(Style::default().bg(th::SEL_BG))
+    } else {
+        p
+    }
+}
+
+/// Inline text-input row: `label  ▍ value`. Focused rows get the band, a bold
+/// bar, and a bold value; empty fields show a dim placeholder.
+fn input_row(
+    f: &mut Frame,
+    rect: Rect,
+    label: &str,
+    value: &str,
+    placeholder: &str,
+    focused: bool,
+) {
+    let bar = if focused {
+        Style::default().add_modifier(Modifier::BOLD)
+    } else {
+        th::chrome(th::BORDER_HI)
+    };
+    let val = if value.is_empty() {
+        Span::styled(
+            placeholder.to_string(),
+            Style::default().add_modifier(Modifier::DIM),
+        )
+    } else {
+        let st = if focused {
+            Style::default().add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        Span::styled(value.to_string(), st)
+    };
+    let line = Line::from(vec![
+        lbl(label),
+        Span::styled(format!("{} ", th::SEL_BAR), bar),
+        val,
+    ]);
+    f.render_widget(band(Paragraph::new(line), focused), rect);
+}
+
+/// Inline picker row: `label  ‹selected›  other  other`. The selected choice is
+/// bold and bracketed; the rest are dim. Focused rows get the band.
+fn segment_row(
+    f: &mut Frame,
+    rect: Rect,
+    label: &str,
+    choices: &[String],
+    selected: usize,
+    focused: bool,
+    empty_hint: &str,
+) {
+    let mut spans = vec![lbl(label)];
+    if choices.is_empty() {
+        spans.push(Span::styled(
+            empty_hint.to_string(),
+            Style::default().add_modifier(Modifier::DIM),
+        ));
+    } else {
+        // Uniform ` choice ` cells (even gaps); the selected one is bold, the
+        // rest dim — weight alone marks the choice in the colorless theme.
+        for (i, c) in choices.iter().enumerate() {
+            let st = if i == selected {
+                Style::default().add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().add_modifier(Modifier::DIM)
+            };
+            spans.push(Span::styled(format!(" {c} "), st));
+        }
+    }
+    f.render_widget(band(Paragraph::new(Line::from(spans)), focused), rect);
+}
+
+/// Max subdir rows shown in the live picker before it windows.
+const PICKER_MAX: usize = 8;
+/// Fixed content rows (header, rule, name, dir + validation, terminal,
+/// agent, rule, command, and the blanks between groups) when no branch step shows.
+const BASE_ROWS: u16 = 13;
+
+/// Worktree-glyph tint — matches `ui::sessions::WORKTREE_FG`.
+const WORKTREE_FG: ratatui::style::Color = ratatui::style::Color::Indexed(173);
+
+pub fn render(f: &mut Frame, form: &CreateForm, error: Option<&str>) {
+    let full = f.area();
+    let picker_active = form.field == CreateField::Dir && !form.dir_entries.is_empty();
+    let want_picker = if picker_active {
+        form.dir_entries.len().min(PICKER_MAX) as u16
+    } else {
+        0
+    };
+    // The agent-not-found warning takes one extra row only when it's shown.
+    let agent_warn =
+        !form.terminal && !form.agent.is_empty() && resolve_agent_path(&form.agent).is_none();
+    let warn_extra = u16::from(agent_warn);
+    // Panel hugs its content: border (2) + top/bottom inner padding (2) + rows.
+    // Branch block: input row + (focused) windowed entries + conditional base row.
+    let branch_focused = form.field == CreateField::Branch;
+    let branch_extra: u16 = if form.branches.is_empty() {
+        0
+    } else {
+        // +1 for the worktree checkbox row (always visible in git repos).
+        let worktree_row = 1u16;
+        if !form.worktree {
+            worktree_row
+        } else {
+            let picker = if branch_focused {
+                form.branch_entries.len().min(PICKER_MAX) as u16
+            } else {
+                0
+            };
+            worktree_row + 1 + picker + u16::from(form.branch_is_new())
+        }
+    };
+    // One extra row for the validation error banner when present.
+    let err_extra = u16::from(error.is_some());
+    // The claude model list adds one row per model; the base-branch search adds
+    // its match list (or a "no match" row) only while the Base step is focused.
+    let model_rows = if form.model_list_visible() {
+        CLAUDE_MODELS.len() as u16
+    } else {
+        0
+    };
+    let base_picker = if form.field == CreateField::Base {
+        form.base_matches().len().clamp(1, PICKER_MAX) as u16
+    } else {
+        0
+    };
+    let h = (BASE_ROWS
+        + want_picker
+        + branch_extra
+        + warn_extra
+        + err_extra
+        + model_rows
+        + base_picker
+        + 4)
+    .min(full.height);
+    let w = ((full.width as u32 * 70 / 100) as u16).min(full.width);
+    let area = Rect {
+        x: full.x + (full.width.saturating_sub(w)) / 2,
+        y: full.y + (full.height.saturating_sub(h)) / 2,
+        width: w,
+        height: h,
+    };
+    f.render_widget(Clear, area);
+
+    f.render_widget(
+        th::panel()
+            .border_style(th::chrome(th::BORDER_HI))
+            .style(Style::default().bg(th::BG_RAISED)),
+        area,
+    );
+
+    let pad: u16 = 2;
+    let x = area.x + 1 + pad;
+    let w = area.width.saturating_sub(2 + pad * 2);
+    let bottom = area.y + area.height.saturating_sub(1);
+    let mut y = area.y + 2;
+
+    // Header: title (left) + step indicator (right).
+    if let Some(r) = row(x, y, w, bottom) {
+        let title = Line::from(Span::styled(
+            "New session",
+            Style::default().add_modifier(Modifier::BOLD),
+        ));
+        let step = Line::from(Span::styled(
+            format!("{} of {}", form.step(), form.total_steps()),
+            Style::default().add_modifier(Modifier::DIM),
+        ));
+        f.render_widget(Paragraph::new(step).alignment(Alignment::Right), r);
+        f.render_widget(Paragraph::new(title), r);
+    }
+    y += 1;
+    if let Some(r) = row(x, y, w, bottom) {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "─".repeat(w as usize),
+                th::chrome(th::BORDER),
+            ))),
+            r,
+        );
+    }
+    y += 2;
+
+    // Validation error banner — explains why Enter wouldn't advance (e.g. an
+    // empty name or a '.' in it), so a rejected submit isn't a silent no-op.
+    if let Some(msg) = error {
+        if let Some(r) = row(x, y, w, bottom) {
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    format!("! {msg}"),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ))),
+                r,
+            );
+        }
+        y += 1;
+    }
+
+    // name.
+    if let Some(r) = row(x, y, w, bottom) {
+        input_row(
+            f,
+            r,
+            "name",
+            &form.name,
+            "session name",
+            form.field == CreateField::Name,
+        );
+    }
+    y += 1;
+
+    // directory + a quiet validation sub-line (exists / not found · branch).
+    if let Some(r) = row(x, y, w, bottom) {
+        input_row(
+            f,
+            r,
+            "directory",
+            &form.dir,
+            "~/",
+            form.field == CreateField::Dir,
+        );
+    }
+    y += 1;
+    if let Some(r) = row(x + VALUE_INDENT, y, w.saturating_sub(VALUE_INDENT), bottom) {
+        let expanded = expand_tilde(&form.dir);
+        let spans = if Path::new(&expanded).is_dir() {
+            let mut v = vec![Span::styled(
+                "exists",
+                Style::default().add_modifier(Modifier::DIM),
+            )];
+            if let Some(g) = crate::git::read(&expanded) {
+                v.push(Span::styled(
+                    "  ·  ",
+                    Style::default().add_modifier(Modifier::DIM),
+                ));
+                v.push(Span::styled(
+                    format!("{} {}", th::BRANCH, g.branch),
+                    Style::default().add_modifier(Modifier::DIM),
+                ));
+            }
+            v
+        } else {
+            vec![Span::styled(
+                "not found",
+                Style::default().add_modifier(Modifier::DIM | Modifier::BOLD),
+            )]
+        };
+        f.render_widget(Paragraph::new(Line::from(spans)), r);
+    }
+    y += 1;
+
+    // Live subdir picker (while editing the dir), indented under the value.
+    if picker_active {
+        let total = form.dir_entries.len();
+        let cap = want_picker as usize;
+        let start = if form.dir_selected >= cap {
+            form.dir_selected + 1 - cap
+        } else {
+            0
+        };
+        let end = (start + cap).min(total);
+        for i in start..end {
+            let Some(r) = row(x + VALUE_INDENT, y, w.saturating_sub(VALUE_INDENT), bottom) else {
+                break;
+            };
+            let selected = i == form.dir_selected;
+            let text = format!(
+                "{}{}/",
+                if selected { "‹ " } else { "  " },
+                form.dir_entries[i]
+            );
+            let style = if selected {
+                Style::default().add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().add_modifier(Modifier::DIM)
+            };
+            f.render_widget(Paragraph::new(Line::from(Span::styled(text, style))), r);
+            y += 1;
+        }
+    }
+    y += 1;
+
+    // terminal toggle.
+    if let Some(r) = row(x, y, w, bottom) {
+        let focused = form.field == CreateField::Terminal;
+        let mark = if form.terminal { "[x]" } else { "[ ]" };
+        let line = Line::from(vec![
+            lbl("terminal"),
+            Span::styled(format!("{mark} plain shell"), Style::default()),
+            Span::styled("   space", Style::default().add_modifier(Modifier::DIM)),
+        ]);
+        f.render_widget(band(Paragraph::new(line), focused), r);
+    }
+    y += 1;
+
+    // worktree checkbox — only visible when the dir is a git repo.
+    if !form.branches.is_empty() {
+        if let Some(r) = row(x, y, w, bottom) {
+            let focused = form.field == CreateField::Worktree;
+            let mark = if form.worktree { "[x]" } else { "[ ]" };
+            let line = Line::from(vec![
+                lbl("worktree"),
+                Span::styled(format!("{mark} create"), Style::default()),
+                Span::styled("   space", Style::default().add_modifier(Modifier::DIM)),
+            ]);
+            f.render_widget(band(Paragraph::new(line), focused), r);
+        }
+        y += 1;
+    }
+
+    if !form.branches.is_empty() && form.worktree {
+        if let Some(r) = row(x, y, w, bottom) {
+            input_row(
+                f,
+                r,
+                "branch",
+                &form.branch_input,
+                "filter branches or type a new name",
+                branch_focused,
+            );
+        }
+        y += 1;
+        // Entry list (windowed like the dir picker), shown while the step is focused.
+        if branch_focused && !form.branch_entries.is_empty() {
+            let total = form.branch_entries.len();
+            let cap = total.min(PICKER_MAX);
+            let start = if form.branch_selected >= cap {
+                form.branch_selected + 1 - cap
+            } else {
+                0
+            };
+            let end = (start + cap).min(total);
+            for i in start..end {
+                let Some(r) = row(x + VALUE_INDENT, y, w.saturating_sub(VALUE_INDENT), bottom)
+                else {
+                    break;
+                };
+                let selected = i == form.branch_selected;
+                let marker = if selected { "‹ " } else { "  " };
+                let style = if selected {
+                    Style::default().add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().add_modifier(Modifier::DIM)
+                };
+                let line = match &form.branch_entries[i] {
+                    crate::app::BranchEntry::Existing(b) => {
+                        let is_current = form.current_branch.as_deref() == Some(b.as_str());
+                        if is_current {
+                            Line::from(Span::styled(format!("{marker}{b} (current)"), style))
+                        } else {
+                            // ⧉ — opens in a worktree (matches the session-list glyph).
+                            Line::from(vec![
+                                Span::styled(format!("{marker}{b} "), style),
+                                Span::styled(
+                                    th::WORKTREE,
+                                    Style::default()
+                                        .fg(WORKTREE_FG)
+                                        .add_modifier(Modifier::BOLD),
+                                ),
+                            ])
+                        }
+                    }
+                    crate::app::BranchEntry::Create(name) => Line::from(Span::styled(
+                        format!("{marker}+ create \"{name}\""),
+                        style.add_modifier(Modifier::BOLD),
+                    )),
+                };
+                f.render_widget(Paragraph::new(line), r);
+                y += 1;
+            }
+        }
+        // base picker — only when the highlighted row is `+ create`.
+        if form.branch_is_new() {
+            let base_focused = form.field == CreateField::Base;
+            if let Some(r) = row(x, y, w, bottom) {
+                if base_focused {
+                    input_row(f, r, "base", &form.base_filter, "filter branches", true);
+                } else {
+                    let val = form
+                        .selected_base()
+                        .unwrap_or_else(|| "(no branches)".into());
+                    input_row(f, r, "base", &val, "(no branches)", false);
+                }
+            }
+            y += 1;
+            if base_focused {
+                let matches = form.base_matches();
+                if matches.is_empty() {
+                    if let Some(r) =
+                        row(x + VALUE_INDENT, y, w.saturating_sub(VALUE_INDENT), bottom)
+                    {
+                        f.render_widget(
+                            Paragraph::new(Line::from(Span::styled(
+                                "no match",
+                                Style::default().add_modifier(Modifier::DIM | Modifier::BOLD),
+                            ))),
+                            r,
+                        );
+                    }
+                    y += 1;
+                } else {
+                    let cap = PICKER_MAX;
+                    let start = if form.base_index >= cap {
+                        form.base_index + 1 - cap
+                    } else {
+                        0
+                    };
+                    let end = (start + cap).min(matches.len());
+                    for (i, m) in matches.iter().enumerate().take(end).skip(start) {
+                        let Some(r) =
+                            row(x + VALUE_INDENT, y, w.saturating_sub(VALUE_INDENT), bottom)
+                        else {
+                            break;
+                        };
+                        let selected = i == form.base_index;
+                        let text = format!("{}{}", if selected { "‹ " } else { "  " }, m);
+                        let style = if selected {
+                            Style::default().add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().add_modifier(Modifier::DIM)
+                        };
+                        f.render_widget(Paragraph::new(Line::from(Span::styled(text, style))), r);
+                        y += 1;
+                    }
+                }
+            }
+        }
+    }
+    y += 1;
+
+    // agent picker — or a disabled hint when this is a terminal session.
+    if let Some(r) = row(x, y, w, bottom) {
+        if form.terminal {
+            f.render_widget(
+                Paragraph::new(Line::from(vec![
+                    lbl("agent"),
+                    Span::styled(
+                        "(terminal session)",
+                        Style::default().add_modifier(Modifier::DIM),
+                    ),
+                ])),
+                r,
+            );
+        } else {
+            segment_row(
+                f,
+                r,
+                "agent",
+                &form.agent_choices,
+                form.agent_index,
+                form.field == CreateField::Agent,
+                "",
+            );
+        }
+    }
+    y += 1;
+    // Claude model list: one row per model under the agent row. The highlighted
+    // model carries the effort slider (haiku has none — effort unsupported).
+    if form.model_list_visible() {
+        for (i, m) in CLAUDE_MODELS.iter().enumerate() {
+            let Some(r) = row(x + VALUE_INDENT, y, w.saturating_sub(VALUE_INDENT), bottom) else {
+                break;
+            };
+            let on_row = form.model_index == Some(i);
+            let focused = on_row && form.field == CreateField::Agent;
+            let name_style = if on_row {
+                Style::default().add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().add_modifier(Modifier::DIM)
+            };
+            let mut spans = vec![Span::styled(
+                format!("{}{:<8}", if on_row { "‹ " } else { "  " }, m),
+                name_style,
+            )];
+            if on_row && form.effort_levels().len() > 1 {
+                for (ei, lvl) in form.effort_levels().iter().enumerate() {
+                    let st = if ei == form.effort_index {
+                        Style::default().add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().add_modifier(Modifier::DIM)
+                    };
+                    spans.push(Span::styled(format!(" {lvl} "), st));
+                }
+            }
+            f.render_widget(band(Paragraph::new(Line::from(spans)), focused), r);
+            y += 1;
+        }
+    }
+    if agent_warn {
+        if let Some(r) = row(x + VALUE_INDENT, y, w.saturating_sub(VALUE_INDENT), bottom) {
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    "not found in PATH",
+                    Style::default().add_modifier(Modifier::DIM | Modifier::BOLD),
+                ))),
+                r,
+            );
+        }
+        y += 1;
+    }
+    y += 1;
+
+    // Footer rule + the single command that will run.
+    if let Some(r) = row(x, y, w, bottom) {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "─".repeat(w as usize),
+                th::chrome(th::BORDER),
+            ))),
+            r,
+        );
+    }
+    y += 1;
+    if let Some(r) = row(x, y, w, bottom) {
+        let agent = if form.terminal {
+            "$SHELL"
+        } else if form.agent.is_empty() {
+            CUSTOM_AGENT_SLOT
+        } else {
+            form.agent.as_str()
+        };
+        let name = if form.name.is_empty() {
+            "<name>"
+        } else {
+            form.name.as_str()
+        };
+        let (model, effort) = form.model_flags();
+        let cmd = format!(
+            "tmux new -s {} -c {} \"{}\"",
+            name,
+            abbreviate_path(&form.dir),
+            compose_agent_command(agent, model, effort),
+        );
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                cmd,
+                Style::default().add_modifier(Modifier::DIM),
+            ))),
+            r,
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    use crate::ui::testutil::buf_to_string;
+
+    #[test]
+    fn new_modal_shows_inline_labels_and_agent_segments() {
+        let form = CreateForm::new("claude", &["claude".into(), "codex".into()]);
+        let mut t = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        t.draw(|f| render(f, &form, None)).unwrap();
+        let s = buf_to_string(t.backend().buffer());
+        assert!(s.contains("New session"), "header title");
+        assert!(s.contains("of 4"), "step indicator");
+        // Inline lowercase labels (no letter-spacing).
+        assert!(s.contains("name"));
+        assert!(s.contains("directory"));
+        assert!(s.contains("agent"));
+        assert!(s.contains("claude"));
+        assert!(s.contains("codex"));
+        assert!(s.contains("custom"));
+        assert!(s.contains("tmux new"), "command preview");
+        // The old letter-spaced caps labels are gone.
+        assert!(!s.contains("N A M E"));
+    }
+
+    #[test]
+    fn new_modal_shows_validation_error_banner() {
+        let form = CreateForm::new("claude", &["claude".into()]);
+        let mut t = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        t.draw(|f| render(f, &form, Some("name cannot contain ':' or '.'")))
+            .unwrap();
+        let s = buf_to_string(t.backend().buffer());
+        assert!(
+            s.contains("name cannot contain"),
+            "validation error must be visible:\n{s}"
+        );
+    }
+
+    /// Form seeded as a git-repo dir without shelling out.
+    fn form_with_branches(branches: &[&str], current: Option<&str>) -> CreateForm {
+        let mut f = CreateForm::new("claude", &["claude".into()]);
+        f.branches = branches.iter().map(|s| s.to_string()).collect();
+        f.current_branch = current.map(str::to_string);
+        f.refresh_branch_entries();
+        f
+    }
+
+    #[test]
+    fn new_modal_shows_branch_picker_for_repo_dir() {
+        let mut form = form_with_branches(&["main", "feature-x"], Some("main"));
+        form.worktree = true;
+        form.field = crate::app::CreateField::Branch;
+        let mut t = Terminal::new(TestBackend::new(80, 36)).unwrap();
+        t.draw(|f| render(f, &form, None)).unwrap();
+        let s = buf_to_string(t.backend().buffer());
+        assert!(s.contains("worktree"), "worktree checkbox visible:\n{s}");
+        assert!(s.contains("main"), "current branch listed:\n{s}");
+        assert!(s.contains("(current)"), "current annotation:\n{s}");
+        assert!(s.contains("feature-x"), "other branch listed:\n{s}");
+    }
+
+    #[test]
+    fn new_modal_shows_create_entry_and_base_for_new_name() {
+        let mut form = form_with_branches(&["main"], Some("main"));
+        form.worktree = true;
+        form.field = crate::app::CreateField::Branch;
+        form.branch_input = "feat-z".into();
+        form.refresh_branch_entries(); // sole Create row, selected
+        let mut t = Terminal::new(TestBackend::new(80, 36)).unwrap();
+        t.draw(|f| render(f, &form, None)).unwrap();
+        let s = buf_to_string(t.backend().buffer());
+        assert!(s.contains("create"), "create entry:\n{s}");
+        assert!(s.contains("feat-z"), "typed name shown:\n{s}");
+        assert!(s.contains("base"), "base row appears for new branch:\n{s}");
+    }
+
+    #[test]
+    fn new_modal_hides_branch_picker_without_repo() {
+        let form = CreateForm::new("claude", &["claude".into()]); // branches empty
+        let mut t = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        t.draw(|f| render(f, &form, None)).unwrap();
+        let s = buf_to_string(t.backend().buffer());
+        assert!(!s.contains("branch "), "no branch row without a repo:\n{s}");
+        assert!(
+            !s.contains("worktree"),
+            "no worktree row without a repo:\n{s}"
+        );
+    }
+
+    #[test]
+    fn terminal_modal_shows_toggle_and_disables_agent() {
+        let mut form = CreateForm::new("claude", &["claude".into()]);
+        form.terminal = true;
+        let mut t = Terminal::new(TestBackend::new(80, 32)).unwrap();
+        t.draw(|f| render(f, &form, None)).unwrap();
+        let s = buf_to_string(t.backend().buffer());
+        assert!(s.contains("terminal"), "terminal toggle row:\n{s}");
+        assert!(s.contains("[x] plain shell"), "toggle checked:\n{s}");
+        assert!(s.contains("(terminal session)"), "agent row disabled:\n{s}");
+        assert!(s.contains("$SHELL"), "command preview shows shell:\n{s}");
+        assert!(s.contains("of 3"), "terminal flow step total:\n{s}");
+    }
+
+    #[test]
+    fn prefilled_modal_shows_streamlined_steps_and_project_values() {
+        // Use a non-default agent so the agent assertion proves it came from the
+        // project (not a generic default), and a recognizable project dir.
+        let form = CreateForm::for_project("/home/u/proj", "codex", &["codex".into()]);
+        let mut t = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        t.draw(|f| render(f, &form, None)).unwrap();
+        let s = buf_to_string(t.backend().buffer());
+        assert!(s.contains("of 3"), "streamlined step total:\n{s}");
+        assert!(s.contains("proj"), "project path on directory row:\n{s}");
+        assert!(s.contains("codex"), "project agent shown:\n{s}");
+    }
+
+    #[test]
+    fn model_list_renders_for_claude_with_effort_slider() {
+        let mut form = CreateForm::new("claude", &[]);
+        form.field = CreateField::Agent;
+        form.model_index = Some(1); // sonnet highlighted
+        form.effort_index = 3; // high
+                               // Wide enough that the command preview doesn't clip mid-flag.
+        let mut t = Terminal::new(TestBackend::new(110, 36)).unwrap();
+        t.draw(|f| render(f, &form, None)).unwrap();
+        let s = buf_to_string(t.backend().buffer());
+        assert!(s.contains("opus"), "model rows:\n{s}");
+        assert!(s.contains("sonnet"));
+        assert!(s.contains("haiku"));
+        // Slider only on the highlighted model; sonnet has no xhigh.
+        assert!(s.contains("auto"), "slider visible:\n{s}");
+        assert!(s.contains("medium"));
+        assert!(
+            !s.contains("xhigh"),
+            "sonnet slider must not offer xhigh:\n{s}"
+        );
+        assert!(
+            s.contains("--model sonnet --effort high"),
+            "preview carries flags:\n{s}"
+        );
+    }
+
+    #[test]
+    fn model_list_hidden_for_non_claude_and_terminal() {
+        let form = CreateForm::new("codex", &[]);
+        let mut t = Terminal::new(TestBackend::new(90, 36)).unwrap();
+        t.draw(|f| render(f, &form, None)).unwrap();
+        let s = buf_to_string(t.backend().buffer());
+        assert!(!s.contains("haiku"), "no model list for codex:\n{s}");
+
+        let mut form = CreateForm::new("claude", &[]);
+        form.terminal = true;
+        let mut t = Terminal::new(TestBackend::new(90, 36)).unwrap();
+        t.draw(|f| render(f, &form, None)).unwrap();
+        let s = buf_to_string(t.backend().buffer());
+        assert!(!s.contains("haiku"), "no model list for terminal:\n{s}");
+    }
+
+    #[test]
+    fn haiku_row_has_no_effort_slider() {
+        let mut form = CreateForm::new("claude", &[]);
+        form.field = CreateField::Agent;
+        form.model_index = Some(2); // haiku
+        let mut t = Terminal::new(TestBackend::new(90, 36)).unwrap();
+        t.draw(|f| render(f, &form, None)).unwrap();
+        let s = buf_to_string(t.backend().buffer());
+        assert!(!s.contains("auto"), "haiku has no slider:\n{s}");
+        assert!(
+            s.contains("--model haiku"),
+            "preview still flags model:\n{s}"
+        );
+    }
+
+    #[test]
+    fn auto_model_preview_has_no_flags() {
+        let form = CreateForm::new("claude", &[]);
+        let mut t = Terminal::new(TestBackend::new(90, 36)).unwrap();
+        t.draw(|f| render(f, &form, None)).unwrap();
+        let s = buf_to_string(t.backend().buffer());
+        assert!(!s.contains("--model"), "agent row = auto, no flags:\n{s}");
+    }
+
+    #[test]
+    fn base_search_renders_filter_and_matches() {
+        let mut form = CreateForm::new("claude", &[]);
+        // A repo with a typed new branch name: the + create row is selected,
+        // so the Base step is live and focusable.
+        form.branches = vec!["main".into(), "dev".into(), "feature".into()];
+        form.branch_input = "newb".into();
+        form.refresh_branch_entries();
+        form.worktree = true;
+        form.field = CreateField::Base;
+        form.base_filter = "e".into(); // dev, feature
+        let mut t = Terminal::new(TestBackend::new(90, 40)).unwrap();
+        t.draw(|f| render(f, &form, None)).unwrap();
+        let s = buf_to_string(t.backend().buffer());
+        assert!(s.contains("dev"), "match list:\n{s}");
+        assert!(s.contains("feature"));
+        assert!(!s.contains("main"), "filtered out:\n{s}");
+    }
+
+    #[test]
+    fn base_unfocused_shows_selected_branch() {
+        let mut form = CreateForm::new("claude", &[]);
+        form.branches = vec!["main".into(), "dev".into()];
+        form.branch_input = "feat".into();
+        form.refresh_branch_entries(); // + create row → Base step exists
+        form.worktree = true;
+        form.field = CreateField::Branch;
+        let mut t = Terminal::new(TestBackend::new(90, 40)).unwrap();
+        t.draw(|f| render(f, &form, None)).unwrap();
+        let s = buf_to_string(t.backend().buffer());
+        assert!(s.contains("main"), "selected base shown:\n{s}");
+        assert!(!s.contains("dev"), "match list hidden when unfocused:\n{s}");
+    }
+
+    #[test]
+    fn worktree_checkbox_shows_when_git_repo() {
+        let form = form_with_branches(&["main"], Some("main")); // worktree=false
+        let mut t = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        t.draw(|f| render(f, &form, None)).unwrap();
+        let s = buf_to_string(t.backend().buffer());
+        assert!(
+            s.contains("worktree"),
+            "worktree row visible for git repo:\n{s}"
+        );
+        assert!(s.contains("[ ] create"), "unchecked by default:\n{s}");
+        assert!(
+            !s.contains("branch"),
+            "branch picker hidden when worktree=false:\n{s}"
+        );
+    }
+
+    #[test]
+    fn worktree_checked_shows_branch_picker() {
+        let mut form = form_with_branches(&["main", "feat"], Some("main"));
+        form.worktree = true;
+        form.field = crate::app::CreateField::Branch;
+        let mut t = Terminal::new(TestBackend::new(80, 36)).unwrap();
+        t.draw(|f| render(f, &form, None)).unwrap();
+        let s = buf_to_string(t.backend().buffer());
+        assert!(s.contains("[x] create"), "checked:\n{s}");
+        assert!(s.contains("branch"), "branch picker visible:\n{s}");
+    }
+}

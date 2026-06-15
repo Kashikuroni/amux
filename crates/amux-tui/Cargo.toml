@@ -1,0 +1,20 @@
+[package]
+name = "amux-tui"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+description = "Terminal UI for amux"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/kashikuroni/amux"
+publish = false
+
+[dependencies]
+amux-core = { path = "../amux-core" }
+amux-verify = { path = "../amux-verify" }
+ratatui = { version = "0.29", features = ["unstable-rendered-line-info"] }
+crossterm = "0.28"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+ansi-to-tui = "7"
+pulldown-cmark = { version = "0.12", default-features = false }
