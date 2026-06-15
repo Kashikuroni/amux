@@ -705,6 +705,46 @@ pub enum Mode {
     VerifyDetail(String),
     /// One-shot "What's New" changelog shown after an upgrade.
     WhatsNew,
+    /// Read-only list of tmux sessions am does not manage (other sockets +
+    /// untagged sessions on the am socket), snapshotted when the modal opened.
+    ForeignSessions(Vec<crate::tmux::ForeignSession>),
+    /// GitHub-issue composer for the selected session's repo (`gh issue create`).
+    Issue(IssueForm),
+    /// The space-leader menu (which-key style): the root shows the groups, a
+    /// group shows its commands. Rare operations live here; frequent ones keep
+    /// their direct keys.
+    Leader(LeaderMenu),
+}
+
+/// Which level of the leader menu is open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeaderMenu {
+    Root,
+    /// `space g` — git: issue, promote, delete branch, cleanup.
+    Git,
+    /// `space s` — selected session: rename, rename project, verify, details, nvim.
+    Session,
+    /// `space a` — app: usage log, foreign tmux sessions, restart all Claude.
+    App,
+}
+
+/// Which field the issue composer is editing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IssueField {
+    Title,
+    Body,
+}
+
+/// Form carried by `Mode::Issue`.
+#[derive(Debug, Clone)]
+pub struct IssueForm {
+    /// Repo the issue is filed in (`gh` runs here).
+    pub repo_root: String,
+    pub title: String,
+    pub body: crate::editor::TextArea,
+    pub field: IssueField,
+    /// `None` while composing; `Some` once the gh call was fired.
+    pub stage: Option<crate::git::IssueStage>,
 }
 
 /// Which note `Mode::Note` is editing.
@@ -852,6 +892,18 @@ pub enum Action {
     CancelVerify {
         name: String,
     },
+    /// Create (or jump back into) the `<name>-nvim` session in the directory
+    /// session `name`'s agent currently works in, then attach it.
+    OpenEditor {
+        name: String,
+    },
+    /// File a GitHub issue in `repo_root` via `gh issue create` (async — the
+    /// result comes back through `App::set_issue_stage`).
+    CreateIssue {
+        repo_root: String,
+        title: String,
+        body: String,
+    },
 }
 
 #[derive(Copy, Clone)]
@@ -872,6 +924,9 @@ enum ModeKind {
     Git,
     VerifyDetail,
     WhatsNew,
+    ForeignSessions,
+    Issue,
+    Leader,
 }
 
 /// What the right pane renders: the live session preview, the selected session's
@@ -1388,6 +1443,9 @@ impl App {
             Mode::Git(_) => ModeKind::Git,
             Mode::VerifyDetail(_) => ModeKind::VerifyDetail,
             Mode::WhatsNew => ModeKind::WhatsNew,
+            Mode::ForeignSessions(_) => ModeKind::ForeignSessions,
+            Mode::Issue(_) => ModeKind::Issue,
+            Mode::Leader(_) => ModeKind::Leader,
         }
     }
 
@@ -1463,10 +1521,12 @@ impl App {
                 None
             }
             ModeKind::Git => self.handle_git_key(key),
-            ModeKind::VerifyDetail => {
+            ModeKind::VerifyDetail | ModeKind::ForeignSessions => {
                 self.mode = Mode::List;
                 None
             }
+            ModeKind::Issue => self.handle_issue_key(key),
+            ModeKind::Leader => self.handle_leader_key(key),
             ModeKind::WhatsNew => {
                 let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
                 match latin_code(key.code) {
@@ -1641,10 +1701,9 @@ impl App {
                     });
                 }
             }
-            // u: restart all Claude sessions (double Ctrl+C, then auto-resume).
-            // Destructive and adjacent to plain typing (e.g. a reply started
-            // without `i`), so it asks for a typed confirmation first.
-            KeyCode::Char('u') => self.mode = Mode::ConfirmRestart(String::new()),
+            // Space: the leader menu (which-key style). Rare operations live in
+            // its groups so they stay discoverable without burning bare letters.
+            KeyCode::Char(' ') => self.mode = Mode::Leader(LeaderMenu::Root),
             // Ctrl+R: return a removed-worktree session to its repo root. Only
             // active when the selected card shows the "return to root" hint. A
             // Ctrl-chord (not a bare letter) so it can't fire from stray typing
@@ -1659,46 +1718,10 @@ impl App {
                     }
                 }
             }
-            KeyCode::Char('r') => {
-                if let Some(name) = self.selected_name() {
-                    self.mode = Mode::Rename(RenameForm::new(name));
-                }
-            }
             // v: verify the selected session against its contract. A second v
             // while it runs cancels it. Plain letter (non-destructive: read-only
             // checks, itself cancellable) per the feature doc.
-            KeyCode::Char('v') if !ctrl => {
-                if let Some(name) = self.selected_name() {
-                    let running = matches!(
-                        self.verification.get(&name),
-                        Some(VerificationState::Running { .. })
-                    );
-                    return Some(if running {
-                        Action::CancelVerify { name }
-                    } else {
-                        Action::Verify { name }
-                    });
-                }
-            }
-            // V: open the verification detail modal (gates + failure output).
-            KeyCode::Char('V') => {
-                if let Some(name) = self.selected_name() {
-                    if matches!(
-                        self.verification.get(&name),
-                        Some(VerificationState::Done(_))
-                    ) {
-                        self.mode = Mode::VerifyDetail(name);
-                    }
-                }
-            }
-            // Shift+R: rename the selected session's project (display-only).
-            KeyCode::Char('R') => {
-                if let Some(s) = self.selected_session() {
-                    let root = session_root(s).to_string();
-                    let buffer = self.project_display_name(&root);
-                    self.mode = Mode::RenameProject(ProjectRenameForm { root, buffer });
-                }
-            }
+            KeyCode::Char('v') if !ctrl => return self.verify_toggle_action(),
             // Shift+Tab: forward to the agent so it cycles its own mode.
             KeyCode::BackTab => {
                 if let Some(name) = self.selected_name() {
@@ -1709,9 +1732,14 @@ impl App {
                 self.help_scroll = 0;
                 self.mode = Mode::Help;
             }
-            KeyCode::Char('L') => {
-                self.usage_log_scroll = 0;
-                self.mode = Mode::UsageLog;
+            // e: open (or jump back into) an nvim session in the directory the
+            // selected agent is working in right now.
+            KeyCode::Char('e') => {
+                if let Some(s) = self.selected_session() {
+                    return Some(Action::OpenEditor {
+                        name: s.name.clone(),
+                    });
+                }
             }
             KeyCode::Enter | KeyCode::Char('o') => {
                 if self.left_tab == LeftTab::Recent {
@@ -1742,85 +1770,6 @@ impl App {
             KeyCode::PageDown => self.preview_scroll_down(10),
             KeyCode::Char('k') if ctrl => self.preview_scroll_up(10),
             KeyCode::Char('j') if ctrl => self.preview_scroll_down(10),
-            KeyCode::Char('g') if ctrl => {
-                if let Some(s) = self.selected_session() {
-                    let root = session_root(s).to_string();
-                    if is_worktree(s) {
-                        let branch = s.git.as_ref().map(|g| g.branch.clone()).unwrap_or_default();
-                        let has_stash = crate::git::is_dirty(&s.dir);
-                        self.mode = Mode::Git(GitForm {
-                            session_name: s.name.clone(),
-                            branch,
-                            repo_root: root,
-                            worktree_path: Some(s.dir.clone()),
-                            has_stash,
-                            action: GitAction::Promote,
-                            branches: vec![],
-                            selected: std::collections::HashSet::new(),
-                            cursor: 0,
-                        });
-                    } else if let Some(g) = &s.git {
-                        let branch = g.branch.clone();
-                        if crate::git::PROTECTED_BRANCHES.contains(&branch.as_str()) {
-                            self.error = Some(format!(
-                                "'{branch}' is a protected branch — Ctrl+g works on feature branches"
-                            ));
-                        } else {
-                            self.mode = Mode::Git(GitForm {
-                                session_name: s.name.clone(),
-                                branch,
-                                repo_root: root,
-                                worktree_path: None,
-                                has_stash: false,
-                                action: GitAction::DeleteBranch,
-                                branches: vec![],
-                                selected: std::collections::HashSet::new(),
-                                cursor: 0,
-                            });
-                        }
-                    } else {
-                        self.error = Some(
-                            "no git info for this session — Ctrl+g works on git-tracked sessions"
-                                .into(),
-                        );
-                    }
-                }
-            }
-            KeyCode::Char('l') if ctrl => {
-                if let Some(s) = self.selected_session() {
-                    let root = session_root(s).to_string();
-                    let raw = crate::git::list_merged_branches(&root);
-                    if raw.is_empty() {
-                        self.error = Some("no merged branches found".into());
-                    } else {
-                        let branches: Vec<BranchItem> = raw
-                            .into_iter()
-                            .map(|name| {
-                                let protected =
-                                    crate::git::PROTECTED_BRANCHES.contains(&name.as_str());
-                                BranchItem { name, protected }
-                            })
-                            .collect();
-                        let selected: std::collections::HashSet<usize> = branches
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, b)| !b.protected)
-                            .map(|(i, _)| i)
-                            .collect();
-                        self.mode = Mode::Git(GitForm {
-                            session_name: s.name.clone(),
-                            branch: String::new(),
-                            repo_root: root,
-                            worktree_path: None,
-                            has_stash: false,
-                            action: GitAction::BranchCleanup,
-                            branches,
-                            selected,
-                            cursor: 0,
-                        });
-                    }
-                }
-            }
             KeyCode::End => self.preview_to_end(),
             // Resize the split: [ / ] small step; { / } or Ctrl+←/→ bigger step.
             KeyCode::Char('[') => self.resize_split(-3),
@@ -1896,6 +1845,198 @@ impl App {
             _ => {}
         }
         None
+    }
+
+    /// The space-leader menu. Group keys descend, command keys fire (same
+    /// letters as the old direct chords, so muscle memory transfers); Esc or
+    /// any unbound key closes, Backspace climbs back to the root.
+    fn handle_leader_key(&mut self, key: KeyEvent) -> Option<Action> {
+        let Mode::Leader(menu) = self.mode else {
+            return None;
+        };
+        self.mode = Mode::List;
+        match (menu, latin_code(key.code)) {
+            (_, KeyCode::Esc) => {}
+            (m, KeyCode::Backspace) if m != LeaderMenu::Root => {
+                self.mode = Mode::Leader(LeaderMenu::Root);
+            }
+            (LeaderMenu::Root, KeyCode::Char('g')) => self.mode = Mode::Leader(LeaderMenu::Git),
+            (LeaderMenu::Root, KeyCode::Char('s')) => self.mode = Mode::Leader(LeaderMenu::Session),
+            (LeaderMenu::Root, KeyCode::Char('a')) => self.mode = Mode::Leader(LeaderMenu::App),
+            (LeaderMenu::Git, KeyCode::Char('i')) => self.open_issue_composer(),
+            (LeaderMenu::Git, KeyCode::Char('p')) => self.open_git_promote(),
+            (LeaderMenu::Git, KeyCode::Char('b')) => self.open_git_delete_branch(),
+            (LeaderMenu::Git, KeyCode::Char('c')) => self.open_git_cleanup(),
+            (LeaderMenu::Session, KeyCode::Char('r')) => {
+                if let Some(name) = self.selected_name() {
+                    self.mode = Mode::Rename(RenameForm::new(name));
+                }
+            }
+            (LeaderMenu::Session, KeyCode::Char('R')) => {
+                if let Some(s) = self.selected_session() {
+                    let root = session_root(s).to_string();
+                    let buffer = self.project_display_name(&root);
+                    self.mode = Mode::RenameProject(ProjectRenameForm { root, buffer });
+                }
+            }
+            (LeaderMenu::Session, KeyCode::Char('v')) => return self.verify_toggle_action(),
+            (LeaderMenu::Session, KeyCode::Char('V')) => {
+                if let Some(name) = self.selected_name() {
+                    if matches!(
+                        self.verification.get(&name),
+                        Some(VerificationState::Done(_))
+                    ) {
+                        self.mode = Mode::VerifyDetail(name);
+                    }
+                }
+            }
+            (LeaderMenu::Session, KeyCode::Char('e')) => {
+                if let Some(s) = self.selected_session() {
+                    return Some(Action::OpenEditor {
+                        name: s.name.clone(),
+                    });
+                }
+            }
+            (LeaderMenu::App, KeyCode::Char('l')) => {
+                self.usage_log_scroll = 0;
+                self.mode = Mode::UsageLog;
+            }
+            (LeaderMenu::App, KeyCode::Char('o')) => {
+                self.mode = Mode::ForeignSessions(crate::tmux::list_foreign_sessions());
+            }
+            // Restart-all keeps its typed confirmation: it is still destructive,
+            // just no longer one accidental keypress away.
+            (LeaderMenu::App, KeyCode::Char('u')) => {
+                self.mode = Mode::ConfirmRestart(String::new());
+            }
+            _ => {} // unbound key → menu closed (mode already List)
+        }
+        None
+    }
+
+    /// Toggle verification for the selected session: start a run, or cancel the
+    /// one in flight. Shared by the direct `v` and the leader `space s v`.
+    fn verify_toggle_action(&self) -> Option<Action> {
+        let name = self.selected_name()?;
+        let running = matches!(
+            self.verification.get(&name),
+            Some(VerificationState::Running { .. })
+        );
+        Some(if running {
+            Action::CancelVerify { name }
+        } else {
+            Action::Verify { name }
+        })
+    }
+
+    /// `space g i`: the GitHub-issue composer for the selected session's project.
+    fn open_issue_composer(&mut self) {
+        if let Some(s) = self.selected_session() {
+            self.mode = Mode::Issue(IssueForm {
+                repo_root: session_root(s).to_string(),
+                title: String::new(),
+                body: crate::editor::TextArea::default(),
+                field: IssueField::Title,
+                stage: None,
+            });
+        }
+    }
+
+    /// `space g p`: promote the selected worktree session to its repo root.
+    fn open_git_promote(&mut self) {
+        let Some(s) = self.selected_session() else {
+            return;
+        };
+        if !is_worktree(s) {
+            self.error = Some("not a worktree session — promote needs one".into());
+            return;
+        }
+        let root = session_root(s).to_string();
+        let branch = s.git.as_ref().map(|g| g.branch.clone()).unwrap_or_default();
+        let has_stash = crate::git::is_dirty(&s.dir);
+        self.mode = Mode::Git(GitForm {
+            session_name: s.name.clone(),
+            branch,
+            repo_root: root,
+            worktree_path: Some(s.dir.clone()),
+            has_stash,
+            action: GitAction::Promote,
+            branches: vec![],
+            selected: std::collections::HashSet::new(),
+            cursor: 0,
+        });
+    }
+
+    /// `space g b`: delete the selected session's local branch (root sessions
+    /// on a non-protected branch only — a worktree's branch is in use).
+    fn open_git_delete_branch(&mut self) {
+        let Some(s) = self.selected_session() else {
+            return;
+        };
+        if is_worktree(s) {
+            self.error = Some("worktree session — promote it first (space g p) or kill it".into());
+            return;
+        }
+        let Some(g) = &s.git else {
+            self.error =
+                Some("no git info for this session — branch delete needs a git repo".into());
+            return;
+        };
+        let branch = g.branch.clone();
+        if crate::git::PROTECTED_BRANCHES.contains(&branch.as_str()) {
+            self.error = Some(format!(
+                "'{branch}' is a protected branch — delete works on feature branches"
+            ));
+            return;
+        }
+        self.mode = Mode::Git(GitForm {
+            session_name: s.name.clone(),
+            branch,
+            repo_root: session_root(s).to_string(),
+            worktree_path: None,
+            has_stash: false,
+            action: GitAction::DeleteBranch,
+            branches: vec![],
+            selected: std::collections::HashSet::new(),
+            cursor: 0,
+        });
+    }
+
+    /// `space g c`: batch-delete the merged branches of the selected project.
+    fn open_git_cleanup(&mut self) {
+        let Some(s) = self.selected_session() else {
+            return;
+        };
+        let root = session_root(s).to_string();
+        let raw = crate::git::list_merged_branches(&root);
+        if raw.is_empty() {
+            self.error = Some("no merged branches found".into());
+            return;
+        }
+        let branches: Vec<BranchItem> = raw
+            .into_iter()
+            .map(|name| {
+                let protected = crate::git::PROTECTED_BRANCHES.contains(&name.as_str());
+                BranchItem { name, protected }
+            })
+            .collect();
+        let selected: std::collections::HashSet<usize> = branches
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| !b.protected)
+            .map(|(i, _)| i)
+            .collect();
+        self.mode = Mode::Git(GitForm {
+            session_name: s.name.clone(),
+            branch: String::new(),
+            repo_root: root,
+            worktree_path: None,
+            has_stash: false,
+            action: GitAction::BranchCleanup,
+            branches,
+            selected,
+            cursor: 0,
+        });
     }
 
     /// Session-select mode (entered with `s`): a 1–9 digit jumps to that visible
@@ -2109,6 +2250,113 @@ impl App {
             },
         }
         None
+    }
+
+    /// Issue composer. Mirrors the create form's submit chord: Enter advances
+    /// Title → Body (and is a newline inside Body), Shift/Alt+Enter submits.
+    /// Title/body text is taken raw (any layout); Esc discards the composer.
+    fn handle_issue_key(&mut self, key: KeyEvent) -> Option<Action> {
+        let Mode::Issue(mut form) = std::mem::replace(&mut self.mode, Mode::List) else {
+            return None;
+        };
+        match &form.stage {
+            // Finished (either way): any key dismisses.
+            Some(crate::git::IssueStage::Done(_)) | Some(crate::git::IssueStage::Failed(_)) => {
+                return None;
+            }
+            // In flight: Esc hides the modal (the gh call runs on; its URL is
+            // still copied to the clipboard when it lands). Other keys wait.
+            Some(crate::git::IssueStage::Creating) => {
+                if key.code != KeyCode::Esc {
+                    self.mode = Mode::Issue(form);
+                }
+                return None;
+            }
+            None => {}
+        }
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        match key.code {
+            KeyCode::Esc => return None, // discard (mode already List)
+            // Submit from either field; needs a title. Shift+Enter requires the
+            // kitty protocol; Alt+Enter is the fallback (as in the reply box).
+            KeyCode::Enter if shift || alt => {
+                if form.title.trim().is_empty() {
+                    self.mode = Mode::Issue(form);
+                    return None;
+                }
+                let action = Action::CreateIssue {
+                    repo_root: form.repo_root.clone(),
+                    title: form.title.trim().to_string(),
+                    body: form.body.buffer.clone(),
+                };
+                form.stage = Some(crate::git::IssueStage::Creating);
+                self.mode = Mode::Issue(form);
+                return Some(action);
+            }
+            KeyCode::Enter => match form.field {
+                IssueField::Title => form.field = IssueField::Body,
+                IssueField::Body => form.body.insert_char('\n'),
+            },
+            KeyCode::Tab | KeyCode::BackTab => {
+                form.field = match form.field {
+                    IssueField::Title => IssueField::Body,
+                    IssueField::Body => IssueField::Title,
+                };
+            }
+            // Editing chords are layout-independent; typed text stays raw.
+            KeyCode::Char(_) if ctrl => {
+                if form.field == IssueField::Body {
+                    match latin_code(key.code) {
+                        KeyCode::Char('w') => form.body.delete_word(),
+                        KeyCode::Char('u') => form.body.delete_to_line_start(),
+                        _ => {}
+                    }
+                }
+            }
+            KeyCode::Char(c) => match form.field {
+                IssueField::Title => form.title.push(c),
+                IssueField::Body => form.body.insert_char(c),
+            },
+            KeyCode::Backspace => match form.field {
+                IssueField::Title => {
+                    form.title.pop();
+                }
+                IssueField::Body => form.body.backspace(),
+            },
+            KeyCode::Delete if form.field == IssueField::Body => form.body.delete(),
+            KeyCode::Left if form.field == IssueField::Body => form.body.left(),
+            KeyCode::Right if form.field == IssueField::Body => form.body.right(),
+            KeyCode::Up if form.field == IssueField::Body => form.body.up(),
+            KeyCode::Down if form.field == IssueField::Body => form.body.down(),
+            KeyCode::Home if form.field == IssueField::Body => form.body.home(),
+            KeyCode::End if form.field == IssueField::Body => form.body.end(),
+            _ => {}
+        }
+        self.mode = Mode::Issue(form);
+        None
+    }
+
+    /// Feeds the async `gh issue create` result in. A non-empty URL is copied to
+    /// the clipboard on success even if the modal was dismissed meanwhile. A
+    /// `Done` with an empty URL (gh succeeded but printed nothing parseable) is
+    /// downgraded to `Failed` so the modal never shows a blank "copied" URL and
+    /// the user's clipboard is left untouched.
+    pub fn set_issue_stage(&mut self, stage: crate::git::IssueStage) {
+        let stage = match stage {
+            crate::git::IssueStage::Done(url) if url.is_empty() => crate::git::IssueStage::Failed(
+                "issue created, but gh printed no URL — check GitHub".into(),
+            ),
+            crate::git::IssueStage::Done(url) => {
+                crate::clip::copy(&url);
+                crate::git::IssueStage::Done(url)
+            }
+            other => other,
+        };
+        if let Mode::Issue(form) = &mut self.mode {
+            form.stage = Some(stage);
+        }
     }
 
     /// Typed confirmation for `u` (restart all Claude sessions). Characters are
@@ -2474,6 +2722,17 @@ impl App {
                             crate::note::selected_as_numbered(self.note_text(&ns.target), &ords);
                         crate::clip::copy(&text);
                         ns.anchor = None;
+                    }
+                    // Delete the cursor/selected task lines. Instant (no confirm):
+                    // a single task is one `e`-edit away from restorable, unlike
+                    // the whole-note wipe behind `c`.
+                    KeyCode::Char('d') if task_count > 0 => {
+                        let ords: Vec<usize> = selection_range(&ns).collect();
+                        crate::note::remove_tasks(self.note_text_mut(&ns.target), &ords);
+                        let left = crate::note::task_line_indices(self.note_text(&ns.target)).len();
+                        ns.cursor = ns.cursor.min(left.saturating_sub(1));
+                        ns.anchor = None;
+                        self.dirty = true;
                     }
                     KeyCode::Char('e') => {
                         ns.editor =
@@ -3643,6 +3902,217 @@ mod tests {
         app.sessions.iter().map(|s| s.name.clone()).collect()
     }
 
+    /// Press the space leader, then each char of `seq` (e.g. "gi" = space g i).
+    /// Returns the last keypress's action.
+    fn leader(app: &mut App, seq: &str) -> Option<Action> {
+        let mut last = app.handle_key(key(' '));
+        for c in seq.chars() {
+            last = app.handle_key(key(c));
+        }
+        last
+    }
+
+    #[test]
+    fn e_returns_open_editor_action_for_selected() {
+        let mut app = app_with(vec![at("a", "/p")]);
+        let action = app.handle_key(key('e'));
+        assert_eq!(action, Some(Action::OpenEditor { name: "a".into() }));
+    }
+
+    #[test]
+    fn space_opens_leader_root_and_esc_closes() {
+        let mut app = app_with(vec![at("a", "/p")]);
+        app.handle_key(key(' '));
+        assert!(matches!(app.mode, Mode::Leader(LeaderMenu::Root)));
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(matches!(app.mode, Mode::List));
+    }
+
+    #[test]
+    fn leader_groups_descend_and_backspace_climbs() {
+        let mut app = app_with(vec![at("a", "/p")]);
+        app.handle_key(key(' '));
+        app.handle_key(key('g'));
+        assert!(matches!(app.mode, Mode::Leader(LeaderMenu::Git)));
+        app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert!(matches!(app.mode, Mode::Leader(LeaderMenu::Root)));
+        app.handle_key(key('s'));
+        assert!(matches!(app.mode, Mode::Leader(LeaderMenu::Session)));
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(matches!(app.mode, Mode::List));
+    }
+
+    #[test]
+    fn leader_unbound_key_closes_menu() {
+        let mut app = app_with(vec![at("a", "/p")]);
+        app.handle_key(key(' '));
+        app.handle_key(key('z'));
+        assert!(matches!(app.mode, Mode::List));
+    }
+
+    #[test]
+    fn leader_session_group_reaches_rename_verify_and_editor() {
+        let mut app = app_with(vec![at("a", "/p")]);
+        leader(&mut app, "sr");
+        assert!(
+            matches!(&app.mode, Mode::Rename(f) if f.old == "a"),
+            "space s r → rename"
+        );
+
+        let mut app = app_with(vec![at("a", "/p")]);
+        let action = leader(&mut app, "sv");
+        assert_eq!(
+            action,
+            Some(Action::Verify { name: "a".into() }),
+            "space s v → verify"
+        );
+
+        let mut app = app_with(vec![at("a", "/p")]);
+        let action = leader(&mut app, "se");
+        assert_eq!(
+            action,
+            Some(Action::OpenEditor { name: "a".into() }),
+            "space s e → nvim"
+        );
+    }
+
+    #[test]
+    fn leader_app_group_opens_usage_log_and_restart_confirm() {
+        let mut app = app_with(vec![at("a", "/p")]);
+        leader(&mut app, "al");
+        assert!(matches!(app.mode, Mode::UsageLog), "space a l → usage log");
+
+        let mut app = app_with(vec![at("a", "/p")]);
+        leader(&mut app, "au");
+        assert!(
+            matches!(app.mode, Mode::ConfirmRestart(_)),
+            "space a u → typed restart confirmation"
+        );
+    }
+
+    #[test]
+    fn old_direct_chords_no_longer_fire() {
+        // Moved under the leader: bare presses must fall through to no-ops.
+        let mut app = app_with(vec![at("a", "/p")]);
+        for k in ['I', 'O', 'L', 'u', 'r', 'R', 'V'] {
+            assert_eq!(app.handle_key(key(k)), None);
+            assert!(
+                matches!(app.mode, Mode::List),
+                "direct '{k}' must be unbound now"
+            );
+        }
+    }
+
+    #[test]
+    fn foreign_sessions_modal_closes_on_any_key() {
+        let mut app = app_with(vec![at("a", "/p")]);
+        app.mode = Mode::ForeignSessions(vec![]);
+        app.handle_key(key('x'));
+        assert!(matches!(app.mode, Mode::List));
+    }
+
+    #[test]
+    fn leader_g_i_opens_issue_composer_with_project_root() {
+        let mut app = app_with(vec![at("a", "/p")]);
+        leader(&mut app, "gi");
+        match &app.mode {
+            Mode::Issue(f) => {
+                assert_eq!(f.repo_root, "/p");
+                assert_eq!(f.field, IssueField::Title);
+                assert!(f.stage.is_none());
+            }
+            other => panic!("expected Mode::Issue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn issue_compose_submit_emits_action_and_creating_stage() {
+        let mut app = app_with(vec![at("a", "/p")]);
+        leader(&mut app, "gi");
+        for c in "Bug".chars() {
+            app.handle_key(key(c));
+        }
+        // Enter advances Title → Body; in Body it's a newline.
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        for c in "details".chars() {
+            app.handle_key(key(c));
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let action = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+        assert_eq!(
+            action,
+            Some(Action::CreateIssue {
+                repo_root: "/p".into(),
+                title: "Bug".into(),
+                body: "details\n".into(),
+            })
+        );
+        assert!(
+            matches!(&app.mode, Mode::Issue(f) if f.stage == Some(crate::git::IssueStage::Creating)),
+            "submit must flip the modal to the creating stage"
+        );
+    }
+
+    #[test]
+    fn issue_submit_requires_a_title() {
+        let mut app = app_with(vec![at("a", "/p")]);
+        leader(&mut app, "gi");
+        let action = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+        assert_eq!(action, None);
+        assert!(matches!(&app.mode, Mode::Issue(f) if f.stage.is_none()));
+    }
+
+    #[test]
+    fn issue_esc_discards_composer() {
+        let mut app = app_with(vec![at("a", "/p")]);
+        leader(&mut app, "gi");
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(matches!(app.mode, Mode::List));
+    }
+
+    #[test]
+    fn issue_failed_stage_dismisses_on_any_key() {
+        let mut app = app_with(vec![at("a", "/p")]);
+        leader(&mut app, "gi");
+        app.set_issue_stage(crate::git::IssueStage::Failed("nope".into()));
+        assert!(
+            matches!(&app.mode, Mode::Issue(f) if matches!(&f.stage, Some(crate::git::IssueStage::Failed(e)) if e == "nope"))
+        );
+        app.handle_key(key('x'));
+        assert!(matches!(app.mode, Mode::List));
+    }
+
+    #[test]
+    fn issue_done_with_empty_url_is_downgraded_to_failed() {
+        // gh succeeded but printed nothing parseable: don't show a blank
+        // "(copied to clipboard)" URL, and don't clobber the clipboard.
+        let mut app = app_with(vec![at("a", "/p")]);
+        leader(&mut app, "gi");
+        app.set_issue_stage(crate::git::IssueStage::Done(String::new()));
+        assert!(
+            matches!(&app.mode, Mode::Issue(f) if matches!(&f.stage, Some(crate::git::IssueStage::Failed(_)))),
+            "empty-URL Done must become Failed, got {:?}",
+            app.mode
+        );
+    }
+
+    #[test]
+    fn issue_tab_switches_fields_and_text_lands_in_focus() {
+        let mut app = app_with(vec![at("a", "/p")]);
+        leader(&mut app, "gi");
+        app.handle_key(key('t'));
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app.handle_key(key('b'));
+        match &app.mode {
+            Mode::Issue(f) => {
+                assert_eq!(f.title, "t");
+                assert_eq!(f.body.buffer, "b");
+                assert_eq!(f.field, IssueField::Body);
+            }
+            other => panic!("expected Mode::Issue, got {other:?}"),
+        }
+    }
+
     #[test]
     fn shift_j_moves_session_within_project() {
         let mut app = app_with(vec![at("a", "/p"), at("b", "/p"), at("c", "/p")]);
@@ -3670,7 +4140,7 @@ mod tests {
     fn shift_r_renames_project_display_only() {
         let mut app = app_with(vec![at("s", "/home/u/p")]);
         app.selected = 0;
-        app.handle_key(key('R'));
+        leader(&mut app, "sR");
         assert!(matches!(app.mode, Mode::RenameProject(_)));
         // Buffer starts at the default name "p"; append to make "px".
         app.handle_key(key('x'));
@@ -3681,7 +4151,7 @@ mod tests {
         );
         assert!(app.dirty);
         // Renaming back to the default clears the override.
-        app.handle_key(key('R'));
+        leader(&mut app, "sR");
         app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(app.project_names.is_empty());
@@ -3707,17 +4177,20 @@ mod tests {
     }
 
     #[test]
-    fn u_key_opens_restart_confirmation_instead_of_acting() {
+    fn leader_a_u_opens_restart_confirmation_instead_of_acting() {
         let mut app = App::new(Config::default());
-        let action = app.handle_key(key('u'));
-        assert!(action.is_none(), "u must not restart directly: {action:?}");
+        let action = leader(&mut app, "au");
+        assert!(
+            action.is_none(),
+            "space a u must not restart directly: {action:?}"
+        );
         assert!(matches!(app.mode, Mode::ConfirmRestart(_)));
     }
 
     #[test]
     fn restart_confirmation_accepts_full_yes() {
         let mut app = App::new(Config::default());
-        app.handle_key(key('u'));
+        leader(&mut app, "au");
         type_str(&mut app, "yes");
         let action = app.handle_key(enter());
         assert!(
@@ -3730,7 +4203,7 @@ mod tests {
     #[test]
     fn restart_confirmation_accepts_russian_da() {
         let mut app = App::new(Config::default());
-        app.handle_key(key('u'));
+        leader(&mut app, "au");
         type_str(&mut app, "да");
         let action = app.handle_key(enter());
         assert!(
@@ -3743,7 +4216,7 @@ mod tests {
     fn restart_confirmation_is_case_insensitive() {
         for word in ["YES", "Yes", "ДА", "Да"] {
             let mut app = App::new(Config::default());
-            app.handle_key(key('u'));
+            leader(&mut app, "au");
             type_str(&mut app, word);
             let action = app.handle_key(enter());
             assert!(
@@ -3757,7 +4230,7 @@ mod tests {
     fn restart_confirmation_rejects_partial_or_wrong_text() {
         for text in ["", "y", "ye", "yess", "no", "д"] {
             let mut app = App::new(Config::default());
-            app.handle_key(key('u'));
+            leader(&mut app, "au");
             type_str(&mut app, text);
             let action = app.handle_key(enter());
             assert!(action.is_none(), "{text:?} must not confirm: {action:?}");
@@ -3771,7 +4244,7 @@ mod tests {
     #[test]
     fn restart_confirmation_supports_backspace_editing() {
         let mut app = App::new(Config::default());
-        app.handle_key(key('u'));
+        leader(&mut app, "au");
         type_str(&mut app, "yex");
         app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
         type_str(&mut app, "s");
@@ -3782,7 +4255,7 @@ mod tests {
     #[test]
     fn restart_confirmation_esc_cancels() {
         let mut app = App::new(Config::default());
-        app.handle_key(key('u'));
+        leader(&mut app, "au");
         type_str(&mut app, "yes");
         let action = app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(action.is_none());
@@ -5408,6 +5881,34 @@ mod tests {
     }
 
     #[test]
+    fn d_deletes_task_under_cursor_and_clamps() {
+        let mut app = note_app_with("- [ ] a\n- [ ] b");
+        app.handle_key(key('j')); // cursor on the last task
+        app.handle_key(key('d'));
+        assert_eq!(proj_note(&app), "- [ ] a");
+        assert_eq!(note_state(&app).cursor, 0, "cursor clamped to last task");
+        assert!(app.dirty, "deletion must persist");
+    }
+
+    #[test]
+    fn visual_select_then_d_deletes_range() {
+        let mut app = note_app_with("# h\n- [ ] a\n- [ ] b\n- [ ] c");
+        app.handle_key(key('V')); // anchor at 0
+        app.handle_key(key('j')); // extend to 1
+        app.handle_key(key('d'));
+        assert_eq!(proj_note(&app), "# h\n- [ ] c");
+        assert!(note_state(&app).anchor.is_none(), "selection cleared");
+    }
+
+    #[test]
+    fn d_on_note_without_tasks_is_noop() {
+        let mut app = note_app_with("just text");
+        app.handle_key(key('d'));
+        assert_eq!(proj_note(&app), "just text");
+        assert!(!app.dirty);
+    }
+
+    #[test]
     fn e_enters_edit_seeded_from_note() {
         let mut app = note_app_with("- [ ] a");
         app.handle_key(key('e'));
@@ -5885,48 +6386,72 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_g_on_worktree_session_opens_promote_modal() {
-        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    fn leader_g_p_on_worktree_session_opens_promote_modal() {
         let mut app = App::new(Config::default());
         let s = make_git_session("wt", "/proj/.worktrees/feat", Some("/proj"), Some("feat"));
         app.sessions = vec![s];
         app.selected = 0;
-        let key = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL);
-        app.handle_key(key);
+        leader(&mut app, "gp");
         assert!(
             matches!(&app.mode, Mode::Git(f) if f.action == GitAction::Promote && f.branch == "feat"),
-            "Ctrl+g on worktree must open Promote modal, got {:?}",
+            "space g p on worktree must open Promote modal, got {:?}",
             app.mode
         );
     }
 
     #[test]
-    fn ctrl_g_on_normal_branch_session_opens_delete_modal() {
-        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    fn leader_g_p_on_root_session_errors() {
         let mut app = App::new(Config::default());
         let s = make_git_session("br", "/proj", None, Some("feature/x"));
         app.sessions = vec![s];
         app.selected = 0;
-        let key = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL);
-        app.handle_key(key);
+        leader(&mut app, "gp");
+        assert!(matches!(app.mode, Mode::List));
         assert!(
-            matches!(&app.mode, Mode::Git(f) if f.action == GitAction::DeleteBranch && f.branch == "feature/x"),
-            "Ctrl+g on normal session must open DeleteBranch modal"
+            app.error.as_deref().unwrap_or("").contains("worktree"),
+            "promote on a root session must explain itself: {:?}",
+            app.error
         );
     }
 
     #[test]
-    fn ctrl_g_on_protected_branch_is_noop() {
-        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    fn leader_g_b_on_normal_branch_session_opens_delete_modal() {
+        let mut app = App::new(Config::default());
+        let s = make_git_session("br", "/proj", None, Some("feature/x"));
+        app.sessions = vec![s];
+        app.selected = 0;
+        leader(&mut app, "gb");
+        assert!(
+            matches!(&app.mode, Mode::Git(f) if f.action == GitAction::DeleteBranch && f.branch == "feature/x"),
+            "space g b on a root session must open DeleteBranch modal"
+        );
+    }
+
+    #[test]
+    fn leader_g_b_on_protected_branch_is_noop() {
         let mut app = App::new(Config::default());
         let s = make_git_session("main-sess", "/proj", None, Some("main"));
         app.sessions = vec![s];
         app.selected = 0;
-        let key = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL);
-        app.handle_key(key);
+        leader(&mut app, "gb");
         assert!(
             matches!(app.mode, Mode::List),
-            "Ctrl+g on protected branch must stay in List"
+            "space g b on protected branch must stay in List"
+        );
+    }
+
+    #[test]
+    fn leader_g_b_on_worktree_session_errors() {
+        let mut app = App::new(Config::default());
+        let s = make_git_session("wt", "/proj/.worktrees/feat", Some("/proj"), Some("feat"));
+        app.sessions = vec![s];
+        app.selected = 0;
+        leader(&mut app, "gb");
+        assert!(matches!(app.mode, Mode::List));
+        assert!(
+            app.error.as_deref().unwrap_or("").contains("promote"),
+            "branch delete on a worktree must point at promote: {:?}",
+            app.error
         );
     }
 
@@ -6171,14 +6696,14 @@ mod tests {
     }
 
     #[test]
-    fn plain_r_still_renames_and_ctrl_r_does_not() {
-        // Plain `r` opens rename even for a Returnable session…
+    fn leader_rename_works_even_when_returnable_and_ctrl_r_does_not_rename() {
+        // `space s r` opens rename even for a Returnable session…
         let mut app = app_with_two_sessions();
         app.sessions[0].worktree_repo = Some("/repo".into());
         app.git_cache.insert("/a".to_string(), None); // Returnable
         app.selected = 0;
-        assert_eq!(app.handle_key(key('r')), None); // rename is modal, not an Action
-        assert!(matches!(app.mode, Mode::Rename(_)), "plain r → rename");
+        assert_eq!(leader(&mut app, "sr"), None); // rename is modal, not an Action
+        assert!(matches!(app.mode, Mode::Rename(_)), "space s r → rename");
 
         // …and Ctrl+R on a NON-returnable session neither returns-to-root nor renames.
         let mut app = app_with_two_sessions(); // no git_cache → Loading
@@ -6529,16 +7054,16 @@ mod tests {
     }
 
     #[test]
-    fn shift_v_opens_detail_only_with_a_verdict() {
+    fn leader_verify_detail_opens_only_with_a_verdict() {
         let mut app = app_with_two_sessions();
         app.selected = 0;
-        // No verdict → no-op.
-        app.handle_key(key('V'));
+        // No verdict → menu closes, nothing opens.
+        leader(&mut app, "sV");
         assert!(matches!(app.mode, Mode::List));
         // Done verdict → opens detail.
         app.verification
             .insert("a".into(), VerificationState::Done(done_verdict(false)));
-        app.handle_key(key('V'));
+        leader(&mut app, "sV");
         assert!(matches!(app.mode, Mode::VerifyDetail(ref n) if n == "a"));
     }
 }

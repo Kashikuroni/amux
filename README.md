@@ -122,13 +122,30 @@ then watch it run in the list. `?` opens the full keybinding help at any time.
 | `Enter` / `o` | Attach to the selected session (`Ctrl‑q` detaches) |
 | `i` | Reply to the agent with free text (drafts persist per session; `Ctrl‑y` copy all, `Ctrl‑x` clear all) |
 | `1`–`9` | Answer a numbered prompt the agent is showing |
-| `d` / `r` / `R` | Kill / rename session / rename project |
-| `u` | Restart all Claude sessions (re-`--resume` after a CLI update) |
+| `d` | Kill the selected session |
+| `e` | Open (or jump back into) an nvim session where the agent works |
+| `v` | Verify the selected session (again to cancel) |
+| `space` | Leader menu — everything rarer lives here (see below) |
 | `J` / `K` | Reorder the selected session |
 | `t` / `T` / `Tab` | Session note / Project note / focus the note |
 | `Ctrl‑k`/`Ctrl‑j`, `PgUp`/`PgDn` | Scroll the preview |
 | `[` `]` `{` `}`, `Ctrl‑←/→` | Resize the split |
 | `/` | Filter sessions · `?` Help · `q` Quit (sessions keep running) |
+
+**Leader menu** (`space`, which‑key style — the panel shows every option as you go)
+
+| Chord | Action |
+|-------|--------|
+| `space g i` | Create a GitHub issue for the project (`gh` CLI) |
+| `space g p` | Promote the worktree session to the repo root |
+| `space g b` | Delete the session's branch |
+| `space g c` | Clean up merged branches |
+| `space s r` / `space s R` | Rename session / rename project |
+| `space s v` / `space s V` | Verify / verification details |
+| `space s e` | nvim in the agent's directory (also bare `e`) |
+| `space a l` | Claude usage log |
+| `space a o` | Other tmux sessions (not managed by am) |
+| `space a u` | Restart all Claude sessions (re-`--resume` after a CLI update) |
 
 **Notes — render mode** (after `Tab` into a note)
 
@@ -138,6 +155,7 @@ then watch it run in the list. `?` opens the full keybinding help at any time.
 | `space` | Toggle the checkbox |
 | `V` then `j`/`k` | Select a range of tasks |
 | `y` | Copy selected tasks to the clipboard as a numbered list |
+| `d` | Delete the task (or the selected range) |
 | `e` | Edit the raw markdown |
 | `c` | Clear the note (asks `y`/`n`) |
 | `Tab` | Defocus (keep the note shown, switch to another) |

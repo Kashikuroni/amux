@@ -64,7 +64,7 @@ pub fn render(f: &mut Frame, app: &App) {
 
 /// The keybinding reference as styled lines (the Keys tab body).
 fn keys_lines() -> Vec<Line<'static>> {
-    let groups: [(&str, &[(&str, &str)]); 4] = [
+    let groups: [(&str, &[(&str, &str)]); 5] = [
         (
             "Navigation",
             &[
@@ -82,15 +82,29 @@ fn keys_lines() -> Vec<Line<'static>> {
                 ("N", "new in project"),
                 ("i", "reply to agent"),
                 ("1-9", "answer prompt"),
-                ("ctrl+r", "return to root (stale cwd)"),
+                ("e", "nvim in agent dir"),
                 ("v", "verify session"),
-                ("V", "verify details"),
+                ("ctrl+r", "return to root (stale cwd)"),
                 ("d", "kill"),
-                ("r", "rename"),
-                ("R", "rename project"),
                 ("shift+tab", "agent mode"),
                 ("J/K", "reorder (project on edge)"),
-                ("u", "restart all Claude sessions"),
+            ],
+        ),
+        (
+            "Leader (space)",
+            &[
+                ("space g i", "github issue"),
+                ("space g p", "promote worktree"),
+                ("space g b", "delete branch"),
+                ("space g c", "cleanup merged branches"),
+                ("space s r", "rename session"),
+                ("space s R", "rename project"),
+                ("space s v", "verify (also: v)"),
+                ("space s V", "verify details"),
+                ("space s e", "nvim (also: e)"),
+                ("space a l", "usage log"),
+                ("space a o", "other tmux sessions"),
+                ("space a u", "restart all Claude sessions"),
             ],
         ),
         (
@@ -104,14 +118,7 @@ fn keys_lines() -> Vec<Line<'static>> {
                 ("auto", "refresh on interval"),
             ],
         ),
-        (
-            "App",
-            &[
-                ("?", "help"),
-                ("L", "usage log"),
-                ("q", "quit (sessions stay)"),
-            ],
-        ),
+        ("App", &[("?", "help"), ("q", "quit (sessions stay)")]),
     ];
     let mut lines: Vec<Line<'static>> = Vec::new();
     for (title, items) in groups {
@@ -170,6 +177,11 @@ mod tests {
             s.contains("verify details"),
             "missing V/verify-details entry:\n{s}"
         );
+        // The leader section spells full chords.
+        assert!(s.contains("Leader"), "leader group:\n{s}");
+        assert!(s.contains("space g i"), "leader issue chord:\n{s}");
+        assert!(s.contains("promote worktree"), "leader promote:\n{s}");
+        assert!(s.contains("space a u"), "leader restart chord:\n{s}");
         // No modifier-key glyphs leak in (arrows are intentionally kept).
         for glyph in ["⇧", "⇥", "↵", "^"] {
             assert!(!s.contains(glyph), "stale key glyph {glyph}:\n{s}");
@@ -184,7 +196,12 @@ mod tests {
         t.draw(|f| render(f, &app)).unwrap();
         let s = buf_to_string(t.backend().buffer());
         assert!(s.contains("CHANGELOG"), "tab strip:\n{s}");
-        // Newest-first: the latest released version heads the changelog.
-        assert!(s.contains("v0.5.1"), "changelog version header:\n{s}");
+        // Newest-first: the top section (a populated [Unreleased] or the latest
+        // release) heads the changelog at scroll 0.
+        let newest = &crate::changelog::parse(crate::changelog::raw())[0].version;
+        assert!(
+            s.contains(&format!("v{newest}")),
+            "newest changelog header v{newest} missing:\n{s}"
+        );
     }
 }

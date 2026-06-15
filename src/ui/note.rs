@@ -42,7 +42,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let hint = match &app.mode {
         Mode::Note(ns) if ns.confirm_clear => "clear note? y / n",
         Mode::Note(ns) if ns.sub == NoteSub::Edit => "edit — esc done",
-        Mode::Note(_) => "j/k · space · V · y · e edit · c clear · tab defocus · esc exit",
+        Mode::Note(_) => "j/k · space · V · y · d del · e edit · c clear · tab defocus · esc exit",
         _ => "Tab to edit",
     };
     f.render_widget(

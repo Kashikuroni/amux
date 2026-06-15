@@ -201,6 +201,109 @@ pub fn list_sessions() -> io::Result<Vec<Session>> {
     Ok(parse_sessions(&String::from_utf8_lossy(&out.stdout)))
 }
 
+/// A tmux session that exists on this machine but is invisible to am: it lives
+/// on a foreign socket (the user's own tmux servers), or sits untagged on the
+/// am socket. Listed read-only by the `O` modal.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ForeignSession {
+    /// Socket (server) name the session lives on, e.g. `default`.
+    pub socket: String,
+    pub name: String,
+    pub dir: String,
+    pub attached: bool,
+    pub windows: u32,
+}
+
+const FOREIGN_FORMAT: &str =
+    "#{session_name}\t#{session_path}\t#{session_attached}\t#{session_windows}\t#{@cm_managed}";
+
+/// Parses `list-sessions` output from socket `socket` into foreign sessions.
+/// On am's own socket (`own_socket`) the managed sessions are skipped — those
+/// are exactly the ones the session list already shows.
+fn parse_foreign_sessions(socket: &str, out: &str, own_socket: bool) -> Vec<ForeignSession> {
+    out.lines()
+        .filter_map(|line| {
+            let mut f = line.splitn(5, '\t');
+            let name = f.next()?.to_string();
+            let dir = f.next()?.to_string();
+            let attached = f
+                .next()
+                .and_then(|s| s.trim().parse::<u32>().ok())
+                .map(|n| n > 0)
+                .unwrap_or(false);
+            let windows = f.next().and_then(|s| s.trim().parse().ok()).unwrap_or(1);
+            let managed = f.next().map(str::trim).unwrap_or("");
+            if own_socket && managed == "1" {
+                return None;
+            }
+            Some(ForeignSession {
+                socket: socket.to_string(),
+                name,
+                dir,
+                attached,
+                windows,
+            })
+        })
+        .collect()
+}
+
+/// The directory tmux keeps its `-L` sockets in (e.g. `/private/tmp/tmux-501`),
+/// resolved by asking am's own server for its socket path — never by starting
+/// the user's default server.
+fn socket_dir() -> Option<std::path::PathBuf> {
+    let out = tmux()
+        .args([
+            "start-server",
+            ";",
+            "display-message",
+            "-p",
+            "#{socket_path}",
+        ])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    std::path::Path::new(&p).parent().map(|d| d.to_path_buf())
+}
+
+/// Every tmux session on this machine that am does not manage: sessions of
+/// other servers (sockets) in the socket dir, plus untagged sessions on am's
+/// own socket. Dead socket files and unreadable servers are skipped silently.
+pub fn list_foreign_sessions() -> Vec<ForeignSession> {
+    let Some(dir) = socket_dir() else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let own = socket();
+    let mut names: Vec<String> = entries
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    let mut out = Vec::new();
+    for name in names {
+        let Ok(o) = Command::new("tmux")
+            .arg("-S")
+            .arg(dir.join(&name))
+            .args(["list-sessions", "-F", FOREIGN_FORMAT])
+            .output()
+        else {
+            continue;
+        };
+        if !o.status.success() {
+            continue; // dead socket file / no server
+        }
+        out.extend(parse_foreign_sessions(
+            &name,
+            &String::from_utf8_lossy(&o.stdout),
+            name == own,
+        ));
+    }
+    out
+}
+
 /// Server options that keep panes sized to the attaching client (avoids stale
 /// redraw artifacts when am's terminal differs from the detached default size).
 fn apply_resize_options() {
@@ -550,6 +653,32 @@ mod tests {
         let s = &parse_sessions(out)[0];
         assert_eq!(s.cwd, "/home/u/proj-a");
         assert_eq!(s.worktree_repo.as_deref(), Some("/r"));
+    }
+
+    #[test]
+    fn foreign_sessions_skip_managed_only_on_own_socket() {
+        // fmt: name \t path \t attached \t windows \t @cm_managed
+        let out = "work\t/home/u/w\t1\t3\t\nmine\t/d\t0\t1\t1\n";
+        // On a foreign socket even @cm_managed sessions are invisible to am → listed.
+        let foreign = parse_foreign_sessions("default", out, false);
+        assert_eq!(foreign.len(), 2);
+        assert_eq!(foreign[0].socket, "default");
+        assert_eq!(foreign[0].name, "work");
+        assert_eq!(foreign[0].dir, "/home/u/w");
+        assert!(foreign[0].attached);
+        assert_eq!(foreign[0].windows, 3);
+        // On am's own socket the managed ones are already in the session list.
+        let own = parse_foreign_sessions("cm", out, true);
+        assert_eq!(own.len(), 1);
+        assert_eq!(own[0].name, "work");
+    }
+
+    #[test]
+    fn foreign_sessions_default_windows_and_detached() {
+        let out = "s\t/d\t0\tx\t\n";
+        let f = parse_foreign_sessions("cm", out, true);
+        assert!(!f[0].attached);
+        assert_eq!(f[0].windows, 1, "unparseable windows falls back to 1");
     }
 
     #[test]

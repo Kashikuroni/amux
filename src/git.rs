@@ -72,6 +72,60 @@ pub fn read(dir: &str) -> Option<GitInfo> {
     })
 }
 
+/// Progress of an async `gh issue create`: stored in the issue modal, with the
+/// terminal stages also sent back over the worker channel.
+#[derive(Debug, Clone, PartialEq)]
+pub enum IssueStage {
+    Creating,
+    /// Created — holds the issue URL printed by `gh`.
+    Done(String),
+    Failed(String),
+}
+
+/// Files a GitHub issue with `gh issue create` in a background thread (it's a
+/// network call — it must not block the UI). `gh` runs in `repo_root` and
+/// infers the repo from its remote; auth/remote problems surface as `Failed`
+/// with gh's stderr.
+pub fn spawn_issue_create(
+    repo_root: String,
+    title: String,
+    body: String,
+) -> std::sync::mpsc::Receiver<IssueStage> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let out = Command::new("gh")
+            .current_dir(&repo_root)
+            .args(["issue", "create", "--title", &title, "--body", &body])
+            .output();
+        let stage = match out {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => IssueStage::Failed(
+                "gh CLI not found — install it (brew install gh), then `gh auth login`".into(),
+            ),
+            Err(e) => IssueStage::Failed(e.to_string()),
+            // gh prints the new issue's URL as the last stdout line.
+            Ok(o) if o.status.success() => IssueStage::Done(
+                String::from_utf8_lossy(&o.stdout)
+                    .trim()
+                    .lines()
+                    .last()
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string(),
+            ),
+            Ok(o) => {
+                let err = String::from_utf8_lossy(&o.stderr).trim().to_string();
+                IssueStage::Failed(if err.is_empty() {
+                    "gh issue create failed".into()
+                } else {
+                    err
+                })
+            }
+        };
+        let _ = tx.send(stage);
+    });
+    rx
+}
+
 /// A background git reader. The UI sends the current session directories; the
 /// worker shells out to `git` off the render thread and returns a `dir → GitInfo`
 /// map, so a slow/large repo never stalls the UI loop.

@@ -118,6 +118,45 @@ fn restart_lifecycle_remain_on_exit_capture_respawn() {
     tmux::set_remain_on_exit(&name, false).expect("remain-on-exit off");
 }
 
+/// `list_foreign_sessions` must surface untagged sessions on the am socket and
+/// skip the managed ones. Other live servers on the machine may contribute
+/// extra entries, so assertions are containment-only. Skipped without tmux.
+#[test]
+fn foreign_sessions_surface_untagged_on_own_socket() {
+    if !tmux::is_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+
+    // Run on a throwaway socket, killed on drop — never touches the live `cm`.
+    let sock = format!("am_fr_it_{}", std::process::id());
+    let _sock = tmux::isolate_socket(&sock);
+
+    let managed = format!("am_fr_m_{}", std::process::id());
+    let stray = format!("am_fr_s_{}", std::process::id());
+    let dir = std::env::temp_dir();
+    let dir_s = dir.to_str().unwrap();
+
+    tmux::new_session(&managed, dir_s, "bash", "bash").expect("managed session");
+    // A session created behind am's back: same socket, no @cm_managed tag.
+    let st = Command::new("tmux")
+        .args(["-L", &sock, "new-session", "-d", "-s", &stray, "-c", dir_s])
+        .arg("bash")
+        .status()
+        .expect("raw tmux new-session");
+    assert!(st.success(), "stray session must be created");
+
+    let foreign = tmux::list_foreign_sessions();
+    assert!(
+        foreign.iter().any(|f| f.name == stray && f.socket == sock),
+        "untagged session on the am socket must be listed: {foreign:?}"
+    );
+    assert!(
+        !foreign.iter().any(|f| f.name == managed),
+        "managed session must not be listed: {foreign:?}"
+    );
+}
+
 /// End-to-end worktree path against real git + tmux: replicates what
 /// `main::create_worktree_session` does (add_worktree → new_worktree_session),
 /// confirms `list_sessions` surfaces `worktree_repo`, then removes the worktree.

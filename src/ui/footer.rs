@@ -49,19 +49,16 @@ fn items_for(mode: &Mode) -> Vec<Item> {
             ("esc", "clear", false),
         ],
         Mode::SelectSession => vec![("1-9", "select session", true), ("esc", "cancel", false)],
+        // Slim on purpose: frequent direct keys only. Everything rarer lives in
+        // the space-leader menu, which documents itself.
         Mode::List => vec![
             ("n", "new", true),
-            ("N", "new in proj", false),
             ("enter", "attach", false),
-            ("J/K", "reorder", false),
-            ("shift+tab", "agent mode", false),
-            ("1-9", "answer", false),
             ("i", "reply", false),
+            ("1-9", "answer", false),
             ("t", "notes", false),
-            ("v", "verify", false),
             ("d", "kill", false),
-            ("r", "rename", false),
-            ("R", "rename proj", false),
+            ("space", "menu", false),
             ("/", "filter", false),
             ("?", "help", false),
             ("q", "quit", false),
@@ -77,6 +74,7 @@ fn items_for(mode: &Mode) -> Vec<Item> {
                 ("space", "toggle", false),
                 ("V", "select", false),
                 ("y", "copy", false),
+                ("d", "delete", false),
                 ("e", "edit", false),
                 ("c", "clear", false),
                 ("tab", "defocus", false),
@@ -98,6 +96,21 @@ fn items_for(mode: &Mode) -> Vec<Item> {
         Mode::Git(_) => vec![("esc", "cancel", true)],
         Mode::VerifyDetail(_) => vec![("esc", "close", true)],
         Mode::WhatsNew => vec![("ctrl+j/k", "scroll", true), ("any key", "close", false)],
+        Mode::ForeignSessions(_) => vec![("any key", "close", true)],
+        Mode::Leader(crate::app::LeaderMenu::Root) => {
+            vec![("g/s/a", "group", true), ("esc", "close", false)]
+        }
+        Mode::Leader(_) => vec![("backspace", "back", true), ("esc", "close", false)],
+        Mode::Issue(form) => match &form.stage {
+            None => vec![
+                ("shift+enter", "create issue", true),
+                ("enter", "next/newline", false),
+                ("tab", "field", false),
+                ("esc", "cancel", false),
+            ],
+            Some(crate::git::IssueStage::Creating) => vec![("esc", "hide", true)],
+            Some(_) => vec![("any key", "close", true)],
+        },
     }
 }
 
@@ -169,24 +182,37 @@ mod tests {
     }
 
     #[test]
-    fn list_footer_spells_keys_without_modifier_glyphs() {
+    fn list_footer_is_slim_and_spells_keys_without_glyphs() {
         // Wide enough that the List hints don't clip before the assertions.
         let app = App::new(Config::default()); // defaults to Mode::List
         let mut t = Terminal::new(TestBackend::new(120, 6)).unwrap();
         t.draw(|f| render(f, f.area(), &app)).unwrap();
         let s = buf_to_string(t.backend().buffer());
-        // shift+letter collapses to the capital letter; named keys are words.
-        assert!(s.contains("N new in proj"), "shift+N → N:\n{s}");
-        assert!(s.contains("J/K reorder"), "shift+JK → J/K:\n{s}");
-        assert!(
-            s.contains("shift+tab agent mode"),
-            "shift+tab spelled:\n{s}"
-        );
         assert!(s.contains("enter attach"), "enter spelled:\n{s}");
+        assert!(s.contains("space menu"), "leader entry point:\n{s}");
+        // Rare ops moved to the leader: their hints must be gone from the footer.
+        for gone in ["rename", "reorder", "agent mode", "verify"] {
+            assert!(!s.contains(gone), "footer must stay slim ({gone}):\n{s}");
+        }
         // The shift/tab/enter glyphs must be gone (arrows are kept elsewhere).
         for glyph in ["⇧", "⇥", "↵"] {
             assert!(!s.contains(glyph), "stale key glyph {glyph}:\n{s}");
         }
+    }
+
+    #[test]
+    fn leader_footer_shows_groups_then_back() {
+        let mut app = App::new(Config::default());
+        app.mode = Mode::Leader(crate::app::LeaderMenu::Root);
+        let mut t = Terminal::new(TestBackend::new(120, 6)).unwrap();
+        t.draw(|f| render(f, f.area(), &app)).unwrap();
+        let s = buf_to_string(t.backend().buffer());
+        assert!(s.contains("g/s/a group"), "root hints:\n{s}");
+
+        app.mode = Mode::Leader(crate::app::LeaderMenu::Git);
+        t.draw(|f| render(f, f.area(), &app)).unwrap();
+        let s = buf_to_string(t.backend().buffer());
+        assert!(s.contains("backspace back"), "group hints:\n{s}");
     }
 
     #[test]

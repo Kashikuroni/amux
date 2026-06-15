@@ -6,6 +6,35 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-06-15
+
+### Added
+- **Leader menu**: `space` opens a which-key style menu with three groups —
+  `space g` git (issue / promote / delete branch / cleanup), `space s` session
+  (rename / rename project / verify / details / nvim), `space a` app (usage
+  log / other tmux sessions / restart all Claude). The panel spells out every
+  option at each step; `backspace` climbs back up, `esc` closes.
+- **GitHub issues** (`space g i`): an issue composer (title + body) for the
+  selected session's project. The issue is filed with the `gh` CLI in the
+  background and the new issue's URL is copied to the clipboard.
+- **Other tmux sessions** (`space a o`): lists the tmux sessions am does not
+  manage — the user's own servers (e.g. `default`) plus untagged sessions on the
+  am socket — with socket, window count, attach state, and directory.
+- **nvim** (`e`): opens (or jumps back into) a `<session>-nvim` tmux session in
+  the directory the selected agent is working in right now; it groups with the
+  project in the list.
+- Notes: `d` deletes the task under the cursor (or the whole `V` selection) in
+  the rendered note view.
+
+### Changed
+- Hotkeys reorganized around the leader so frequent commands stay one keypress
+  away while the long tail is discoverable. Frequent keys remain direct (`n`,
+  `enter`/`o`, `i`, `1`–`9`, `t`/`T`, `d`, `v`, `e`); the rarer direct chords
+  were retired and live under `space`: `I`→`space g i`, `ctrl+g`→`space g p`,
+  `ctrl+l`→`space g c`, `r`→`space s r`, `R`→`space s R`, `V`→`space s V`,
+  `L`→`space a l`, `O`→`space a o`, `u`→`space a u`. The footer now shows only
+  the frequent set plus `space menu`.
+
 ## [0.5.1] - 2026-06-09
 
 ### Added

@@ -115,6 +115,25 @@ pub fn toggle(buf: &mut String, ord: usize) {
     *buf = lines.join("\n");
 }
 
+/// Delete the lines of the tasks whose ordinals (0-based) are in `ords`.
+/// Non-task lines are untouched; unknown ordinals are ignored.
+pub fn remove_tasks(buf: &mut String, ords: &[usize]) {
+    let mut seen = 0;
+    let lines: Vec<&str> = buf
+        .split('\n')
+        .filter(|line| {
+            if parse_task(line).is_some() {
+                let keep = !ords.contains(&seen);
+                seen += 1;
+                keep
+            } else {
+                true
+            }
+        })
+        .collect();
+    *buf = lines.join("\n");
+}
+
 /// Render the given task ordinals as a numbered list (`"1. text\n2. text"`),
 /// stripping the `- [ ]` prefix. Includes every requested task regardless of
 /// done state, renumbered from 1 in the given order. Unknown ordinals skipped.
@@ -208,6 +227,22 @@ mod tests {
         let mut buf = "  - [ ] indented".to_string();
         toggle(&mut buf, 0);
         assert_eq!(buf, "  - [x] indented");
+    }
+
+    #[test]
+    fn remove_tasks_deletes_only_the_given_ordinals() {
+        let mut buf = "# h\n- [ ] a\ntext\n- [x] b\n- [ ] c".to_string();
+        remove_tasks(&mut buf, &[1]);
+        assert_eq!(buf, "# h\n- [ ] a\ntext\n- [ ] c");
+        remove_tasks(&mut buf, &[0, 1]);
+        assert_eq!(buf, "# h\ntext");
+    }
+
+    #[test]
+    fn remove_tasks_ignores_out_of_range_ordinals() {
+        let mut buf = "- [ ] only".to_string();
+        remove_tasks(&mut buf, &[5]);
+        assert_eq!(buf, "- [ ] only");
     }
 
     #[test]

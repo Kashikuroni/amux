@@ -2,9 +2,12 @@ mod empty;
 mod error;
 mod footer;
 mod header;
+mod leader;
 mod markdown;
+mod modal_foreign;
 mod modal_git;
 mod modal_help;
+mod modal_issue;
 mod modal_kill;
 mod modal_new;
 mod modal_update;
@@ -68,6 +71,9 @@ pub fn draw(f: &mut Frame, app: &App) {
         Mode::Git(form) => modal_git::render(f, form),
         Mode::VerifyDetail(name) => modal_verify::render(f, app, name),
         Mode::WhatsNew => modal_whatsnew::render(f, app),
+        Mode::ForeignSessions(sessions) => modal_foreign::render(f, sessions),
+        Mode::Issue(form) => modal_issue::render(f, form),
+        Mode::Leader(menu) => leader::render(f, *menu),
     }
 }
 

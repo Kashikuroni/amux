@@ -229,6 +229,7 @@ fn run(
     let start = Instant::now();
     let mut last_refresh = Instant::now();
     let mut install_rx: Option<mpsc::Receiver<am::update::UpdateStage>> = None;
+    let mut issue_rx: Option<mpsc::Receiver<am::git::IssueStage>> = None;
     // Draw once on entry; thereafter only when something changed (F2).
     let mut needs_redraw = true;
     // When the selection changes, capture the new preview after it settles.
@@ -254,6 +255,12 @@ fn run(
         if let Some(rx) = &install_rx {
             while let Ok(stage) = rx.try_recv() {
                 app.set_update_stage(stage);
+                needs_redraw = true;
+            }
+        }
+        if let Some(rx) = &issue_rx {
+            while let Ok(stage) = rx.try_recv() {
+                app.set_issue_stage(stage);
                 needs_redraw = true;
             }
         }
@@ -367,7 +374,7 @@ fn run(
                 let action = app.handle_key(key);
                 let nav_changed = action.is_none() && app.selected_name() != prev_sel;
                 if let Some(action) = action {
-                    handle_action(terminal, app, action, &mut install_rx)?;
+                    handle_action(terminal, app, action, &mut install_rx, &mut issue_rx)?;
                 }
                 // Persist split width / session order if a key changed them.
                 if app.dirty {
@@ -474,11 +481,35 @@ fn run(
     Ok(())
 }
 
+/// Hands the terminal over to tmux for `name` and takes it back on detach.
+/// Shared by Attach and OpenEditor.
+fn attach_and_restore(terminal: &mut Term, app: &mut App, name: &str) -> io::Result<()> {
+    restore_terminal(terminal)?;
+    if let Err(e) = tmux::attach_session(name) {
+        app.error = Some(e.to_string());
+    }
+    enable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        EnterAlternateScreen,
+        EnableBracketedPaste,
+        EnableMouseCapture
+    )?;
+    enable_key_disambiguation(terminal.backend_mut());
+    terminal.clear()?;
+    // Attaching reset the window to the full client size; force the next
+    // refresh to re-fit it to the preview width.
+    app.preview_sized = None;
+    app.refresh();
+    Ok(())
+}
+
 fn handle_action(
     terminal: &mut Term,
     app: &mut App,
     action: Action,
     install_rx: &mut Option<mpsc::Receiver<am::update::UpdateStage>>,
+    issue_rx: &mut Option<mpsc::Receiver<am::git::IssueStage>>,
 ) -> io::Result<()> {
     match action {
         Action::Attach(name) => {
@@ -487,24 +518,7 @@ fn handle_action(
                     Some("detach from current tmux (Ctrl-B D) before attaching".to_string());
                 return Ok(());
             }
-            // Hand the terminal over to tmux, then take it back.
-            restore_terminal(terminal)?;
-            if let Err(e) = tmux::attach_session(&name) {
-                app.error = Some(e.to_string());
-            }
-            enable_raw_mode()?;
-            execute!(
-                terminal.backend_mut(),
-                EnterAlternateScreen,
-                EnableBracketedPaste,
-                EnableMouseCapture
-            )?;
-            enable_key_disambiguation(terminal.backend_mut());
-            terminal.clear()?;
-            // Attaching reset the window to the full client size; force the next
-            // refresh to re-fit it to the preview width.
-            app.preview_sized = None;
-            app.refresh();
+            attach_and_restore(terminal, app, &name)?;
         }
         Action::Create {
             name,
@@ -896,6 +910,53 @@ fn handle_action(
                 app.error = Some(errors.join(" | "));
             }
             app.refresh();
+        }
+        Action::OpenEditor { name } => {
+            if tmux::in_tmux() {
+                app.error =
+                    Some("detach from current tmux (Ctrl-B D) before attaching".to_string());
+                return Ok(());
+            }
+            let Some(src) = app.sessions.iter().find(|s| s.name == name).cloned() else {
+                return Ok(());
+            };
+            // `e` on the editor session itself just re-enters it.
+            let editor_name = if src.agent == "nvim" {
+                src.name.clone()
+            } else {
+                format!("{}-nvim", src.name)
+            };
+            if !app.sessions.iter().any(|s| s.name == editor_name) {
+                // `nvim .` so it opens the directory (netrw file explorer) rather
+                // than an empty start screen. `.` resolves against the pane cwd,
+                // which `new_session`'s `-c <dir>` pins to the agent's cwd below.
+                let cmd = resolve_agent_command_for_tmux("nvim .");
+                // The editor opens where the agent works *now* (live cwd). Tag
+                // it with the project root whenever that differs (worktree or a
+                // cd'd-into subdir) so it groups with the project in the list.
+                let root = am::app::session_root(&src).to_string();
+                let result = if src.cwd.trim_end_matches('/') != root {
+                    tmux::new_worktree_session(&editor_name, &src.cwd, &cmd, "nvim", &root)
+                } else {
+                    tmux::new_session(&editor_name, &src.cwd, &cmd, "nvim")
+                };
+                if let Err(e) = result {
+                    app.error = Some(format!("nvim: {e}"));
+                    return Ok(());
+                }
+                // Not persisted (unlike agents): after a reboot an empty nvim
+                // would be pointless — sessions are rebuilt for agents only.
+            }
+            attach_and_restore(terminal, app, &editor_name)?;
+        }
+        Action::CreateIssue {
+            repo_root,
+            title,
+            body,
+        } => {
+            // Overwriting a still-live receiver is fine: the old thread's send
+            // fails silently and the thread exits.
+            *issue_rx = Some(am::git::spawn_issue_create(repo_root, title, body));
         }
     }
     Ok(())
