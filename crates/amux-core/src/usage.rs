@@ -77,7 +77,7 @@ pub fn format_log_plain(entries: &VecDeque<LogEntry>) -> String {
 
 /// Pretty-prints a JSON string with 2-space indent. Falls back to the raw
 /// string if it isn't valid JSON.
-pub(crate) fn pretty_json(raw: &str) -> String {
+pub fn pretty_json(raw: &str) -> String {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return String::new();

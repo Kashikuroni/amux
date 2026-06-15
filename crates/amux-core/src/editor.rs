@@ -68,7 +68,7 @@ impl TextArea {
     }
 
     /// Start/end character index of the logical line the cursor sits on.
-    pub(crate) fn line_bounds(&self) -> (usize, usize) {
+    pub fn line_bounds(&self) -> (usize, usize) {
         let chars: Vec<char> = self.buffer.chars().collect();
         let mut start = self.cursor.min(chars.len());
         while start > 0 && chars[start - 1] != '\n' {

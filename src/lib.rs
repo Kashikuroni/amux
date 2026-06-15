@@ -1,18 +1,21 @@
+// Pure business logic — provided by amux-core
+pub use amux_core::browse;
+pub use amux_core::changelog;
+pub use amux_core::clip;
+pub use amux_core::config;
+pub use amux_core::doctor;
+pub use amux_core::editor;
+pub use amux_core::git;
+pub use amux_core::note;
+pub use amux_core::spinner;
+pub use amux_core::state;
+pub use amux_core::timeutil;
+pub use amux_core::tmux;
+pub use amux_core::update;
+pub use amux_core::verify;
+
+// TUI-specific (still in src/)
 pub mod app;
-pub mod browse;
-pub mod changelog;
-pub mod clip;
-pub mod config;
-pub mod doctor;
-pub mod editor;
-pub mod git;
-pub mod note;
-pub mod spinner;
-pub mod state;
 pub mod theme;
-pub mod timeutil;
-pub mod tmux;
 pub mod ui;
-pub mod update;
-pub mod usage;
-pub mod verify;
+pub mod usage; // src/usage.rs — ratatui rendering + re-exports amux_core::usage::*
