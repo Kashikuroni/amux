@@ -13,6 +13,7 @@ name = "amux"
 version = "0.6.0"
 dependencies = [
  "amux-core",
+ "amux-tui",
  "amux-verify",
  "ansi-to-tui",
  "crossterm",

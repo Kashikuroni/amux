@@ -41,6 +41,7 @@ ansi-to-tui = "7"
 pulldown-cmark = { version = "0.12", default-features = false }
 amux-verify = { path = "crates/amux-verify" }
 amux-core = { path = "crates/amux-core" }
+amux-tui = { path = "crates/amux-tui" }
 
 [workspace]
 members = ["crates/amux-verify", "crates/amux-core", "crates/amux-tui"]
