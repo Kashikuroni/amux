@@ -1,1 +1,14 @@
-// populated in subsequent tasks
+pub mod browse;
+pub mod changelog;
+pub mod clip;
+pub mod config;
+pub mod doctor;
+pub mod editor;
+pub mod git;
+pub mod note;
+pub mod spinner;
+pub mod state;
+pub mod timeutil;
+pub mod tmux;
+pub mod update;
+pub mod verify;
